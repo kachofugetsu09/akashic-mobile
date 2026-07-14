@@ -14,6 +14,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 
 data class SocketCandidateId(val generation: Long, val ordinal: Int)
 
@@ -129,6 +130,14 @@ class RealtimeWebSocketClient internal constructor(
             current.winner?.let(current.sockets::get)
         } ?: return false
         return socket.send(ProtocolCodec.encode(envelope))
+    }
+
+    fun sendBinary(payload: ByteString): Boolean {
+        val socket = synchronized(lock) {
+            val current = state ?: return false
+            current.winner?.let(current.sockets::get)
+        } ?: return false
+        return socket.send(payload)
     }
 
     /** 拒绝尚未完成认证的候选，不影响已提升的活动连接。 */

@@ -2,6 +2,8 @@ package com.akashic.mobile.data.local
 
 import androidx.room.withTransaction
 import com.akashic.mobile.data.realtime.ProtocolCodec
+import com.akashic.mobile.data.realtime.AttachmentProgressPayload
+import com.akashic.mobile.data.realtime.AttachmentReadyPayload
 import com.akashic.mobile.data.realtime.HistoryPagePayload
 import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
@@ -58,6 +60,7 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         conversation: ConversationEntity,
         message: MessageEntity,
         command: OutboxCommandEntity,
+        attachmentIds: List<String>,
     ) {
         require(message.sessionId == conversation.sessionId) { "Message and conversation session mismatch" }
         require(command.serverId == conversation.serverId) { "Outbox and conversation server mismatch" }
@@ -66,6 +69,9 @@ class LocalDeliveryStore(private val database: AppDatabase) {
             database.conversations().upsert(conversation)
             database.messages().upsert(message)
             database.outbox().enqueue(command)
+            if (attachmentIds.isNotEmpty()) {
+                check(database.attachmentTransfers().markSending(attachmentIds, message.updatedAt) == attachmentIds.size)
+            }
         }
     }
 
@@ -122,16 +128,25 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         check(changed == 1) { "Outbox command is not in flight: $commandId" }
     }
 
-    suspend fun acknowledgeOutbox(commandId: String, updatedAt: Long) {
+    suspend fun acknowledgeOutbox(commandId: String, updatedAt: Long): List<String> =
         database.withTransaction {
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
             val changed = database.messages().updateDelivery(payload.clientMessageId, "sent", updatedAt)
             check(changed == 1) { "Outbox message is missing: ${payload.clientMessageId}" }
+            if (payload.mediaRefs.isNotEmpty()) {
+                payload.mediaRefs.forEach { attachmentId ->
+                    val transfer = requireNotNull(database.attachmentTransfers().get(attachmentId)) {
+                        "Outbox attachment is missing: $attachmentId"
+                    }
+                    check(transfer.state == "sending") { "Outbox attachment is not sending: $attachmentId" }
+                }
+                check(database.attachmentTransfers().markSent(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+            }
             check(database.outbox().deleteAcknowledged(commandId) == 1) { "Outbox command disappeared: $commandId" }
+            payload.mediaRefs
         }
-    }
 
     suspend fun failOutbox(commandId: String, updatedAt: Long): String =
         database.withTransaction {
@@ -139,6 +154,9 @@ class LocalDeliveryStore(private val database: AppDatabase) {
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
             check(database.messages().updateDelivery(payload.clientMessageId, "failed", updatedAt) == 1)
+            if (payload.mediaRefs.isNotEmpty()) {
+                check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+            }
             check(database.outbox().deleteAcknowledged(commandId) == 1)
             payload.sessionId
         }
@@ -170,8 +188,51 @@ class LocalDeliveryStore(private val database: AppDatabase) {
             "message.final" -> finalizeMessage(envelope, updatedAt)
             "turn.interrupted" -> interruptTurn(envelope, updatedAt)
             "message.proactive" -> insertProactive(envelope, updatedAt)
+            "attachment.progress" -> applyAttachmentProgress(envelope, updatedAt)
+            "attachment.ready" -> applyAttachmentReady(envelope, updatedAt)
             else -> Unit
         }
+    }
+
+    private suspend fun applyAttachmentProgress(envelope: WireEnvelope, updatedAt: Long) {
+        val payload = ProtocolCodec.decodePayload<AttachmentProgressPayload>(envelope.payload)
+        val transfer = requireNotNull(database.attachmentTransfers().get(payload.attachmentId)) {
+            "Attachment progress references an unknown transfer"
+        }
+        require(payload.sizeBytes == transfer.sizeBytes) { "Attachment progress size mismatch" }
+        require(payload.transferredBytes in transfer.transferredBytes..transfer.sizeBytes) {
+            "Attachment progress moved backwards or exceeded size"
+        }
+        val state = if (payload.transferredBytes == transfer.sizeBytes) "finishing" else "uploading"
+        check(
+            database.attachmentTransfers().updateState(
+                attachmentId = transfer.attachmentId,
+                transferredBytes = payload.transferredBytes,
+                state = state,
+                updatedAt = updatedAt,
+            ) == 1,
+        )
+    }
+
+    private suspend fun applyAttachmentReady(envelope: WireEnvelope, updatedAt: Long) {
+        val payload = ProtocolCodec.decodePayload<AttachmentReadyPayload>(envelope.payload)
+        val transfer = requireNotNull(database.attachmentTransfers().get(payload.attachmentId)) {
+            "Attachment ready references an unknown transfer"
+        }
+        require(
+            payload.filename == transfer.filename &&
+                payload.contentType == transfer.contentType &&
+                payload.sizeBytes == transfer.sizeBytes &&
+                payload.sha256 == transfer.sha256
+        ) { "Attachment ready metadata mismatch" }
+        check(
+            database.attachmentTransfers().updateState(
+                attachmentId = transfer.attachmentId,
+                transferredBytes = transfer.sizeBytes,
+                state = "ready",
+                updatedAt = updatedAt,
+            ) == 1,
+        )
     }
 
     private suspend fun applySessionList(serverId: String, envelope: WireEnvelope) {

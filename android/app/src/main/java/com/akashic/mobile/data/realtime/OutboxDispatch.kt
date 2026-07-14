@@ -18,13 +18,15 @@ internal fun preparePendingMessageSend(
     sessionId: String,
     body: String,
     now: Long,
+    mediaRefs: List<String> = emptyList(),
+    displayText: String = body,
     clientMessageId: String = Ulid.next(now),
 ): PendingMessageSend {
     val payload = MessageSendPayload(
         clientMessageId = clientMessageId,
         sessionId = sessionId,
         text = body,
-        mediaRefs = emptyList(),
+        mediaRefs = mediaRefs,
         clientCreatedAt = Instant.ofEpochMilli(now).toString(),
     )
     val envelope = WireEnvelope(
@@ -42,7 +44,7 @@ internal fun preparePendingMessageSend(
             clientMessageId = clientMessageId,
             sessionId = sessionId,
             role = "user",
-            text = body,
+            text = displayText,
             deliveryState = "pending",
             createdAt = now,
             updatedAt = now,

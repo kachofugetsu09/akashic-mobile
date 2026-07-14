@@ -1,6 +1,8 @@
 package com.akashic.mobile.data.realtime
 
+import android.net.Uri
 import android.os.Build
+import com.akashic.mobile.data.local.AttachmentDraftStore
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
@@ -60,14 +62,16 @@ internal const val MAX_MESSAGE_TEXT_LENGTH = 65_536
 internal fun outgoingMessageTextLength(text: String): Int =
     text.codePointCount(0, text.length)
 
-internal fun validateOutgoingMessageText(text: String): String {
+internal fun validateOutgoingMessageLength(text: String): String {
     val body = text.trim()
-    require(body.isNotEmpty()) { "Message text is empty" }
     require(outgoingMessageTextLength(body) <= MAX_MESSAGE_TEXT_LENGTH) {
         "Message text exceeds $MAX_MESSAGE_TEXT_LENGTH characters"
     }
     return body
 }
+
+internal fun validateOutgoingMessageText(text: String): String =
+    validateOutgoingMessageLength(text).also { require(it.isNotEmpty()) { "Message text is empty" } }
 
 internal enum class TerminalProtocolAction {
     FAIL_ACTIVE_COMMAND,
@@ -155,6 +159,7 @@ internal fun shouldClearRejectedSession(
 class RealtimeSession(
     private val database: AppDatabase,
     private val deliveryStore: LocalDeliveryStore,
+    private val attachmentDrafts: AttachmentDraftStore,
     private val preferences: AppPreferences,
     private val deviceKeys: DeviceKeyStore,
     private val scope: CoroutineScope,
@@ -177,6 +182,16 @@ class RealtimeSession(
     private val mutex = Mutex()
     private val socket = RealtimeWebSocketClient(this, allowInsecureTransport)
     private val outboxFlight = SingleFlightOutbox()
+    private val uploads = AttachmentUploadCoordinator(
+        dao = database.attachmentTransfers(),
+        sourceFile = attachmentDrafts::fileFor,
+        sendCommand = ::sendAttachmentCommand,
+        sendBinary = socket::sendBinary,
+        onTransportUnavailable = ::scheduleReconnect,
+        onUploadFailed = { message ->
+            mutableState.value = mutableState.value.copy(errorMessage = message)
+        },
+    )
     private val mutableState = MutableStateFlow(MobileSessionState())
     val state: StateFlow<MobileSessionState> = mutableState.asStateFlow()
 
@@ -202,6 +217,7 @@ class RealtimeSession(
 
     fun start() {
         scope.launch {
+            attachmentDrafts.reconcile()
             mutex.withLock {
                 val settings = preferences.settings.first()
                 profile = settings.currentServerId?.let { database.serverProfiles().get(it) }
@@ -284,27 +300,98 @@ class RealtimeSession(
         }
     }
 
+    /** 把系统文档复制为可跨重启续传的附件草稿。 */
+    fun addAttachments(uris: List<Uri>) {
+        scope.launch {
+            try {
+                val target = mutex.withLock {
+                    val currentProfile = requireNotNull(profile) { "Pair a server before attaching" }
+                    currentProfile.serverId to ensureCurrentSession(currentProfile)
+                }
+                attachmentDrafts.import(
+                    serverId = target.first,
+                    sessionId = target.second,
+                    uris = uris,
+                    now = System.currentTimeMillis(),
+                )
+                mutex.withLock {
+                    if (mutableState.value.connection.phase == ConnectionPhase.READY) {
+                        uploads.resumeIfIdle(target.first)
+                    }
+                }
+            } catch (error: IllegalArgumentException) {
+                mutex.withLock {
+                    mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                }
+            } catch (error: java.io.IOException) {
+                mutex.withLock {
+                    mutableState.value = mutableState.value.copy(errorMessage = "读取附件失败：${error.message}")
+                }
+            } catch (error: SecurityException) {
+                mutex.withLock {
+                    mutableState.value = mutableState.value.copy(errorMessage = "没有读取附件的权限")
+                }
+            }
+        }
+    }
+
+    fun removeAttachment(attachmentId: String) {
+        scope.launch {
+            try {
+                attachmentDrafts.remove(attachmentId)
+            } catch (error: IllegalStateException) {
+                mutex.withLock {
+                    mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                }
+            }
+        }
+    }
+
+    fun retryAttachment(attachmentId: String) {
+        scope.launch {
+            attachmentDrafts.retry(attachmentId, System.currentTimeMillis())
+            mutex.withLock {
+                profile?.serverId?.let { serverId ->
+                    if (mutableState.value.connection.phase == ConnectionPhase.READY) {
+                        uploads.resumeIfIdle(serverId)
+                    }
+                }
+            }
+        }
+    }
+
     /** 创建本地消息和 outbox 命令，并在链路可用时立即发送。 */
     fun sendMessage(text: String) {
-        val body = validateOutgoingMessageText(text)
+        val body = validateOutgoingMessageLength(text)
         scope.launch {
             mutex.withLock {
                 // 1. 确定当前手机会话
                 val currentProfile = requireNotNull(profile) { "Pair a server before sending" }
-                val sessionId = mutableState.value.currentSessionId
-                    ?: "mobile:${UUID.randomUUID()}".also {
-                        preferences.selectSession(it)
-                        mutableState.value = mutableState.value.copy(currentSessionId = it)
-                    }
+                val sessionId = ensureCurrentSession(currentProfile)
                 require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                val attachments = database.attachmentTransfers().drafts(currentProfile.serverId, sessionId)
+                require(body.isNotEmpty() || attachments.isNotEmpty()) { "消息和附件不能同时为空" }
+                require(attachments.all { it.state == "ready" }) { "请等待附件上传完成" }
 
                 // 2. 持久化消息和可重放命令
                 val now = System.currentTimeMillis()
-                val pending = preparePendingMessageSend(currentProfile.serverId, sessionId, body, now)
+                val attachmentIds = attachments.map { it.attachmentId }
+                val displayText = body.ifBlank {
+                    attachments.joinToString("、", prefix = "附件：") { it.filename }
+                }
+                val pending = preparePendingMessageSend(
+                    serverId = currentProfile.serverId,
+                    sessionId = sessionId,
+                    body = body,
+                    now = now,
+                    mediaRefs = attachmentIds,
+                    displayText = displayText,
+                )
                 deliveryStore.enqueueMessage(
-                    conversation = conversationForMessage(currentProfile, sessionId, body, now),
+                    conversation = conversationForMessage(currentProfile, sessionId, displayText, now),
                     message = pending.message,
                     command = pending.command,
+                    attachmentIds = attachmentIds,
                 )
                 if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
             }
@@ -610,12 +697,16 @@ class RealtimeSession(
                         }
                     }
                     "history.page" -> requestNextHistoryPage(envelope)
+                    "attachment.progress" -> uploads.onProgress(
+                        ProtocolCodec.decodePayload(envelope.payload),
+                    )
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),
                     )
                 }
             }
             WireKind.REPLY -> {
+                if (uploads.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
                 if (id in pendingSyncCommands && envelope.type.endsWith(".error")) {
                     val pending = requireNotNull(pendingSyncCommands.remove(id))
@@ -629,7 +720,9 @@ class RealtimeSession(
                 when (envelope.type) {
                     "message.send.ok" -> {
                         require(id == outboxFlight.commandId) { "收到非活动 outbox 命令的 reply: $id" }
-                        deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
+                        attachmentDrafts.deleteSentFiles(
+                            deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis()),
+                        )
                         outboxFlight.complete(id)
                         flushOutbox()
                     }
@@ -787,7 +880,30 @@ class RealtimeSession(
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
         )
+        uploads.onConnectionReady(requireNotNull(profile).serverId)
         flushOutbox()
+    }
+
+    private fun sendAttachmentCommand(
+        type: String,
+        id: String,
+        sessionId: String,
+        payload: kotlinx.serialization.json.JsonObject,
+    ): Boolean {
+        val epoch = activeEpoch ?: return false
+        val candidate = activeCandidate ?: return false
+        return socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = type,
+                id = id,
+                connectionEpoch = epoch,
+                sessionId = sessionId,
+                payload = payload,
+            ),
+        )
     }
 
     private suspend fun flushOutbox() {
@@ -908,6 +1024,19 @@ class RealtimeSession(
         return ConversationEntity(sessionId, currentProfile.serverId, title, now)
     }
 
+    private suspend fun ensureCurrentSession(currentProfile: ServerProfileEntity): String {
+        val existing = mutableState.value.currentSessionId
+        if (existing != null) return existing
+        val sessionId = "mobile:${UUID.randomUUID()}"
+        val now = System.currentTimeMillis()
+        database.conversations().upsert(
+            ConversationEntity(sessionId, currentProfile.serverId, "新对话", now),
+        )
+        preferences.selectSession(sessionId)
+        mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+        return sessionId
+    }
+
     private fun scheduleReconnect(message: String) {
         cancelPhaseDeadline()
         if (reconnectJob?.isActive == true) return
@@ -920,6 +1049,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
+        uploads.onDisconnected()
         retryCount += 1
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(
@@ -955,6 +1085,7 @@ class RealtimeSession(
         ackJob?.cancel()
         ackJob = null
         pendingAckCount = 0
+        uploads.onDisconnected()
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.CLOSED),
             errorMessage = "协议不兼容（$code），请升级电脑端或手机客户端",
@@ -971,6 +1102,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
+        uploads.onDisconnected()
     }
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(
@@ -991,7 +1123,7 @@ class RealtimeSession(
         map { ServerEndpoint(it, emptyList(), EndpointRoute.TUNNEL) }
 
     private companion object {
-        val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive")
+        val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive", "attachments-v1")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
         const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
