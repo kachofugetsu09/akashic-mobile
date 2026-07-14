@@ -221,6 +221,28 @@ class RealtimeSession(
         }
     }
 
+    /** 暂停当前连接并进入扫码页，保留设备密钥、会话和本地消息。 */
+    fun restartPairing() {
+        scope.launch {
+            mutex.withLock {
+                reconnectJob?.cancel()
+                reconnectJob = null
+                ackJob?.cancel()
+                ackJob = null
+                socket.close(reason = "user requested re-pairing")
+                pendingPairing = null
+                profile = null
+                resetGenerationState()
+                preferences.selectServer(null)
+                mutableState.value = MobileSessionState(
+                    initialized = true,
+                    scanGeneration = mutableState.value.scanGeneration + 1,
+                    currentSessionId = mutableState.value.currentSessionId,
+                )
+            }
+        }
+    }
+
     /** 创建本地消息和 outbox 命令，并在链路可用时立即发送。 */
     fun sendMessage(text: String) {
         val body = validateOutgoingMessageText(text)
@@ -470,6 +492,7 @@ class RealtimeSession(
             connection = ConnectionState(phase = ConnectionPhase.CONNECTING),
             hasProfile = true,
             serverId = saved.serverId,
+            currentSessionId = mutableState.value.currentSessionId,
         )
         socket.close(reason = "pairing accepted; reconnecting with device proof")
         connectProfile(saved)
@@ -534,8 +557,10 @@ class RealtimeSession(
                             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
                         )
                         cancelPhaseDeadline()
-                        flushOutbox()
+                        requestSessionList()
                     }
+                    "session.list" -> requestMissingHistory(envelope)
+                    "history.page" -> requestNextHistoryPage(envelope)
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),
                     )
@@ -546,27 +571,38 @@ class RealtimeSession(
             }
             WireKind.REPLY -> {
                 val id = requireNotNull(envelope.id)
-                require(id == outboxFlight.commandId) { "收到非活动 outbox 命令的 reply: $id" }
-                if (envelope.type.endsWith(".ok")) {
-                    deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
-                    outboxFlight.complete(id)
-                    flushOutbox()
-                } else if (envelope.type.endsWith(".error")) {
-                    val code = envelope.payload["code"]?.jsonPrimitive?.contentOrNull
-                    val message = envelope.payload["message"]?.jsonPrimitive?.contentOrNull ?: "消息发送失败"
-                    when (messageSendFailureDisposition(code)) {
-                        OutboxFailureDisposition.RETRY_ORIGINAL -> {
-                            deliveryStore.retryOutbox(id)
-                            outboxFlight.complete(id)
-                            check(socket.closeActive(candidateId, 1012, "command outcome unknown"))
-                            scheduleReconnect(message)
+                when (envelope.type) {
+                    "message.send.ok" -> {
+                        require(id == outboxFlight.commandId) { "收到非活动 outbox 命令的 reply: $id" }
+                        deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
+                        outboxFlight.complete(id)
+                        flushOutbox()
+                    }
+                    "message.send.error" -> {
+                        require(id == outboxFlight.commandId) { "收到非活动 outbox 命令的 reply: $id" }
+                        val code = envelope.payload["code"]?.jsonPrimitive?.contentOrNull
+                        val message = envelope.payload["message"]?.jsonPrimitive?.contentOrNull ?: "消息发送失败"
+                        when (messageSendFailureDisposition(code)) {
+                            OutboxFailureDisposition.RETRY_ORIGINAL -> {
+                                deliveryStore.retryOutbox(id)
+                                outboxFlight.complete(id)
+                                check(socket.closeActive(candidateId, 1012, "command outcome unknown"))
+                                scheduleReconnect(message)
+                            }
+                            OutboxFailureDisposition.FAIL -> {
+                                deliveryStore.failOutbox(id, System.currentTimeMillis())
+                                outboxFlight.complete(id)
+                                mutableState.value = mutableState.value.copy(errorMessage = message)
+                                flushOutbox()
+                            }
                         }
-                        OutboxFailureDisposition.FAIL -> {
-                            deliveryStore.failOutbox(id, System.currentTimeMillis())
-                            outboxFlight.complete(id)
-                            mutableState.value = mutableState.value.copy(errorMessage = message)
-                            flushOutbox()
-                        }
+                    }
+                    "session.list.ok", "history.get.ok" -> Unit
+                    else -> {
+                        require(envelope.type.endsWith(".error")) { "Unexpected reply type: ${envelope.type}" }
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "历史同步失败",
+                        )
                     }
                 }
             }
@@ -575,6 +611,61 @@ class RealtimeSession(
         if (mutableState.value.connection.phase == ConnectionPhase.SYNCING) {
             armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.SYNC)
         }
+    }
+
+    private fun requestSessionList() {
+        sendSyncCommand(type = "session.list", sessionId = null, payload = buildJsonObject {})
+    }
+
+    private suspend fun requestMissingHistory(envelope: WireEnvelope) {
+        val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
+        payload.items.forEach { session ->
+            if (session.messageCount > 0 && database.messages().countForSession(session.sessionId) == 0) {
+                requestHistoryPage(session.sessionId, page = 1)
+            }
+        }
+    }
+
+    private fun requestNextHistoryPage(envelope: WireEnvelope) {
+        val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
+        val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
+        if (payload.page * payload.pageSize < payload.total) {
+            requestHistoryPage(sessionId, payload.page + 1)
+        }
+    }
+
+    private fun requestHistoryPage(sessionId: String, page: Int) {
+        sendSyncCommand(
+            type = "history.get",
+            sessionId = sessionId,
+            payload = buildJsonObject {
+                put("page", page)
+                put("page_size", HISTORY_PAGE_SIZE)
+            },
+        )
+    }
+
+    private fun sendSyncCommand(
+        type: String,
+        sessionId: String?,
+        payload: kotlinx.serialization.json.JsonObject,
+    ) {
+        val epoch = requireNotNull(activeEpoch) { "History sync requires an authenticated connection" }
+        val candidate = requireNotNull(activeCandidate) { "History sync requires an active endpoint" }
+        check(
+            socket.send(
+                candidate,
+                WireEnvelope(
+                    v = WIRE_PROTOCOL_VERSION,
+                    kind = WireKind.COMMAND,
+                    type = type,
+                    id = Ulid.next(),
+                    connectionEpoch = epoch,
+                    sessionId = sessionId,
+                    payload = payload,
+                ),
+            ),
+        )
     }
 
     private suspend fun flushOutbox() {
@@ -771,6 +862,7 @@ class RealtimeSession(
     private companion object {
         val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+        const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
     }
