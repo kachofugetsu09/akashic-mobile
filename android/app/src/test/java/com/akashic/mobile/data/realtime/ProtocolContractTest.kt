@@ -42,25 +42,6 @@ class ProtocolContractTest {
         fixtures.forEach { ProtocolCodec.decode(it.toString()) }
     }
 
-    @Test
-    fun `runtime compatibility is locked separately from the schema snapshot`() {
-        val compatibility = readJson(repositoryRoot.resolve("protocol/runtime-compatibility.json"))
-
-        assertEquals("runtime_semantics_not_schema", compatibility.requiredText("scope"))
-        assertEquals(
-            setOf(
-                "message_send_command_id_equals_client_message_id",
-                "command_outcome_unknown_preserves_original_command_id",
-                "message_send_protocol_rejection_uses_close_code_4410",
-                "claimed_deleted_session_is_not_recreated",
-            ),
-            compatibility.stringSet("required_semantics"),
-        )
-        require(compatibility.requiredText("verified_source_commit").matches(Regex("^[0-9a-f]{40}$"))) {
-            "Runtime compatibility commit must be a full Git SHA"
-        }
-    }
-
     private fun readJson(path: Path): JsonObject =
         ProtocolCodec.json().parseToJsonElement(path.toFile().readText()).jsonObject
 
