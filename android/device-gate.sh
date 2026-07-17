@@ -23,6 +23,22 @@ die() {
     exit 1
 }
 
+require_unchanged_source() {
+    local current_status
+    local current_commit
+    local current_tree
+
+    current_status="$(git -C "$repository_root" status --porcelain)"
+    [[ -z "$current_status" ]] ||
+        die "source worktree changed during candidate build"
+    current_commit="$(git -C "$repository_root" rev-parse HEAD)"
+    [[ "$current_commit" == "$source_commit" ]] ||
+        die "source HEAD changed during candidate build: expected=$source_commit actual=$current_commit"
+    current_tree="$(git -C "$repository_root" rev-parse 'HEAD^{tree}')"
+    [[ "$current_tree" == "$source_tree" ]] ||
+        die "source tree changed during candidate build: expected=$source_tree actual=$current_tree"
+}
+
 require_value() {
     local option="$1"
     local value="${2:-}"
@@ -156,6 +172,8 @@ readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly repository_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
 [[ -z "$(git -C "$repository_root" status --porcelain)" ]] ||
     die "source worktree must be clean before a physical-device Gate"
+readonly source_commit="$(git -C "$repository_root" rev-parse HEAD)"
+readonly source_tree="$(git -C "$repository_root" rev-parse 'HEAD^{tree}')"
 mkdir -p "$script_dir/build"
 exec {gate_lock_fd}>"$script_dir/build/device-gate.lock"
 flock -n "$gate_lock_fd" || die "another device Gate is using this Android worktree"
@@ -172,8 +190,8 @@ exec > >(tee "$report_dir/output.log") 2>&1
 printf 'run_id=%s\nserial=%s\nsource_commit=%s\nsource_tree=%s\n' \
     "$run_id" \
     "$serial" \
-    "$(git -C "$repository_root" rev-parse HEAD)" \
-    "$(git -C "$repository_root" rev-parse 'HEAD^{tree}')" >"$report_file"
+    "$source_commit" \
+    "$source_tree" >"$report_file"
 printf 'requested_tests=%s\nrunner_arg_keys=%s\n' \
     "$(IFS=,; printf '%s' "${tests[*]}")" \
     "$(printf '%s\n' "${runner_args[@]}" | sed 's/=.*//' | paste -sd, -)" >>"$report_file"
@@ -264,7 +282,11 @@ printf 'app_apk_sha256=%s\ntest_apk_sha256=%s\n' \
     "$(sha256sum "$app_apk" | cut -d' ' -f1)" \
     "$(sha256sum "$test_apk" | cut -d' ' -f1)" >>"$report_file"
 
-# 2. Prove the exact device and both candidate IDs are unused before installation.
+# 2. 构建结束后再次绑定源码；漂移时禁止接触任何设备状态。
+require_unchanged_source
+printf 'source_state_after_build=verified\n' >>"$report_file"
+
+# 3. Prove the exact device and both candidate IDs are unused before installation.
 [[ "$(adb -s "$serial" get-state)" == "device" ]] || die "adb serial is not ready: $serial"
 adb -s "$serial" shell pm list packages -u | tr -d '\r' | sort >"$inventory_file"
 collisions=()
@@ -280,13 +302,13 @@ if ((${#collisions[@]} > 0)); then
 fi
 printf 'collision_result=clear\nbackup=not_needed_unique_run_packages\n' >>"$report_file"
 
-# 3. 不允许替换已有 package；每次安装成功后才取得对应清理所有权。
+# 4. 不允许替换已有 package；每次安装成功后才取得对应清理所有权。
 adb -s "$serial" install -t "$app_apk"
 owned_application=true
 adb -s "$serial" install -t "$test_apk"
 owned_test_application=true
 
-# 4. Run each method as a separate phase and kill the app process between phases.
+# 5. Run each method as a separate phase and kill the app process between phases.
 readonly runner="androidx.test.runner.AndroidJUnitRunner"
 gate_stage="test"
 for index in "${!tests[@]}"; do
