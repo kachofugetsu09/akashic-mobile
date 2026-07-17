@@ -24,7 +24,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
-private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
 
 @Serializable
 internal data class StoredToolBlock(
@@ -309,7 +308,6 @@ class LocalDeliveryStore(
                 updatedAt = completedAt,
             )
             val sourceId = remote.clientMessageId?.let { "user:$it" }
-                ?: uniqueEphemeralAssistantSourceId(canonical)
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
                 serverId = serverId,
@@ -323,18 +321,6 @@ class LocalDeliveryStore(
                 database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
             }
         }
-    }
-
-    /** 只在时间窗口内候选整体唯一时修复旧版 assistant 临时身份。 */
-    private suspend fun uniqueEphemeralAssistantSourceId(canonical: MessageEntity): String? {
-        if (canonical.role != "assistant") return null
-        val candidates = database.messages().findEphemeralAssistants(
-            canonical.sessionId,
-            canonical.text,
-            canonical.updatedAt - LEGACY_IDENTITY_LOOKBACK_MS,
-            canonical.updatedAt + LEGACY_IDENTITY_LOOKBACK_MS,
-        )
-        return candidates.singleOrNull()?.messageId
     }
 
     private fun historyBlocks(
@@ -554,8 +540,9 @@ class LocalDeliveryStore(
                 ),
             )
         }
-        val canonicalId = payloadText(envelope, "message_id")
-            ?: "ephemeral:${requireNotNull(envelope.id) { "Final event has no frame id" }}"
+        val canonicalId = requireNotNull(payloadText(envelope, "message_id")) {
+            "Final message has no canonical message_id"
+        }
         require(canonicalId.isNotBlank() && canonicalId.length <= 512) { "Canonical message id is invalid" }
         val canonical = current.copy(
             messageId = canonicalId,

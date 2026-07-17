@@ -82,25 +82,6 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE messageId = :messageId")
     suspend fun get(messageId: String): MessageEntity?
 
-    @Query(
-        """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'assistant'
-          AND text = :text
-          AND messageId LIKE 'ephemeral:%'
-          AND deliveryState = 'complete'
-          AND updatedAt BETWEEN :earliestUpdatedAt AND :latestUpdatedAt
-        ORDER BY createdAt, messageId
-        """,
-    )
-    suspend fun findEphemeralAssistants(
-        sessionId: String,
-        text: String,
-        earliestUpdatedAt: Long,
-        latestUpdatedAt: Long,
-    ): List<MessageEntity>
-
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: String): Int
 

@@ -110,182 +110,21 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
-    fun finalWithoutMessageIdUsesFrameScopedEphemeralIdentity() = runBlocking {
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "message.final", buildJsonObject { put("content", "控制指令结果") }),
-            2,
-        )
+    fun finalWithoutMessageIdFailsLoudly() = runBlocking {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent(
+                    "server",
+                    "device",
+                    event(1, "message.final", buildJsonObject { put("content", "控制指令结果") }),
+                    2,
+                )
+            }
+        }
 
-        val ephemeralId = "ephemeral:01J00000000000000000000000"
-        assertEquals("控制指令结果", database.messages().get(ephemeralId)!!.text)
+        assertEquals("Final message has no canonical message_id", error.message)
         assertEquals(null, database.messages().get("assistant:turn"))
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(2, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:history:canonical")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "持久化回答")
-                        put("extra", buildJsonObject { put("reasoning_content", "历史思考") })
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            3,
-        )
-
-        assertEquals(2, database.messages().countForSession("mobile:test"))
-        assertEquals("控制指令结果", database.messages().get(ephemeralId)!!.text)
-        assertEquals("持久化回答", database.messages().get("mobile:test:history:canonical")!!.text)
-        assertEquals(
-            listOf("历史思考"),
-            database.messages().getBlocks("mobile:test:history:canonical").map { it.content },
-        )
-    }
-
-    @Test
-    fun historyMergesTheUniqueClosestEphemeralAssistant() = runBlocking {
-        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
-        database.messages().upsert(
-            MessageEntity(
-                messageId = "ephemeral:unique",
-                clientMessageId = null,
-                sessionId = "mobile:test",
-                role = "assistant",
-                text = "同一回答",
-                deliveryState = "complete",
-                createdAt = completedAt - 5_000,
-                updatedAt = completedAt - 100,
-            ),
-        )
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:canonical:unique")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "同一回答")
-                        put("extra", buildJsonObject {})
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            completedAt,
-        )
-
-        assertEquals(1, database.messages().countForSession("mobile:test"))
-        assertEquals(null, database.messages().get("ephemeral:unique"))
-        assertEquals("同一回答", database.messages().get("mobile:test:canonical:unique")!!.text)
-    }
-
-    @Test
-    fun historyDoesNotGuessBetweenEquidistantRepeatedAnswers() = runBlocking {
-        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
-        listOf(-100L, 100L).forEachIndexed { index, delta ->
-            database.messages().upsert(
-                MessageEntity(
-                    messageId = "ephemeral:tie:$index",
-                    clientMessageId = null,
-                    sessionId = "mobile:test",
-                    role = "assistant",
-                    text = "重复回答",
-                    deliveryState = "complete",
-                    createdAt = completedAt + delta - 5_000,
-                    updatedAt = completedAt + delta,
-                ),
-            )
-        }
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:canonical:tie")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "重复回答")
-                        put("extra", buildJsonObject {})
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            completedAt,
-        )
-
-        assertEquals(3, database.messages().countForSession("mobile:test"))
-        assertNotNull(database.messages().get("ephemeral:tie:0"))
-        assertNotNull(database.messages().get("ephemeral:tie:1"))
-        assertNotNull(database.messages().get("mobile:test:canonical:tie"))
-    }
-
-    @Test
-    fun historyDoesNotGuessTheClosestOfRepeatedAnswers() = runBlocking {
-        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
-        listOf(-100L, -10_000L).forEachIndexed { index, delta ->
-            database.messages().upsert(
-                MessageEntity(
-                    messageId = "ephemeral:repeated:$index",
-                    clientMessageId = null,
-                    sessionId = "mobile:test",
-                    role = "assistant",
-                    text = "重复但不等距",
-                    deliveryState = "complete",
-                    createdAt = completedAt + delta - 5_000,
-                    updatedAt = completedAt + delta,
-                ),
-            )
-        }
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:canonical:repeated")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "重复但不等距")
-                        put("extra", buildJsonObject {})
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            completedAt,
-        )
-
-        assertEquals(3, database.messages().countForSession("mobile:test"))
-        assertNotNull(database.messages().get("ephemeral:repeated:0"))
-        assertNotNull(database.messages().get("ephemeral:repeated:1"))
-        assertNotNull(database.messages().get("mobile:test:canonical:repeated"))
+        assertEquals(0L, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
     }
 
     @Test
