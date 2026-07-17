@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-pr5-v1",
+  "profile": "mobile-pr6-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -42,7 +42,7 @@
       "id": "deleted-session-catalog-blocks-outbox",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
       "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "catalog deletion preserves but blocks pending work"
+      "consumer_test": "catalogDeletionPreservesButBlocksPendingWork"
     },
     {
       "id": "session-delete-race-is-not-recreated",
@@ -133,6 +133,12 @@
       "provider_test": "tests/mobile_realtime/test_mobile_realtime_protocol.py::test_golden_frames_round_trip",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
       "consumer_test": "resumeIdentityUsesTurnIdsInsteadOfSessionIds"
+    },
+    {
+      "id": "command-catalog-shape-and-filtering",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_command_list_uses_active_channel_catalog_without_stop",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
+      "consumer_test": "acceptsUnicodeCommandDescriptionsByCodePoint"
     }
   ]
 }
