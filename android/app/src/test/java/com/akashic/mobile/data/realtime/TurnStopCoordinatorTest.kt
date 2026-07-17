@@ -61,19 +61,7 @@ class TurnStopCoordinatorTest {
 
         assertEquals(null, coordinator.activeTurnId("mobile:one"))
         assertFalse(coordinator.isStopping("mobile:one"))
-        assertTrue(
-            coordinator.onReply(
-                WireEnvelope(
-                    v = 1,
-                    kind = WireKind.REPLY,
-                    type = "turn.stop.ok",
-                    id = request.commandId,
-                    sessionId = request.sessionId,
-                    turnId = request.turnId,
-                    payload = buildJsonObject { put("status", "interrupted") },
-                ),
-            ),
-        )
+        assertTrue(coordinator.onReply(okReply(request)))
         coordinator.onTurnStarted("mobile:one", "turn-2")
 
         val next = coordinator.requestStop("mobile:one")

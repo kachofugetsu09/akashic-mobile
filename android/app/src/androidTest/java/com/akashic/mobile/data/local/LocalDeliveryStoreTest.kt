@@ -15,9 +15,11 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -148,6 +150,59 @@ class LocalDeliveryStoreTest {
             listOf("历史思考"),
             database.messages().getBlocks("mobile:test:history:canonical").map { it.content },
         )
+    }
+
+    @Test
+    fun deliveredMessagesPersistBeyondTheFormerInMemoryQueueCapacity() = runBlocking {
+        repeat(65) { index ->
+            val sequence = index + 1L
+            store.applyEvent(
+                serverId = "server",
+                deviceId = "device",
+                envelope = WireEnvelope(
+                    v = 1,
+                    kind = WireKind.EVENT,
+                    type = "message.proactive",
+                    id = "proactive-$sequence",
+                    connectionEpoch = 1,
+                    eventSeq = sequence,
+                    sessionId = "mobile:test",
+                    payload = buildJsonObject { put("content", "主动消息 $sequence") },
+                ),
+                updatedAt = sequence,
+            )
+        }
+
+        assertEquals(65, database.pendingMessageNotifications().countForServer("server"))
+        assertEquals(
+            "主动消息 1",
+            database.pendingMessageNotifications().get("proactive:proactive-1")?.content,
+        )
+        assertEquals(
+            "主动消息 65",
+            database.pendingMessageNotifications().get("proactive:proactive-65")?.content,
+        )
+        assertEquals(65L, database.realtimeCursors().get("device")?.lastAcknowledgedEventSeq)
+    }
+
+    @Test
+    fun invalidNotificationPayloadDoesNotAdvanceCursorOrPersistMessage() = runBlocking {
+        val envelope = event(
+            1,
+            "message.final",
+            buildJsonObject {
+                put("message_id", "mobile:test:invalid")
+                put("content", "不会提交")
+                put("attachments", JsonPrimitive("broken"))
+            },
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { store.applyEvent("server", "device", envelope, 2) }
+        }
+        assertEquals(0L, database.realtimeCursors().get("device")?.lastAcknowledgedEventSeq)
+        assertEquals(null, database.messages().get("mobile:test:invalid"))
+        assertEquals(0, database.pendingMessageNotifications().countForServer("server"))
     }
 
     @Test

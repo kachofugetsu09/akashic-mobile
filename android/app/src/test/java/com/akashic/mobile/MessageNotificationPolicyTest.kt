@@ -1,6 +1,11 @@
 package com.akashic.mobile
 
 import com.akashic.mobile.data.realtime.FinalMessageEvent
+import com.akashic.mobile.data.realtime.WireEnvelope
+import com.akashic.mobile.data.realtime.WireKind
+import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -54,5 +59,23 @@ class MessageNotificationPolicyTest {
             "收到一条新回复",
             MessageNotificationPolicy.preview(event.copy(content = "", hasAttachments = false)),
         )
+    }
+
+    @Test
+    fun proactiveNotificationUsesThePersistedLocalMessageIdentity() {
+        val proactive = deliveredFinalMessageEvent(
+            WireEnvelope(
+                v = 1,
+                kind = WireKind.EVENT,
+                type = "message.proactive",
+                id = "event-42",
+                sessionId = "mobile:session-a",
+                payload = buildJsonObject { put("content", "后台任务完成") },
+            ),
+        )
+
+        assertEquals("proactive:event-42", proactive.messageId)
+        assertEquals("后台任务完成", proactive.content)
+        assertFalse(proactive.hasAttachments)
     }
 }

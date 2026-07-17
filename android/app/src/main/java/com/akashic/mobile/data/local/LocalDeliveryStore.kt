@@ -5,11 +5,13 @@ import com.akashic.mobile.data.realtime.ProtocolCodec
 import com.akashic.mobile.data.realtime.AttachmentProgressPayload
 import com.akashic.mobile.data.realtime.AttachmentReadyPayload
 import com.akashic.mobile.data.realtime.AttachmentDescriptor
+import com.akashic.mobile.data.realtime.FinalMessageEvent
 import com.akashic.mobile.data.realtime.HistoryPagePayload
 import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
 import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
+import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
 import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -121,7 +123,24 @@ class LocalDeliveryStore(
                 "Event sequence gap: expected ${cursor.lastAcknowledgedEventSeq + 1}, got $eventSeq"
             }
 
-            applyEventContent(serverId, envelope, updatedAt)
+            val delivered = if (envelope.type in DELIVERED_MESSAGE_EVENTS) {
+                deliveredFinalMessageEvent(envelope)
+            } else {
+                null
+            }
+            applyEventContent(serverId, envelope, delivered, updatedAt)
+            delivered?.let { event ->
+                database.pendingMessageNotifications().upsert(
+                    PendingMessageNotificationEntity(
+                        messageId = event.messageId,
+                        serverId = serverId,
+                        sessionId = event.sessionId,
+                        content = event.content,
+                        hasAttachments = event.hasAttachments,
+                        createdAt = updatedAt,
+                    ),
+                )
+            }
             val changed = database.realtimeCursors().advance(
                 deviceId = deviceId,
                 throughEventSeq = eventSeq,
@@ -176,7 +195,12 @@ class LocalDeliveryStore(
         }
     }
 
-    private suspend fun applyEventContent(serverId: String, envelope: WireEnvelope, updatedAt: Long) {
+    private suspend fun applyEventContent(
+        serverId: String,
+        envelope: WireEnvelope,
+        delivered: FinalMessageEvent?,
+        updatedAt: Long,
+    ) {
         when (envelope.type) {
             "session.list" -> applySessionList(serverId, envelope)
             "session.created", "session.updated" -> upsertConversation(serverId, envelope, updatedAt)
@@ -186,9 +210,9 @@ class LocalDeliveryStore(
             "react.tool.started" -> startTool(envelope, updatedAt)
             "react.tool.completed" -> completeTool(envelope, updatedAt)
             "answer.delta" -> appendAnswer(envelope, updatedAt)
-            "message.final" -> finalizeMessage(envelope, updatedAt)
+            "message.final" -> finalizeMessage(envelope, requireNotNull(delivered), updatedAt)
             "turn.interrupted" -> interruptTurn(envelope, updatedAt)
-            "message.proactive" -> insertProactive(envelope, updatedAt)
+            "message.proactive" -> insertProactive(envelope, requireNotNull(delivered), updatedAt)
             "attachment.progress" -> applyAttachmentProgress(envelope, updatedAt)
             "attachment.ready" -> applyAttachmentReady(envelope, updatedAt)
             else -> Unit
@@ -503,7 +527,11 @@ class LocalDeliveryStore(
         )
     }
 
-    private suspend fun finalizeMessage(envelope: WireEnvelope, updatedAt: Long) {
+    private suspend fun finalizeMessage(
+        envelope: WireEnvelope,
+        delivered: FinalMessageEvent,
+        updatedAt: Long,
+    ) {
         val current = ensureAssistantTurn(envelope, updatedAt)
         val blocks = database.messages().getBlocks(current.messageId)
         val finalThinking = payloadText(envelope, "thinking")?.trim().orEmpty()
@@ -524,12 +552,11 @@ class LocalDeliveryStore(
                 ),
             )
         }
-        val canonicalId = payloadText(envelope, "message_id")
-            ?: "ephemeral:${requireNotNull(envelope.id) { "Final event has no frame id" }}"
+        val canonicalId = delivered.messageId
         require(canonicalId.isNotBlank() && canonicalId.length <= 512) { "Canonical message id is invalid" }
         val canonical = current.copy(
             messageId = canonicalId,
-            text = payloadText(envelope, "text") ?: payloadText(envelope, "content") ?: current.text,
+            text = delivered.content.ifEmpty { current.text },
             deliveryState = "complete",
             updatedAt = updatedAt,
         )
@@ -588,16 +615,20 @@ class LocalDeliveryStore(
         database.messages().completeRunningBlocks(current.messageId, updatedAt)
     }
 
-    private suspend fun insertProactive(envelope: WireEnvelope, updatedAt: Long) {
-        val sessionId = requireNotNull(envelope.sessionId) { "Proactive event has no session_id" }
-        val messageId = "proactive:${requireNotNull(envelope.id)}"
+    private suspend fun insertProactive(
+        envelope: WireEnvelope,
+        delivered: FinalMessageEvent,
+        updatedAt: Long,
+    ) {
+        val sessionId = delivered.sessionId
+        val messageId = delivered.messageId
         database.messages().upsert(
             MessageEntity(
                 messageId = messageId,
                 clientMessageId = null,
                 sessionId = sessionId,
                 role = "assistant",
-                text = payloadText(envelope, "text") ?: payloadText(envelope, "content") ?: "",
+                text = delivered.content,
                 deliveryState = "complete",
                 createdAt = updatedAt,
                 updatedAt = updatedAt,
@@ -698,6 +729,7 @@ class LocalDeliveryStore(
         envelope.payload[key]?.jsonPrimitive?.longOrNull
 
     private companion object {
+        val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
         const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val FRAME_ID = Regex(

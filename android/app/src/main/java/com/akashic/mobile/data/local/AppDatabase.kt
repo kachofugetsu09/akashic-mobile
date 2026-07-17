@@ -18,8 +18,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RealtimeCursorEntity::class,
         MediaAttachmentEntity::class,
         MessageAttachmentEntity::class,
+        PendingMessageNotificationEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -37,12 +38,14 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun mediaAttachments(): MediaAttachmentDao
 
+    abstract fun pendingMessageNotifications(): PendingMessageNotificationDao
+
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
             context.applicationContext,
             AppDatabase::class.java,
             "akashic-mobile.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -88,6 +91,32 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `pending_message_notifications` (
+                        `messageId` TEXT NOT NULL,
+                        `serverId` TEXT NOT NULL,
+                        `sessionId` TEXT NOT NULL,
+                        `content` TEXT NOT NULL,
+                        `hasAttachments` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`messageId`) REFERENCES `messages`(`messageId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_serverId` ON `pending_message_notifications` (`serverId`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_createdAt` ON `pending_message_notifications` (`createdAt`)",
+                )
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("ALTER TABLE `messages` ADD COLUMN `serverSeq` INTEGER")
             }
