@@ -61,6 +61,9 @@ class LocalDeliveryStore(private val database: AppDatabase) {
     ) {
         require(message.sessionId == conversation.sessionId) { "Message and conversation session mismatch" }
         require(command.serverId == conversation.serverId) { "Outbox and conversation server mismatch" }
+        require(conversation.remoteState != ConversationRemoteState.DELETED) {
+            "Cannot enqueue into a remotely deleted session"
+        }
         database.withTransaction {
             requireConversationOwner(conversation.serverId, conversation.sessionId)
             database.conversations().upsert(conversation)
@@ -152,7 +155,16 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         database.withTransaction {
             database.conversations().listForServer(serverId)
                 .filterNot { it.sessionId in remoteSessionIds }
-                .forEach { database.messages().deleteSessionProjection(it.sessionId) }
+                .filterNot { it.remoteState == ConversationRemoteState.LOCAL }
+                .forEach { conversation ->
+                    check(
+                        database.conversations().updateRemoteState(
+                            conversation.sessionId,
+                            ConversationRemoteState.DELETED,
+                        ) == 1,
+                    ) { "Catalog session disappeared during reconciliation: ${conversation.sessionId}" }
+                    database.messages().deleteSessionProjection(conversation.sessionId)
+                }
             database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
         }
     }
@@ -184,6 +196,7 @@ class LocalDeliveryStore(private val database: AppDatabase) {
                     serverId = serverId,
                     title = item.title,
                     updatedAt = Instant.parse(item.updatedAt).toEpochMilli(),
+                    remoteState = ConversationRemoteState.REMOTE,
                 ),
             )
         }
@@ -201,7 +214,13 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         }
         if (conversation == null) {
             database.conversations().upsert(
-                ConversationEntity(sessionId, serverId, "新对话", System.currentTimeMillis()),
+                ConversationEntity(
+                    sessionId,
+                    serverId,
+                    "新对话",
+                    System.currentTimeMillis(),
+                    ConversationRemoteState.REMOTE,
+                ),
             )
         }
         payload.items.forEach { remote ->
@@ -296,6 +315,7 @@ class LocalDeliveryStore(private val database: AppDatabase) {
                 serverId = serverId,
                 title = payloadText(envelope, "title") ?: current?.title ?: "新对话",
                 updatedAt = updatedAt,
+                remoteState = ConversationRemoteState.REMOTE,
             ),
         )
     }
