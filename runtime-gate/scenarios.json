@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-pr4-v1",
+  "profile": "mobile-pr5-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -115,6 +115,24 @@
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_outbound_registration_copies_and_stably_reuses_content",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/local/MediaCacheStoreTest.kt",
       "consumer_test": "reconcile commits valid final left before database update"
+    },
+    {
+      "id": "passive-message-queue-is-durable",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_sender_uses_mobile_event_path",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "deliveredMessagesPersistBeyondTheFormerInMemoryQueueCapacity"
+    },
+    {
+      "id": "turn-stop-survives-client-process-restart",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_turn_stop_accepts_a_shared_mobile_session",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "processRestartRestoresAndReplaysThePersistedStopIdentity"
+    },
+    {
+      "id": "resume-reports-turn-identities",
+      "provider_test": "tests/mobile_realtime/test_mobile_realtime_protocol.py::test_golden_frames_round_trip",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "resumeIdentityUsesTurnIdsInsteadOfSessionIds"
     }
   ]
 }
