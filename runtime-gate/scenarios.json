@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-pr1-v1",
+  "profile": "mobile-pr2-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -31,6 +31,12 @@
       "provider_test": "tests/mobile_realtime/test_gateway.py::test_authenticated_gateway_reports_validation_without_echoing_payload",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/RealtimeWebSocketClientTest.kt",
       "consumer_test": "authenticated protocol failure closes winner and reports closure"
+    },
+    {
+      "id": "deleted-session-catalog-blocks-outbox",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "catalog deletion preserves but blocks pending work"
     }
   ]
 }
