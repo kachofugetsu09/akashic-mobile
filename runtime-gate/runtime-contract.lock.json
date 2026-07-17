@@ -11,5 +11,5 @@
   "relationship": "tested_backward_compatible",
   "source_schema_path": "schema/mobile-realtime-v1.json",
   "scenario_catalog": "runtime-gate/scenarios.json",
-  "scenario_catalog_sha256": "ad380be42f54af86d52dd15765d35b792b871decbe589c2501b44aec8052ab54"
+  "scenario_catalog_sha256": "617963558cea2da79f8efc9d70769e267701ce2eba1cbb5888bbf6c7105bbe4d"
 }

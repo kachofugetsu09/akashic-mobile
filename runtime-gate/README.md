@@ -38,4 +38,4 @@ python3 runtime-gate/run_core_contract.py \
 
 每一层 stacked PR 只登记该层已经实现的场景；后续 PR 在自己的目录版本中追加场景，禁止把未来能力提前塞进基础 PR。能力提交用于锁定静态协议语义，provider runtime 固定真正运行全部场景的核心版本；两者可以来自不同历史链，不伪称 ancestry，兼容性只由固定场景的 Gate 结果证明。更新核心兼容基线时，必须同时更新两边的完整 commit/tree/schema digest 和场景目录 hash，并重新运行 Gate。禁止写浮动分支或 `latest` 作为兼容证据。
 
-`mobile-pr4-v1` 完整继承 PR3 的会话、协议与上传场景，只追加 confirmed download offset、校验后原子发布、稳定消息附件身份和缓存恢复。通知、后台投递与远端 session 删除策略不属于本 profile。
+`mobile-pr5-v1` 完整继承 PR4 的会话与附件场景，只追加持久被动消息队列、不可投递通知保留、跨进程停止和恢复中的 turn identity。会话目录缺失仍使用 PR2 确立的中立投影清理语义，不在客户端新增远端删除 tombstone。
