@@ -4,8 +4,16 @@ import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.Embedded
+import androidx.room.ColumnInfo
 import androidx.room.PrimaryKey
 import androidx.room.Relation
+
+internal object ConversationRemoteState {
+    const val UNKNOWN = "unknown"
+    const val LOCAL = "local"
+    const val REMOTE = "remote"
+    const val DELETED = "deleted"
+}
 
 @Entity(tableName = "server_profiles")
 data class ServerProfileEntity(
@@ -37,6 +45,8 @@ data class ConversationEntity(
     val serverId: String,
     val title: String,
     val updatedAt: Long,
+    @ColumnInfo(defaultValue = "'unknown'")
+    val remoteState: String = ConversationRemoteState.LOCAL,
 )
 
 @Entity(

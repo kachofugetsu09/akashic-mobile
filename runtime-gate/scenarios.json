@@ -1,0 +1,84 @@
+{
+  "version": 1,
+  "profile": "mobile-pr2-v1",
+  "scenarios": [
+    {
+      "id": "message-send-idempotency",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_is_idempotent_and_session_is_shared_between_devices",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/OutboxDispatchTest.kt",
+      "consumer_test": "production enqueue payload uses one idempotency identity"
+    },
+    {
+      "id": "unknown-outcome-preserves-command",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_keeps_unknown_outcome_without_persisted_user",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/OutboxDispatchTest.kt",
+      "consumer_test": "unknown outcome retains original id while ordinary rejection fails"
+    },
+    {
+      "id": "receipt-completion-failure-stays-unknown",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_keeps_current_owner_when_receipt_completion_fails",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/OutboxDispatchTest.kt",
+      "consumer_test": "unknown outcome retains original id while ordinary rejection fails"
+    },
+    {
+      "id": "prestart-receipt-is-retryable",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_marks_prestart_processing_receipt_retryable",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/OutboxDispatchTest.kt",
+      "consumer_test": "unknown outcome retains original id while ordinary rejection fails"
+    },
+    {
+      "id": "protocol-rejection-closes-4410",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_authenticated_gateway_reports_validation_without_echoing_payload",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/RealtimeWebSocketClientTest.kt",
+      "consumer_test": "authenticated protocol failure closes winner and reports closure"
+    },
+    {
+      "id": "deleted-claimed-session-is-not-recreated",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
+      "consumer_test": "only rejection of selected deleted session clears selection"
+    },
+    {
+      "id": "deleted-session-catalog-blocks-outbox",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "catalog deletion preserves but blocks pending work"
+    },
+    {
+      "id": "session-delete-race-is-not-recreated",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_claimed_message_admission_does_not_recreate_after_exists_check",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
+      "consumer_test": "only rejection of selected deleted session clears selection"
+    },
+    {
+      "id": "resume-gap-requires-reset",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_resume_resets_when_durable_inbox_has_sequence_gap",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "resetClearsOnlyServerProjectionAndPreservesLocalWork"
+    },
+    {
+      "id": "ahead-ack-rebases-before-retention",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_ahead_ack_rebases_before_expired_inbox_check",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "resetClearsOnlyServerProjectionAndPreservesLocalWork"
+    },
+    {
+      "id": "rebased-reset-survives-restart",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_rebased_reset_survives_runtime_restart",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "resetClearsOnlyServerProjectionAndPreservesLocalWork"
+    },
+    {
+      "id": "canonical-history-replaces-optimistic-message",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_final_event_maps_optimistic_user_to_persisted_identity",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "historyCanonicalIdReplacesOptimisticUserMessage"
+    },
+    {
+      "id": "session-catalog-drives-complete-history-sync",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
+      "consumer_test": "every nonempty remote session starts from page one"
+    }
+  ]
+}
