@@ -894,7 +894,7 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
-    fun `catalog deletion preserves but blocks pending work`() = runBlocking {
+    fun catalogDeletionPreservesButBlocksPendingWork() = runBlocking {
         val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         database.conversations().upsert(
             ConversationEntity(

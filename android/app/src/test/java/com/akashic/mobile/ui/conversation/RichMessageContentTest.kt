@@ -40,6 +40,26 @@ class RichMessageContentTest {
     }
 
     @Test
+    fun preservesFormulaMarkersInsideTildeFence() {
+        val content = """
+            ~~~tex
+            $$
+            x^2
+            $$
+            ~~~
+        """.trimIndent()
+
+        assertEquals(listOf(RichMessageSegment.Markdown(content)), richMessageSegments(content))
+    }
+
+    @Test
+    fun preservesFormulaMarkersInsideIndentedCode() {
+        val content = "    $$\n    x^2\n    $$"
+
+        assertEquals(listOf(RichMessageSegment.Markdown(content)), richMessageSegments(content))
+    }
+
+    @Test
     fun splitsTheSingleLineDisplayMathUsedByRealHistory() {
         val content = """
             评分器是一个简单的余弦相似度模型：

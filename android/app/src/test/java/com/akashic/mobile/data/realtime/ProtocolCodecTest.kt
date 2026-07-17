@@ -101,6 +101,31 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun commandCatalogTracksCancelledAndCurrentReplies() {
+        val requests = CommandCatalogRequests()
+        requests.begin("catalog-a")
+        requests.cancelPending()
+        requests.begin("catalog-b")
+
+        assertEquals(CommandCatalogReplyOwner.CANCELLED, requests.consume("catalog-a"))
+        assertEquals(CommandCatalogReplyOwner.UNKNOWN, requests.consume("catalog-unknown"))
+        assertEquals(CommandCatalogReplyOwner.CURRENT, requests.consume("catalog-b"))
+    }
+
+    @Test
+    fun acceptsUnicodeCommandDescriptionsByCodePoint() {
+        val valid = CommandListPayload(
+            listOf(RemoteCommandItem("emoji", "😀".repeat(129))),
+        )
+        val invalid = CommandListPayload(
+            listOf(RemoteCommandItem("emoji", "😀".repeat(257))),
+        )
+
+        assertEquals(valid.items, validatedCommandCatalog(valid))
+        assertThrows(IllegalArgumentException::class.java) { validatedCommandCatalog(invalid) }
+    }
+
+    @Test
     fun `rejects unsupported version at boundary`() {
         val frame = """{"v":2,"kind":"control","type":"server.challenge","payload":{}}"""
 

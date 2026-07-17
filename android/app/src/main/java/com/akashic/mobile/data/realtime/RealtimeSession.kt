@@ -124,6 +124,64 @@ internal data class ConnectionPhaseDeadline(
     val phase: ConnectionDeadlinePhase,
 )
 
+internal enum class CommandCatalogReplyOwner {
+    CURRENT,
+    CANCELLED,
+    UNKNOWN,
+}
+
+internal class CommandCatalogRequests {
+    var pendingId: String? = null
+        private set
+
+    private val cancelledIds = mutableSetOf<String>()
+
+    fun begin(commandId: String) {
+        check(pendingId == null) { "已有快捷命令目录请求" }
+        pendingId = commandId
+    }
+
+    fun cancelPending() {
+        pendingId?.let(cancelledIds::add)
+        pendingId = null
+    }
+
+    fun discard(commandId: String) {
+        check(pendingId == commandId) { "快捷命令目录请求已变化" }
+        pendingId = null
+    }
+
+    fun consume(commandId: String): CommandCatalogReplyOwner = when {
+        commandId == pendingId -> {
+            pendingId = null
+            CommandCatalogReplyOwner.CURRENT
+        }
+        cancelledIds.remove(commandId) -> CommandCatalogReplyOwner.CANCELLED
+        else -> CommandCatalogReplyOwner.UNKNOWN
+    }
+
+    fun resetTransport() {
+        pendingId = null
+        cancelledIds.clear()
+    }
+}
+
+internal fun validatedCommandCatalog(payload: CommandListPayload): List<RemoteCommandItem> {
+    val commands = payload.items.map { item ->
+        require(MOBILE_COMMAND_NAME.matches(item.command)) { "快捷命令名称无效: ${item.command}" }
+        require(
+            item.description.isNotBlank() &&
+                item.description.codePointCount(0, item.description.length) <= 256,
+        ) { "快捷命令说明无效: ${item.command}" }
+        require(item.command != "stop") { "stop 由生成中止控件拥有" }
+        item
+    }
+    require(commands.map { it.command }.distinct().size == commands.size) { "快捷命令名称重复" }
+    return commands
+}
+
+private val MOBILE_COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
+
 internal fun shouldApplyCandidateOpen(
     connectionPhase: ConnectionPhase,
     hasActiveCandidate: Boolean,
@@ -248,7 +306,7 @@ class RealtimeSession(
     private var projectionSyncGeneration: Long? = null
     private val pendingSyncCommands = mutableMapOf<String, PendingSyncCommand>()
     private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
-    private var pendingCommandListId: String? = null
+    private val commandCatalogRequests = CommandCatalogRequests()
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -1009,16 +1067,20 @@ class RealtimeSession(
                 }
                 if (uploads.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
-                if (envelope.type == "command.list.ok") {
-                    applyCommandListReply(envelope)
-                    return
-                }
-                if (envelope.type == "command.list.error" && id == pendingCommandListId) {
-                    pendingCommandListId = null
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = envelope.payload["message"]?.jsonPrimitive?.content
-                            ?: "加载快捷命令失败",
-                    )
+                if (envelope.type in setOf("command.list.ok", "command.list.error")) {
+                    when (commandCatalogRequests.consume(id)) {
+                        CommandCatalogReplyOwner.CANCELLED -> return
+                        CommandCatalogReplyOwner.UNKNOWN -> error("收到未知快捷命令 reply: $id")
+                        CommandCatalogReplyOwner.CURRENT -> if (envelope.type == "command.list.ok") {
+                            applyCommandListReply(envelope)
+                        } else {
+                            mutableState.value = mutableState.value.copy(
+                                commands = emptyList(),
+                                errorMessage = envelope.payload["message"]?.jsonPrimitive?.content
+                                    ?: "加载快捷命令失败",
+                            )
+                        }
+                    }
                     return
                 }
                 if (id in pendingSyncCommands && envelope.type.endsWith(".error")) {
@@ -1084,11 +1146,11 @@ class RealtimeSession(
     }
 
     private fun requestCommandList() {
-        if (pendingCommandListId != null) return
+        if (commandCatalogRequests.pendingId != null) return
         val epoch = requireNotNull(activeEpoch) { "快捷命令同步需要认证连接" }
         val candidate = requireNotNull(activeCandidate) { "快捷命令同步需要可用 endpoint" }
         val commandId = Ulid.next()
-        pendingCommandListId = commandId
+        commandCatalogRequests.begin(commandId)
         val sent = socket.send(
             candidate,
             WireEnvelope(
@@ -1101,27 +1163,15 @@ class RealtimeSession(
             ),
         )
         if (!sent) {
-            pendingCommandListId = null
+            commandCatalogRequests.discard(commandId)
             scheduleReconnect("快捷命令未进入 WebSocket 队列")
         }
     }
 
     /** 校验服务端命令目录并发布给界面。 */
     private fun applyCommandListReply(envelope: WireEnvelope) {
-        val commandId = requireNotNull(envelope.id)
-        require(commandId == pendingCommandListId) { "收到未知快捷命令 reply: $commandId" }
         val payload = ProtocolCodec.decodePayload<CommandListPayload>(envelope.payload)
-        val commands = payload.items.map { item ->
-            require(COMMAND_NAME.matches(item.command)) { "快捷命令名称无效: ${item.command}" }
-            require(item.description.isNotBlank() && item.description.length <= 256) {
-                "快捷命令说明无效: ${item.command}"
-            }
-            require(item.command != "stop") { "stop 由生成中止控件拥有" }
-            item
-        }
-        require(commands.map { it.command }.distinct().size == commands.size) { "快捷命令名称重复" }
-        pendingCommandListId = null
-        mutableState.value = mutableState.value.copy(commands = commands)
+        mutableState.value = mutableState.value.copy(commands = validatedCommandCatalog(payload))
     }
 
     private fun hasPendingSyncCommand(type: String): Boolean =
@@ -1210,9 +1260,11 @@ class RealtimeSession(
     }
 
     private fun beginProjectionSync() {
+        commandCatalogRequests.cancelPending()
         projectionSyncGeneration = syncGeneration
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
+            commands = emptyList(),
             errorMessage = null,
         )
         requestSessionList()
@@ -1223,7 +1275,6 @@ class RealtimeSession(
         syncGeneration += 1
         completedSyncGeneration = syncGeneration
         pendingSyncCommands.clear()
-        pendingCommandListId = null
         requestedHistoryPages.clear()
         beginProjectionSync()
     }
@@ -1476,7 +1527,7 @@ class RealtimeSession(
         ackJob = null
         pendingAckCount = 0
         pendingSyncCommands.clear()
-        pendingCommandListId = null
+        commandCatalogRequests.resetTransport()
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
         uploads.onDisconnected()
@@ -1487,6 +1538,7 @@ class RealtimeSession(
                 phase = ConnectionPhase.DEGRADED,
                 retryCount = retryCount,
             ),
+            commands = emptyList(),
             errorMessage = message,
         )
         reconnectJob = scope.launch {
@@ -1516,10 +1568,12 @@ class RealtimeSession(
         ackJob?.cancel()
         ackJob = null
         pendingAckCount = 0
+        commandCatalogRequests.resetTransport()
         uploads.onDisconnected()
         downloads.onDisconnected()
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.CLOSED),
+            commands = emptyList(),
             errorMessage = "协议不兼容（$code），请升级电脑端或手机客户端",
         )
     }
@@ -1562,11 +1616,12 @@ class RealtimeSession(
         activeEpoch = null
         outboxFlight.reset()
         pendingSyncCommands.clear()
-        pendingCommandListId = null
+        commandCatalogRequests.resetTransport()
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
         uploads.onDisconnected()
         downloads.onDisconnected()
+        mutableState.value = mutableState.value.copy(commands = emptyList())
     }
 
     private fun publishTurnState() {
@@ -1598,7 +1653,6 @@ class RealtimeSession(
         const val TAG = "RealtimeSession"
         val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive", "attachments-v1")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-        val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
         const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32

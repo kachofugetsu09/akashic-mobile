@@ -6,24 +6,54 @@ internal sealed interface RichMessageSegment {
     data class BlockMath(val content: String) : RichMessageSegment
 }
 
+private data class MarkdownFence(val marker: Char, val length: Int, val tail: String)
+
+private fun markdownFence(line: String): MarkdownFence? {
+    val indent = line.takeWhile { it == ' ' }.length
+    if (indent > 3 || indent == line.length) return null
+    val marker = line[indent]
+    if (marker != '`' && marker != '~') return null
+    val length = line.drop(indent).takeWhile { it == marker }.length
+    if (length < 3) return null
+    return MarkdownFence(marker, length, line.drop(indent + length))
+}
+
 /** 将 Markdown 中的块级公式切成独立原生渲染段。 */
 internal fun richMessageSegments(content: String): List<RichMessageSegment> {
     val segments = mutableListOf<RichMessageSegment>()
     val markdown = StringBuilder()
     val math = StringBuilder()
     var mathClosing: String? = null
-    var codeFence = false
+    var codeFence: MarkdownFence? = null
 
-    // 1. 只识别代码块之外、独占一行的标准块级公式边界
+    // 1. 先保护 fenced/缩进代码，再识别独占一行的块级公式边界
     content.lineSequence().forEach { line ->
         val trimmed = line.trim()
-        if (mathClosing == null && trimmed.startsWith("```")) codeFence = !codeFence
+        val fence = if (mathClosing == null) markdownFence(line) else null
+        val activeFence = codeFence
+        if (activeFence != null) {
+            markdown.appendLine(line)
+            if (
+                fence?.marker == activeFence.marker &&
+                fence.length >= activeFence.length &&
+                fence.tail.isBlank()
+            ) {
+                codeFence = null
+            }
+            return@forEach
+        }
+        if (fence != null) {
+            codeFence = fence
+            markdown.appendLine(line)
+            return@forEach
+        }
+        val indentedCode = line.startsWith("    ") || line.startsWith('\t')
         val singleLineMath = when {
-            !codeFence && mathClosing == null &&
+            !indentedCode && mathClosing == null &&
                 trimmed.startsWith("\\[") && trimmed.endsWith("\\]") && trimmed.length > 4 -> {
                 trimmed.removePrefix("\\[").removeSuffix("\\]").trim()
             }
-            !codeFence && mathClosing == null &&
+            !indentedCode && mathClosing == null &&
                 trimmed.startsWith("$$") && trimmed.endsWith("$$") && trimmed.length > 4 -> {
                 trimmed.removePrefix("$$").removeSuffix("$$").trim()
             }
@@ -35,7 +65,7 @@ internal fun richMessageSegments(content: String): List<RichMessageSegment> {
                 it.clear()
             }
             segments += RichMessageSegment.BlockMath(singleLineMath)
-        } else if (!codeFence && mathClosing == null && trimmed in setOf("\\[", "$$")) {
+        } else if (!indentedCode && mathClosing == null && trimmed in setOf("\\[", "$$")) {
             markdown.takeIf { it.isNotEmpty() }?.let {
                 segments += RichMessageSegment.Markdown(it.toString().trim('\n', '\r'))
                 it.clear()
