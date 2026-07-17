@@ -62,12 +62,28 @@ read_target_package_id() {
 require_passing_phase() {
     local phase_file="$1"
     local test_name="$2"
+    local method_name="${test_name##*#}"
     local phase_text
     phase_text="$(tr -d '\r' <"$phase_file")"
 
     if grep -Eq 'FAILURES!!!|INSTRUMENTATION_(FAILED|ABORTED)|shortMsg=|Process crashed' <<<"$phase_text"; then
         die "instrumentation reported a failure: $test_name"
     fi
+    grep -Eq '^INSTRUMENTATION_STATUS: numtests=' <<<"$phase_text" ||
+        die "instrumentation did not declare a test count: $test_name"
+    if grep -E '^INSTRUMENTATION_STATUS: numtests=' <<<"$phase_text" |
+        grep -Fvx 'INSTRUMENTATION_STATUS: numtests=1' |
+        grep -q .; then
+        die "instrumentation declared a test count other than one: $test_name"
+    fi
+    [[ "$(grep -Fxc "INSTRUMENTATION_STATUS: test=$method_name" <<<"$phase_text" || true)" -ge 1 ]] ||
+        die "instrumentation did not report the requested method: $test_name"
+    [[ "$(grep -Fxc 'INSTRUMENTATION_STATUS_CODE: 1' <<<"$phase_text" || true)" == "1" ]] ||
+        die "instrumentation did not start exactly one test: $test_name"
+    [[ "$(grep -Fxc 'INSTRUMENTATION_STATUS_CODE: 0' <<<"$phase_text" || true)" == "1" ]] ||
+        die "instrumentation did not complete exactly one test: $test_name"
+    ! grep -Eq '^INSTRUMENTATION_STATUS_CODE: -[0-9]+$' <<<"$phase_text" ||
+        die "instrumentation returned a negative test status: $test_name"
     [[ "$(grep -Ec '^OK \(1 test\)$' <<<"$phase_text" || true)" == "1" ]] ||
         die "instrumentation must execute exactly one test: $test_name"
     [[ "$(grep -Ec '^INSTRUMENTATION_CODE: -1$' <<<"$phase_text" || true)" == "1" ]] ||
@@ -114,6 +130,8 @@ done
 [[ -n "$serial" ]] || die "--serial is required"
 ((${#tests[@]} > 0)) || die "at least one --test is required"
 command -v adb >/dev/null 2>&1 || die "adb is required"
+[[ "$serial" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] ||
+    die "serial contains unsupported characters"
 
 if [[ -z "$run_id" ]]; then
     run_id="r$(date -u +%Y%m%d%H%M%S)_$$"
@@ -129,9 +147,14 @@ for runner_arg in "${runner_args[@]}"; do
         die "runner arg must be KEY=VALUE"
     [[ "${runner_arg%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
         die "runner arg key is invalid: ${runner_arg%%=*}"
+    [[ "${runner_arg#*=}" =~ ^[A-Za-z0-9._~:/+=@-]{1,16384}$ ]] ||
+        die "runner arg value contains unsupported characters: ${runner_arg%%=*}"
 done
 
 readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly repository_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
+[[ -z "$(git -C "$repository_root" status --porcelain)" ]] ||
+    die "source worktree must be clean before a physical-device Gate"
 readonly suffix=".review.${run_id}"
 readonly expected_application_id="${REVIEW_APPLICATION_ID_PREFIX}${run_id}"
 readonly expected_test_application_id="${expected_application_id}.test"
@@ -142,11 +165,70 @@ mkdir -p "$report_dir"
 
 exec > >(tee "$report_dir/output.log") 2>&1
 
-printf 'run_id=%s\nserial=%s\nsource_commit=%s\n' \
-    "$run_id" "$serial" "$(git -C "$script_dir/.." rev-parse HEAD)" >"$report_file"
+printf 'run_id=%s\nserial=%s\nsource_commit=%s\nsource_tree=%s\n' \
+    "$run_id" \
+    "$serial" \
+    "$(git -C "$repository_root" rev-parse HEAD)" \
+    "$(git -C "$repository_root" rev-parse 'HEAD^{tree}')" >"$report_file"
 printf 'requested_tests=%s\nrunner_arg_keys=%s\n' \
     "$(IFS=,; printf '%s' "${tests[*]}")" \
     "$(printf '%s\n' "${runner_args[@]}" | sed 's/=.*//' | paste -sd, -)" >>"$report_file"
+
+owned_application=false
+owned_test_application=false
+gate_stage="setup"
+
+cleanup() {
+    local test_status=$?
+    trap - EXIT
+    set +e
+
+    # 1. 只清理由本次进程成功安装的 package。
+    local cleanup_status=0
+    local residual_packages=()
+    if [[ "$owned_test_application" == true ]]; then
+        if adb -s "$serial" uninstall "$expected_test_application_id" >/dev/null 2>&1; then
+            owned_test_application=false
+        else
+            cleanup_status=1
+            residual_packages+=("$expected_test_application_id")
+        fi
+    fi
+    if [[ "$owned_application" == true ]]; then
+        if adb -s "$serial" uninstall "$expected_application_id" >/dev/null 2>&1; then
+            owned_application=false
+        else
+            cleanup_status=1
+            residual_packages+=("$expected_application_id")
+        fi
+    fi
+
+    # 2. 清理完成后才写唯一的 Gate 终态。
+    local gate_result
+    if ((cleanup_status != 0)); then
+        gate_result="failed_cleanup"
+    elif ((test_status != 0)); then
+        if [[ "$gate_stage" == "test" ]]; then
+            gate_result="failed_test"
+        else
+            gate_result="failed_setup"
+        fi
+    else
+        gate_result="passed"
+    fi
+    printf 'test_exit=%s\ncleanup_exit=%s\ngate_result=%s\n' \
+        "$test_status" "$cleanup_status" "$gate_result" >>"$report_file"
+    if ((${#residual_packages[@]} > 0)); then
+        printf 'residual_packages=%s\n' \
+            "$(IFS=,; printf '%s' "${residual_packages[*]}")" >>"$report_file"
+    fi
+
+    if ((test_status != 0)); then
+        exit "$test_status"
+    fi
+    exit "$cleanup_status"
+}
+trap cleanup EXIT
 
 # 1. Build the run-specific candidate without touching a device.
 cd "$script_dir"
@@ -194,30 +276,15 @@ if ((${#collisions[@]} > 0)); then
 fi
 printf 'collision_result=clear\nbackup=not_needed_unique_run_packages\n' >>"$report_file"
 
-# 3. From this point cleanup owns only the two proven-new run packages.
-cleanup_enabled=true
-cleanup() {
-    local test_status=$?
-    trap - EXIT
-    set +e
-    local cleanup_status=0
-    if [[ "$cleanup_enabled" == true ]]; then
-        adb -s "$serial" uninstall "$test_application_id" >/dev/null 2>&1 || cleanup_status=$?
-        adb -s "$serial" uninstall "$application_id" >/dev/null 2>&1 || cleanup_status=$?
-    fi
-    printf 'test_exit=%s\ncleanup_exit=%s\n' "$test_status" "$cleanup_status" >>"$report_file"
-    if ((test_status != 0)); then
-        exit "$test_status"
-    fi
-    exit "$cleanup_status"
-}
-trap cleanup EXIT
-
-adb -s "$serial" install -r -t "$app_apk"
-adb -s "$serial" install -r -t "$test_apk"
+# 3. 不允许替换已有 package；每次安装成功后才取得对应清理所有权。
+adb -s "$serial" install -t "$app_apk"
+owned_application=true
+adb -s "$serial" install -t "$test_apk"
+owned_test_application=true
 
 # 4. Run each method as a separate phase and kill the app process between phases.
 readonly runner="androidx.test.runner.AndroidJUnitRunner"
+gate_stage="test"
 for index in "${!tests[@]}"; do
     instrumentation_args=()
     for runner_arg in "${runner_args[@]}"; do
@@ -235,4 +302,5 @@ for index in "${!tests[@]}"; do
     fi
 done
 
-printf 'result=passed\n' >>"$report_file"
+printf 'test_result=passed\n' >>"$report_file"
+gate_stage="complete"
