@@ -36,6 +36,27 @@ interface ConversationDao {
 
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     suspend fun get(sessionId: String): ConversationEntity?
+
+    @Query("SELECT * FROM conversations WHERE serverId = :serverId AND sessionId = :sessionId")
+    suspend fun getForServer(serverId: String, sessionId: String): ConversationEntity?
+
+    @Query("SELECT * FROM conversations WHERE serverId = :serverId")
+    suspend fun listForServer(serverId: String): List<ConversationEntity>
+
+    @Query(
+        """
+        DELETE FROM conversations
+        WHERE serverId = :serverId
+          AND (:preservedSessionId IS NULL OR sessionId != :preservedSessionId)
+          AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.sessionId = conversations.sessionId)
+          AND NOT EXISTS (
+            SELECT 1 FROM attachment_transfers
+            WHERE attachment_transfers.sessionId = conversations.sessionId
+              AND attachment_transfers.serverId = :serverId
+          )
+        """,
+    )
+    suspend fun deleteEmptyProjection(serverId: String, preservedSessionId: String?): Int
 }
 
 @Dao
@@ -64,6 +85,54 @@ interface MessageDao {
     @Query("SELECT * FROM turn_blocks WHERE blockId = :blockId")
     suspend fun getBlock(blockId: String): TurnBlockEntity?
 
+    @Query("DELETE FROM turn_blocks WHERE messageId = :messageId")
+    suspend fun deleteBlocks(messageId: String): Int
+
+    @Query("UPDATE turn_blocks SET messageId = :targetId WHERE messageId = :sourceId")
+    suspend fun moveBlocks(sourceId: String, targetId: String): Int
+
+    @Query("DELETE FROM messages WHERE messageId = :messageId")
+    suspend fun delete(messageId: String): Int
+
+    @Query("UPDATE messages SET clientMessageId = NULL WHERE messageId = :messageId")
+    suspend fun clearClientMessageId(messageId: String): Int
+
+    @Query(
+        """
+        DELETE FROM messages
+        WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)
+          AND NOT (
+            clientMessageId IS NOT NULL
+            AND (
+              deliveryState IN ('pending', 'failed')
+              OR EXISTS (
+                SELECT 1 FROM outbox_commands
+                WHERE outbox_commands.commandId = messages.clientMessageId
+              )
+            )
+          )
+        """,
+    )
+    suspend fun deleteServerProjection(serverId: String): Int
+
+    @Query(
+        """
+        DELETE FROM messages
+        WHERE sessionId = :sessionId
+          AND NOT (
+            clientMessageId IS NOT NULL
+            AND (
+              deliveryState IN ('pending', 'failed')
+              OR EXISTS (
+                SELECT 1 FROM outbox_commands
+                WHERE outbox_commands.commandId = messages.clientMessageId
+              )
+            )
+          )
+        """,
+    )
+    suspend fun deleteSessionProjection(sessionId: String): Int
+
     @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE clientMessageId = :clientMessageId")
     suspend fun updateDelivery(clientMessageId: String, state: String, updatedAt: Long): Int
 
@@ -79,6 +148,17 @@ interface MessageDao {
     @Transaction
     @Query("SELECT * FROM messages WHERE sessionId = :sessionId ORDER BY createdAt, messageId")
     fun observeMessageGraph(sessionId: String): Flow<List<MessageWithBlocks>>
+
+    @Transaction
+    @Query(
+        """
+        SELECT messages.* FROM messages
+        INNER JOIN conversations ON conversations.sessionId = messages.sessionId
+        WHERE conversations.serverId = :serverId AND messages.sessionId = :sessionId
+        ORDER BY messages.createdAt, messages.messageId
+        """,
+    )
+    fun observeMessageGraphForServer(serverId: String, sessionId: String): Flow<List<MessageWithBlocks>>
 }
 
 @Dao
@@ -154,6 +234,24 @@ interface RealtimeCursorDao {
     suspend fun advance(
         deviceId: String,
         throughEventSeq: Long,
+        connectionEpoch: Long,
+        updatedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE realtime_cursors
+        SET lastAcknowledgedEventSeq = :eventSeq,
+            connectionEpoch = :connectionEpoch,
+            updatedAt = :updatedAt
+        WHERE deviceId = :deviceId
+          AND lastAcknowledgedEventSeq <= :eventSeq
+          AND connectionEpoch <= :connectionEpoch
+        """,
+    )
+    suspend fun reset(
+        deviceId: String,
+        eventSeq: Long,
         connectionEpoch: Long,
         updatedAt: Long,
     ): Int

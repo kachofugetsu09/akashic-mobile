@@ -12,6 +12,8 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -83,12 +85,14 @@ class LocalDeliveryStoreTest {
                 put("status", "success"); put("result_preview", "完成")
             }),
             event(4, "message.final", buildJsonObject {
+                put("message_id", "mobile:test:1")
                 put("content", "答案"); put("thinking", "先确认运行状态，再给出结论。")
             }),
         )
         events.forEach { store.applyEvent("server", "device", it, it.eventSeq!!) }
 
-        val blocks = database.messages().getBlocks("assistant:turn")
+        assertEquals(null, database.messages().get("assistant:turn"))
+        val blocks = database.messages().getBlocks("mobile:test:1")
         assertEquals(listOf("thinking", "tool"), blocks.map { it.kind })
         assertEquals(listOf(-1, 0), blocks.map { it.ordinal })
         assertEquals("先确认运行状态，再给出结论。", blocks.first().content)
@@ -142,11 +146,145 @@ class LocalDeliveryStoreTest {
 
         store.applyEvent("server", "device", history, 1)
 
-        assertEquals("恢复问题", database.messages().get("history:mobile:test:0")!!.text)
-        assertEquals("恢复回答", database.messages().get("history:mobile:test:1")!!.text)
-        val blocks = database.messages().getBlocks("history:mobile:test:1")
+        assertEquals("恢复问题", database.messages().get("mobile:test:0")!!.text)
+        assertEquals("恢复回答", database.messages().get("mobile:test:1")!!.text)
+        val blocks = database.messages().getBlocks("mobile:test:1")
         assertEquals(listOf("thinking", "tool", "thinking"), blocks.map { it.kind })
         assertEquals(StoredToolBlock("shell", "读取状态", "完成"), decodeStoredToolBlock(blocks[1].content))
+    }
+
+    @Test
+    fun historyCanonicalIdReplacesOptimisticUserMessage() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "user:$clientId",
+                clientMessageId = clientId,
+                sessionId = "mobile:test",
+                role = "user",
+                text = "本地问题",
+                deliveryState = "sent",
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 0)
+                        put("role", "user")
+                        put("content", "本地问题")
+                        put("client_message_id", clientId)
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-07-14T16:00:00Z")
+                    })
+                })
+            }),
+            2,
+        )
+
+        assertEquals(null, database.messages().get("user:$clientId"))
+        val canonical = database.messages().get("mobile:test:canonical")!!
+        assertEquals(clientId, canonical.clientMessageId)
+        assertEquals("complete", canonical.deliveryState)
+    }
+
+    @Test
+    fun resetClearsOnlyServerProjectionAndPreservesLocalWork() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity("remote", null, "mobile:test", "assistant", "旧投影", "complete", 1, 1),
+        )
+        database.messages().upsert(
+            MessageEntity("user:$clientId", clientId, "mobile:test", "user", "待发送", "pending", 2, 2),
+        )
+        val failedClientId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+        database.messages().upsert(
+            MessageEntity("user:$failedClientId", failedClientId, "mobile:test", "user", "发送失败", "failed", 3, 3),
+        )
+        database.outbox().enqueue(
+            OutboxCommandEntity(clientId, "server", "{}", "pending", 0, 2, null),
+        )
+        store.savePairedProfile(
+            ServerProfileEntity("other", "other", "other-device", "alias", "pin", "[]", "[]", "[]", 1),
+            RealtimeCursorEntity("other-device", "other", 0, 0, 1),
+        )
+        database.conversations().upsert(ConversationEntity("mobile:other", "other", "other", 1))
+        database.messages().upsert(
+            MessageEntity("other-message", null, "mobile:other", "assistant", "其他电脑", "complete", 1, 1),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(50, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
+            3,
+            preservedSessionId = "mobile:test",
+        )
+
+        assertEquals(50, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
+        assertEquals(null, database.messages().get("remote"))
+        assertNotNull(database.messages().get("user:$clientId"))
+        assertNotNull(database.messages().get("user:$failedClientId"))
+        assertNotNull(database.outbox().get(clientId))
+        assertEquals("其他电脑", database.messages().get("other-message")!!.text)
+    }
+
+    @Test
+    fun catalogReconciliationRemovesOnlyAbsentRebuildableProjection() = runBlocking {
+        database.conversations().upsert(ConversationEntity("mobile:kept", "server", "保留", 1))
+        database.conversations().upsert(ConversationEntity("mobile:gone", "server", "已删除", 1))
+        database.conversations().upsert(ConversationEntity("mobile:local", "server", "本地未决", 1))
+        database.messages().upsert(
+            MessageEntity("kept-message", null, "mobile:kept", "assistant", "在目录中", "complete", 1, 1),
+        )
+        database.messages().upsert(
+            MessageEntity("gone-message", null, "mobile:gone", "assistant", "可重建", "complete", 1, 1),
+        )
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity("user:$clientId", clientId, "mobile:local", "user", "待发送", "pending", 1, 1),
+        )
+        database.outbox().enqueue(
+            OutboxCommandEntity(clientId, "server", "{}", "pending", 0, 1, null),
+        )
+
+        store.reconcileSessionCatalog(
+            serverId = "server",
+            remoteSessionIds = setOf("mobile:kept"),
+            preservedSessionId = "mobile:test",
+        )
+
+        assertNotNull(database.messages().get("kept-message"))
+        assertEquals(null, database.messages().get("gone-message"))
+        assertEquals(null, database.conversations().get("mobile:gone"))
+        assertNotNull(database.messages().get("user:$clientId"))
+        assertNotNull(database.conversations().get("mobile:local"))
+        assertNotNull(database.conversations().get("mobile:test"))
+    }
+
+    @Test
+    fun eventCannotMutateAnotherServersSession() = runBlocking {
+        store.savePairedProfile(
+            ServerProfileEntity("other", "other", "other-device", "alias", "pin", "[]", "[]", "[]", 1),
+            RealtimeCursorEntity("other-device", "other", 0, 0, 1),
+        )
+        database.conversations().upsert(ConversationEntity("mobile:foreign", "other", "other", 1))
+        val foreign = event(1, "turn.started", buildJsonObject {}).copy(sessionId = "mobile:foreign")
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { store.applyEvent("server", "device", foreign, 2) }
+        }
+        assertEquals(null, database.messages().get("assistant:turn"))
     }
 
     private fun event(sequence: Long, type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(

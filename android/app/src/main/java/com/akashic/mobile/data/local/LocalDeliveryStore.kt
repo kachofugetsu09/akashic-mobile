@@ -40,9 +40,15 @@ private fun encodeStoredToolBlock(content: StoredToolBlock): String =
 
 class LocalDeliveryStore(private val database: AppDatabase) {
     suspend fun savePairedProfile(profile: ServerProfileEntity, cursor: RealtimeCursorEntity) {
+        require(cursor.serverId == profile.serverId) { "Realtime cursor and profile server mismatch" }
+        require(cursor.deviceId == profile.deviceId) { "Realtime cursor and profile device mismatch" }
         database.withTransaction {
+            val existingCursor = database.realtimeCursors().get(cursor.deviceId)
+            require(existingCursor == null || existingCursor.serverId == profile.serverId) {
+                "Realtime device identity belongs to another server"
+            }
             database.serverProfiles().upsert(profile)
-            if (database.realtimeCursors().get(cursor.deviceId) == null) {
+            if (existingCursor == null) {
                 database.realtimeCursors().insert(cursor)
             }
         }
@@ -53,7 +59,10 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         message: MessageEntity,
         command: OutboxCommandEntity,
     ) {
+        require(message.sessionId == conversation.sessionId) { "Message and conversation session mismatch" }
+        require(command.serverId == conversation.serverId) { "Outbox and conversation server mismatch" }
         database.withTransaction {
+            requireConversationOwner(conversation.serverId, conversation.sessionId)
             database.conversations().upsert(conversation)
             database.messages().upsert(message)
             database.outbox().enqueue(command)
@@ -66,6 +75,7 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         deviceId: String,
         envelope: WireEnvelope,
         updatedAt: Long,
+        preservedSessionId: String? = null,
     ): Long {
         require(envelope.kind == WireKind.EVENT) { "Only event envelopes can advance the cursor" }
         val eventSeq = requireNotNull(envelope.eventSeq)
@@ -74,7 +84,18 @@ class LocalDeliveryStore(private val database: AppDatabase) {
             val cursor = requireNotNull(database.realtimeCursors().get(deviceId)) {
                 "Realtime cursor is missing for device $deviceId"
             }
+            require(cursor.serverId == serverId) { "Realtime cursor belongs to another server" }
             require(connectionEpoch >= cursor.connectionEpoch) { "Stale event connection epoch" }
+            envelope.sessionId?.let { requireConversationOwner(serverId, it) }
+            if (envelope.type == "sync.reset_required") {
+                require(eventSeq > cursor.lastAcknowledgedEventSeq) { "Stale reset event sequence" }
+                database.messages().deleteServerProjection(serverId)
+                database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
+                check(
+                    database.realtimeCursors().reset(deviceId, eventSeq, connectionEpoch, updatedAt) == 1,
+                ) { "Reset cursor rollback or stale connection epoch for device $deviceId" }
+                return@withTransaction eventSeq
+            }
             require(eventSeq == cursor.lastAcknowledgedEventSeq + 1) {
                 "Event sequence gap: expected ${cursor.lastAcknowledgedEventSeq + 1}, got $eventSeq"
             }
@@ -112,13 +133,27 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         }
     }
 
-    suspend fun failOutbox(commandId: String, updatedAt: Long) {
+    suspend fun failOutbox(commandId: String, updatedAt: Long): String =
         database.withTransaction {
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
             check(database.messages().updateDelivery(payload.clientMessageId, "failed", updatedAt) == 1)
             check(database.outbox().deleteAcknowledged(commandId) == 1)
+            payload.sessionId
+        }
+
+    /** 以权威会话目录移除可重建投影，同时保留本地未决工作。 */
+    suspend fun reconcileSessionCatalog(
+        serverId: String,
+        remoteSessionIds: Set<String>,
+        preservedSessionId: String?,
+    ) {
+        database.withTransaction {
+            database.conversations().listForServer(serverId)
+                .filterNot { it.sessionId in remoteSessionIds }
+                .forEach { database.messages().deleteSessionProjection(it.sessionId) }
+            database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
         }
     }
 
@@ -142,6 +177,7 @@ class LocalDeliveryStore(private val database: AppDatabase) {
     private suspend fun applySessionList(serverId: String, envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
         payload.items.forEach { item ->
+            requireConversationOwner(serverId, item.sessionId)
             database.conversations().upsert(
                 ConversationEntity(
                     sessionId = item.sessionId,
@@ -159,7 +195,11 @@ class LocalDeliveryStore(private val database: AppDatabase) {
     ) {
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        if (database.conversations().get(sessionId) == null) {
+        val conversation = database.conversations().get(sessionId)
+        require(conversation == null || conversation.serverId == serverId) {
+            "History session belongs to another server"
+        }
+        if (conversation == null) {
             database.conversations().upsert(
                 ConversationEntity(sessionId, serverId, "新对话", System.currentTimeMillis()),
             )
@@ -169,20 +209,22 @@ class LocalDeliveryStore(private val database: AppDatabase) {
             require(remote.role in setOf("user", "assistant")) { "Unsupported history role: ${remote.role}" }
             val completedAt = Instant.parse(remote.ts).toEpochMilli()
             val duration = remote.extra["turn_duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
-            val messageId = "history:${remote.id}"
-            database.messages().upsert(
-                MessageEntity(
-                    messageId = messageId,
-                    clientMessageId = null,
-                    sessionId = sessionId,
-                    role = remote.role,
-                    text = remote.content,
-                    deliveryState = "complete",
-                    createdAt = (completedAt - duration).coerceAtMost(completedAt),
-                    updatedAt = completedAt,
-                ),
+            require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
+            remote.clientMessageId?.let(::requireFrameId)
+            val messageId = remote.id
+            val canonical = MessageEntity(
+                messageId = messageId,
+                clientMessageId = remote.clientMessageId,
+                sessionId = sessionId,
+                role = remote.role,
+                text = remote.content,
+                deliveryState = "complete",
+                createdAt = (completedAt - duration).coerceAtMost(completedAt),
+                updatedAt = completedAt,
             )
+            mergeCanonicalMessage(remote.clientMessageId?.let { "user:$it" }, canonical)
             if (remote.role == "assistant") {
+                database.messages().deleteBlocks(messageId)
                 database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
             }
         }
@@ -247,10 +289,11 @@ class LocalDeliveryStore(private val database: AppDatabase) {
         val sessionId = envelope.sessionId ?: payloadText(envelope, "session_id")
         require(!sessionId.isNullOrBlank()) { "Session event has no session_id" }
         val current = database.conversations().get(sessionId)
+        require(current == null || current.serverId == serverId) { "Session event belongs to another server" }
         database.conversations().upsert(
             ConversationEntity(
                 sessionId = sessionId,
-                serverId = current?.serverId ?: serverId,
+                serverId = serverId,
                 title = payloadText(envelope, "title") ?: current?.title ?: "新对话",
                 updatedAt = updatedAt,
             ),
@@ -403,14 +446,51 @@ class LocalDeliveryStore(private val database: AppDatabase) {
                 ),
             )
         }
-        database.messages().upsert(
-            current.copy(
-                text = payloadText(envelope, "text") ?: payloadText(envelope, "content") ?: current.text,
-                deliveryState = "complete",
-                updatedAt = updatedAt,
-            ),
+        val canonicalId = requireNotNull(payloadText(envelope, "message_id")) {
+            "Final message has no canonical message_id"
+        }
+        require(canonicalId.isNotBlank() && canonicalId.length <= 512) { "Canonical message id is invalid" }
+        val canonical = current.copy(
+            messageId = canonicalId,
+            text = payloadText(envelope, "text") ?: payloadText(envelope, "content") ?: current.text,
+            deliveryState = "complete",
+            updatedAt = updatedAt,
         )
-        database.messages().completeRunningBlocks(current.messageId, updatedAt)
+        mergeCanonicalMessage(current.messageId, canonical)
+        database.messages().completeRunningBlocks(canonicalId, updatedAt)
+    }
+
+    /** 把流式或 optimistic 消息原子迁移到服务端 canonical identity。 */
+    private suspend fun mergeCanonicalMessage(sourceId: String?, canonical: MessageEntity) {
+        val messages = database.messages()
+        val existingCanonical = messages.get(canonical.messageId)
+        if (existingCanonical != null) {
+            require(
+                existingCanonical.sessionId == canonical.sessionId && existingCanonical.role == canonical.role,
+            ) { "Canonical message identity belongs to another message" }
+        }
+        val source = sourceId?.let { messages.get(it) }
+        if (sourceId == null || sourceId == canonical.messageId || source == null) {
+            messages.upsert(canonical)
+            return
+        }
+        require(source.sessionId == canonical.sessionId && source.role == canonical.role) {
+            "Source message identity belongs to another message"
+        }
+        if (canonical.clientMessageId != null) {
+            require(source.clientMessageId == canonical.clientMessageId) { "Optimistic client id mismatch" }
+        }
+
+        // 1. 清理已同步 canonical 子项，并释放 optimistic client id 唯一约束
+        messages.deleteBlocks(canonical.messageId)
+        if (canonical.clientMessageId != null) {
+            check(messages.clearClientMessageId(sourceId) == 1) { "Optimistic message disappeared" }
+        }
+        messages.upsert(canonical)
+
+        // 2. 将流式子项迁移后删除旧身份
+        messages.moveBlocks(sourceId, canonical.messageId)
+        check(messages.delete(sourceId) == 1) { "Source message disappeared during canonical merge" }
     }
 
     private suspend fun interruptTurn(envelope: WireEnvelope, updatedAt: Long) {
@@ -449,4 +529,20 @@ class LocalDeliveryStore(private val database: AppDatabase) {
 
     private fun payloadLong(envelope: WireEnvelope, key: String): Long? =
         envelope.payload[key]?.jsonPrimitive?.longOrNull
+
+    private suspend fun requireConversationOwner(serverId: String, sessionId: String) {
+        val existing = database.conversations().get(sessionId)
+        require(existing == null || existing.serverId == serverId) { "Session belongs to another server" }
+    }
+
+    private fun requireFrameId(value: String) {
+        require(FRAME_ID.matches(value)) { "Frame id must be a UUIDv7 or ULID" }
+    }
+
+    private companion object {
+        val FRAME_ID = Regex(
+            "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
+                "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
+        )
+    }
 }
