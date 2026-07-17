@@ -3,6 +3,8 @@ package com.akashic.mobile.data.realtime
 import com.akashic.mobile.domain.model.EndpointRoute
 import com.akashic.mobile.domain.model.ServerEndpoint
 import kotlin.random.Random
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -35,5 +37,26 @@ class TransportAndIdsTest {
     fun `generated ULID satisfies wire frame grammar`() {
         val value = Ulid.next(1_752_460_800_000)
         assertTrue(Regex("^[0-9A-HJKMNP-TV-Z]{26}$").matches(value))
+    }
+
+    @Test
+    fun `message command id must equal client message id`() {
+        val envelope = WireEnvelope(
+            v = 1,
+            kind = WireKind.COMMAND,
+            type = "message.send",
+            id = "01J00000000000000000000000",
+            connectionEpoch = 1,
+            sessionId = "mobile:test",
+            payload = buildJsonObject {
+                put("client_message_id", "01J00000000000000000000001")
+                put("session_id", "mobile:test")
+                put("text", "hello")
+                put("media_refs", kotlinx.serialization.json.buildJsonArray {})
+                put("client_created_at", "2026-07-18T00:00:00Z")
+            },
+        )
+
+        assertThrows(IllegalArgumentException::class.java) { ProtocolCodec.encode(envelope) }
     }
 }
