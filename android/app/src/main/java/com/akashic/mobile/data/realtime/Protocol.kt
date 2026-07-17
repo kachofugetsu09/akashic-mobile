@@ -157,7 +157,6 @@ object ProtocolCodec {
             "turn.stop",
             "attachment.begin",
             "attachment.finish",
-            "attachment.download",
             "device.update",
             "ping",
         ),
