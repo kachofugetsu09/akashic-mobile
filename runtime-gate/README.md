@@ -34,3 +34,5 @@ python3 runtime-gate/run_core_contract.py \
 ```
 
 每一层 stacked PR 只登记该层已经实现的场景；后续 PR 在自己的目录版本中追加场景，禁止把未来能力提前塞进基础 PR。更新核心兼容基线时，必须同时更新完整 commit/tree、当前 schema hash 和场景目录 hash，并重新运行 Gate。禁止写浮动分支或 `latest` 作为兼容证据。
+
+`mobile-pr3-v1` 在 PR2 会话恢复场景之上追加上传二进制帧、持久 offset 续传、消息媒体接入和纯文件名边界；下载与后续移动能力不属于本 profile。

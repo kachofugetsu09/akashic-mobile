@@ -63,10 +63,22 @@
       "consumer_test": "every nonempty remote session starts from page one"
     },
     {
+      "id": "attachment-binary-frame-contract",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_binary_chunk_round_trip_and_rejects_oversized_header",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/TransportAndIdsTest.kt",
+      "consumer_test": "attachment chunk uses big endian json header and absolute offset"
+    },
+    {
       "id": "attachment-upload-resumes-confirmed-offset",
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_upload_resumes_from_persisted_offset_and_verifies_digest",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/AttachmentUploadCoordinatorTest.kt",
       "consumer_test": "uploads one confirmed window then resumes with a new begin id"
+    },
+    {
+      "id": "attachment-upload-reaches-agent-media",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_attachment_upload_resumes_and_reaches_agent_media",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "attachmentMessageMovesReadyToSendingThenSent"
     },
     {
       "id": "attachment-filename-is-plain",
