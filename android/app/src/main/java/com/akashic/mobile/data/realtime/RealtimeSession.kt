@@ -6,7 +6,6 @@ import com.akashic.mobile.data.local.AttachmentDraftStore
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
-import com.akashic.mobile.data.local.ConversationRemoteState
 import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.ServerProfileEntity
@@ -150,12 +149,6 @@ internal fun nextHistoryPage(payload: HistoryPagePayload): Int? {
         null
     }
 }
-
-internal fun shouldClearRejectedSession(
-    errorCode: String?,
-    currentSessionId: String?,
-    failedSessionId: String,
-): Boolean = errorCode == "session_not_found" && currentSessionId == failedSessionId
 
 class RealtimeSession(
     private val database: AppDatabase,
@@ -769,12 +762,8 @@ class RealtimeSession(
                                 scheduleReconnect(message)
                             }
                             OutboxFailureDisposition.FAIL -> {
-                                val failedSessionId = deliveryStore.failOutbox(id, System.currentTimeMillis())
+                                deliveryStore.failOutbox(id, System.currentTimeMillis())
                                 outboxFlight.complete(id)
-                                if (shouldClearRejectedSession(code, mutableState.value.currentSessionId, failedSessionId)) {
-                                    preferences.selectSession(null)
-                                    mutableState.value = mutableState.value.copy(currentSessionId = null)
-                                }
                                 mutableState.value = mutableState.value.copy(errorMessage = message)
                                 flushOutbox()
                             }
@@ -942,7 +931,7 @@ class RealtimeSession(
         val currentProfile = requireNotNull(profile)
         val epoch = activeEpoch ?: return
         val candidate = activeCandidate ?: return
-        val command = database.outbox().dispatchable(currentProfile.serverId).firstOrNull() ?: return
+        val command = database.outbox().pending(currentProfile.serverId).firstOrNull() ?: return
         val stored = ProtocolCodec.decode(command.envelopeJson)
         val wire = stored.copy(connectionEpoch = epoch)
         deliveryStore.markOutboxAttempt(command.commandId, System.currentTimeMillis())
@@ -1047,21 +1036,12 @@ class RealtimeSession(
         require(current == null || current.serverId == currentProfile.serverId) {
             "Current session belongs to another server"
         }
-        require(current?.remoteState != ConversationRemoteState.DELETED) {
-            "Current session was deleted on the paired server"
-        }
         val title = if (current == null || current.title == "新对话") {
             body.lineSequence().first().take(32)
         } else {
             current.title
         }
-        return ConversationEntity(
-            sessionId,
-            currentProfile.serverId,
-            title,
-            now,
-            current?.remoteState ?: ConversationRemoteState.LOCAL,
-        )
+        return ConversationEntity(sessionId, currentProfile.serverId, title, now)
     }
 
     private suspend fun ensureCurrentSession(currentProfile: ServerProfileEntity): String {

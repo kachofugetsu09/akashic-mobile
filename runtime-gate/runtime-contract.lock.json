@@ -7,5 +7,5 @@
   "source_schema_path": "schema/mobile-realtime-v1.json",
   "source_schema_sha256": "114e2cd9472b5f7d05a421668ab42778c2f0d6520d75346f27f27e1c3f8b3584",
   "scenario_catalog": "runtime-gate/scenarios.json",
-  "scenario_catalog_sha256": "4a36f555c3a6e7abe5a6b7d8a06e4197ed65a3b5e683c0fb43288518e15aec40"
+  "scenario_catalog_sha256": "9f57a9c01de335473fc929cc2daba1a2ad05ddd5df01e930917ca8bc16e1885a"
 }

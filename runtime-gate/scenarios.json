@@ -33,24 +33,6 @@
       "consumer_test": "authenticated protocol failure closes winner and reports closure"
     },
     {
-      "id": "deleted-claimed-session-is-not-recreated",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
-      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
-      "consumer_test": "only rejection of selected deleted session clears selection"
-    },
-    {
-      "id": "deleted-session-catalog-blocks-outbox",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
-      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "catalog deletion preserves but blocks pending work"
-    },
-    {
-      "id": "session-delete-race-is-not-recreated",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_claimed_message_admission_does_not_recreate_after_exists_check",
-      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
-      "consumer_test": "only rejection of selected deleted session clears selection"
-    },
-    {
       "id": "resume-gap-requires-reset",
       "provider_test": "tests/mobile_realtime/test_gateway.py::test_resume_resets_when_durable_inbox_has_sequence_gap",
       "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
