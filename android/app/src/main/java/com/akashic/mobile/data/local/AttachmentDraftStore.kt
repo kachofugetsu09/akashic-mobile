@@ -38,7 +38,7 @@ class AttachmentDraftStore(
             uris.forEachIndexed { index, uri ->
                 val attachmentId = Ulid.next(now + index)
                 val filename = queryFilename(uri)
-                validateFilename(filename)
+                validateAttachmentFilename(filename)
                 val contentType = contentResolver.getType(uri) ?: "application/octet-stream"
                 require(contentType.length <= 255 && MIME_TYPE.matches(contentType)) {
                     "文件 MIME type 无效：$contentType"
@@ -156,12 +156,6 @@ class AttachmentDraftStore(
         return CopiedAttachment(size, digest.digest().toHex())
     }
 
-    private fun validateFilename(filename: String) {
-        require(filename.isNotBlank() && filename.length <= 255) { "文件名必须为 1..255 字符" }
-        require('/' !in filename && '\\' !in filename) { "文件名不能包含路径分隔符" }
-        require(filename.none { it.code < 32 || it.code == 127 }) { "文件名不能包含控制字符" }
-    }
-
     private data class CopiedAttachment(val sizeBytes: Long, val sha256: String)
 
     fun fileFor(attachmentId: String): File = File(root, "$attachmentId.upload")
@@ -178,4 +172,11 @@ class AttachmentDraftStore(
         const val COPY_BUFFER_BYTES = 64 * 1024
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
     }
+}
+
+internal fun validateAttachmentFilename(filename: String) {
+    require(filename.isNotBlank() && filename.length <= 255) { "文件名必须为 1..255 字符" }
+    require(filename == filename.trim()) { "文件名不能包含首尾空白" }
+    require('/' !in filename && '\\' !in filename) { "文件名不能包含路径分隔符" }
+    require(filename.none { it.code < 32 || it.code == 127 }) { "文件名不能包含控制字符" }
 }
