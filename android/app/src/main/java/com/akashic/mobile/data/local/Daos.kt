@@ -121,6 +121,26 @@ interface MessageDao {
 }
 
 @Dao
+interface PendingMessageNotificationDao {
+    @Upsert
+    suspend fun upsert(notification: PendingMessageNotificationEntity)
+
+    @Query(
+        "SELECT * FROM pending_message_notifications WHERE serverId = :serverId ORDER BY createdAt, messageId",
+    )
+    fun observeForServer(serverId: String): Flow<List<PendingMessageNotificationEntity>>
+
+    @Query("SELECT * FROM pending_message_notifications WHERE messageId = :messageId")
+    suspend fun get(messageId: String): PendingMessageNotificationEntity?
+
+    @Query("SELECT COUNT(*) FROM pending_message_notifications WHERE serverId = :serverId")
+    suspend fun countForServer(serverId: String): Int
+
+    @Query("DELETE FROM pending_message_notifications WHERE messageId = :messageId")
+    suspend fun delete(messageId: String): Int
+}
+
+@Dao
 interface OutboxDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun enqueue(command: OutboxCommandEntity)

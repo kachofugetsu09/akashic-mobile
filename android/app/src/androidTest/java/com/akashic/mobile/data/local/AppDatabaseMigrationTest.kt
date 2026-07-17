@@ -50,7 +50,44 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate2To3CreatesDurableMessageNotificationQueue() {
+        helper.createDatabase(DATABASE_2_3, 2).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2)")
+            execSQL(
+                "INSERT INTO messages VALUES('message-1', NULL, 'mobile:test', 'assistant', '完成', 'complete', 3, 3)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_2_3,
+            3,
+            true,
+            AppDatabase.MIGRATION_2_3,
+        ).use { database ->
+            database.execSQL(
+                "INSERT INTO pending_message_notifications VALUES('message-1', 'server', 'mobile:test', '完成', 0, 4)",
+            )
+            database.query(
+                "SELECT content, createdAt FROM pending_message_notifications WHERE messageId = 'message-1'",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("完成", cursor.getString(0))
+                assertEquals(4L, cursor.getLong(1))
+            }
+            database.query("SELECT text FROM messages WHERE messageId = 'message-1'").use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("完成", cursor.getString(0))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_NAME = "migration-1-2"
+        const val DATABASE_2_3 = "migration-2-3"
     }
 }

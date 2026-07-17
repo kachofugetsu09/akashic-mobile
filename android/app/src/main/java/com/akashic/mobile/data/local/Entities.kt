@@ -63,6 +63,33 @@ data class MessageEntity(
 )
 
 @Entity(
+    tableName = "pending_message_notifications",
+    foreignKeys = [
+        ForeignKey(
+            entity = ServerProfileEntity::class,
+            parentColumns = ["serverId"],
+            childColumns = ["serverId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = MessageEntity::class,
+            parentColumns = ["messageId"],
+            childColumns = ["messageId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("serverId"), Index("createdAt")],
+)
+data class PendingMessageNotificationEntity(
+    @PrimaryKey val messageId: String,
+    val serverId: String,
+    val sessionId: String,
+    val content: String,
+    val hasAttachments: Boolean,
+    val createdAt: Long,
+)
+
+@Entity(
     tableName = "turn_blocks",
     foreignKeys = [
         ForeignKey(
