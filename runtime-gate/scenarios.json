@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-pr3-v1",
+  "profile": "mobile-pr4-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -91,6 +91,30 @@
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_begin_rejects_filename_that_is_not_plain",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/local/AttachmentDraftStoreTest.kt",
       "consumer_test": "rejects filenames with surrounding whitespace"
+    },
+    {
+      "id": "attachment-download-offset-is-confirmed",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_outbound_chunk_enforces_session_state_and_offset",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/AttachmentDownloadCoordinatorTest.kt",
+      "consumer_test": "reconnect replays confirmed offset when reply is missing"
+    },
+    {
+      "id": "attachment-download-publishes-verified-content",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_outbound_chunk_is_bounded_and_hides_local_path",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/AttachmentDownloadCoordinatorTest.kt",
+      "consumer_test": "downloads serial chunks and atomically publishes verified file"
+    },
+    {
+      "id": "attachment-history-reuses-stable-identity",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "liveAndHistoryMessagesIdempotentlyShareOutboundAttachment"
+    },
+    {
+      "id": "attachment-cache-recovers-atomic-publish",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_outbound_registration_copies_and_stably_reuses_content",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/local/MediaCacheStoreTest.kt",
+      "consumer_test": "reconcile commits valid final left before database update"
     }
   ]
 }

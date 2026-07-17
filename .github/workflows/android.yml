@@ -27,7 +27,7 @@ jobs:
 
       - name: Verify Android project and protocol contract
         working-directory: android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+        run: ./gradlew testDebugUnitTest compileDebugAndroidTestSources lintDebug assembleDebug
 
   runtime-contract:
     runs-on: ubuntu-latest
