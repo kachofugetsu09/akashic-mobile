@@ -212,8 +212,27 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migratePartialVersion3FailsLoudly() {
+        helper.createDatabase(PARTIAL_V3_DATABASE_NAME, 1).apply {
+            createMediaTables()
+            createPendingNotificationTable(includeIndexes = false)
+            execSQL("PRAGMA user_version = 3")
+            close()
+        }
+
+        assertThrows(IllegalStateException::class.java) {
+            helper.runMigrationsAndValidate(
+                PARTIAL_V3_DATABASE_NAME,
+                4,
+                true,
+                AppDatabase.MIGRATION_3_4,
+            )
+        }
+    }
+
+    @Test
     fun migratePartialVersion4FailsLoudly() {
-        helper.createDatabase(PARTIAL_DATABASE_NAME, 1).apply {
+        helper.createDatabase(PARTIAL_V4_DATABASE_NAME, 1).apply {
             createMediaTables()
             createPendingNotificationTable(includeIndexes = true)
             createPendingTurnStopTable(includeIndexes = false)
@@ -223,7 +242,7 @@ class AppDatabaseMigrationTest {
 
         assertThrows(IllegalStateException::class.java) {
             helper.runMigrationsAndValidate(
-                PARTIAL_DATABASE_NAME,
+                PARTIAL_V4_DATABASE_NAME,
                 5,
                 true,
                 AppDatabase.MIGRATION_4_5,
@@ -423,6 +442,7 @@ class AppDatabaseMigrationTest {
         const val FINAL_PR5_DATABASE_NAME = "migration-final-pr5-4-5"
         const val REVIEWED_PR6_DATABASE_NAME = "migration-reviewed-pr6-4-5"
         const val ORIGINAL_PR6_DATABASE_NAME = "migration-original-pr6-3-5"
-        const val PARTIAL_DATABASE_NAME = "migration-partial-4-5"
+        const val PARTIAL_V3_DATABASE_NAME = "migration-partial-3-4"
+        const val PARTIAL_V4_DATABASE_NAME = "migration-partial-4-5"
     }
 }
