@@ -206,6 +206,36 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun resetProjectionCleanupPreservesPendingNotificationSnapshot() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "message.final",
+                buildJsonObject {
+                    put("message_id", "mobile:test:pending-notification")
+                    put("content", "仍需通知")
+                },
+            ),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(50, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
+            3,
+            preservedSessionId = "mobile:test",
+        )
+
+        assertEquals(null, database.messages().get("mobile:test:pending-notification"))
+        assertEquals(
+            "仍需通知",
+            database.pendingMessageNotifications().get("mobile:test:pending-notification")?.content,
+        )
+    }
+
+    @Test
     fun historyReplacesLiveBlocksForTheSameCanonicalMessage() = runBlocking {
         store.applyEvent(
             "server",

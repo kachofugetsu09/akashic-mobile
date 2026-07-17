@@ -83,6 +83,13 @@ class AppDatabaseMigrationTest {
                 check(cursor.moveToFirst())
                 assertEquals("完成", cursor.getString(0))
             }
+            database.execSQL("DELETE FROM messages WHERE messageId = 'message-1'")
+            database.query(
+                "SELECT content FROM pending_message_notifications WHERE messageId = 'message-1'",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("完成", cursor.getString(0))
+            }
         }
     }
 
