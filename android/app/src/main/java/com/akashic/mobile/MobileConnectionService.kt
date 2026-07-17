@@ -118,7 +118,12 @@ class MobileConnectionService : Service() {
             hasAttachments = notification.hasAttachments,
         )
 
-        // 2. 权限或前台策略明确抑制；其余通知使用稳定 ID 幂等覆盖
+        // 2. 区分产品抑制与暂时不可投递
+        val shouldNotify = MessageNotificationPolicy.shouldNotify(
+            appVisible = app.visibility.isVisible,
+            currentSessionId = app.container.realtimeSession.state.value.currentSessionId,
+            event = event,
+        )
         val canPost = (
             Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
                 ContextCompat.checkSelfPermission(
@@ -126,22 +131,23 @@ class MobileConnectionService : Service() {
                     Manifest.permission.POST_NOTIFICATIONS,
                 ) == PackageManager.PERMISSION_GRANTED
             ) && notificationManager.areNotificationsEnabled()
-        if (
-            canPost && MessageNotificationPolicy.shouldNotify(
-                appVisible = app.visibility.isVisible,
-                currentSessionId = app.container.realtimeSession.state.value.currentSessionId,
-                event = event,
-            )
-        ) {
-            notificationManager.notify(
-                event.messageId,
-                MESSAGE_NOTIFICATION_ID,
-                messageNotification(event),
-            )
-        }
-
-        // 3. 仅在系统调用成功或策略明确抑制后删除；进程中断会安全重放
-        app.container.database.pendingMessageNotifications().delete(event.messageId)
+        // 3. 只有明确抑制或系统调用成功才消费；异常与权限缺失保留待办
+        deliverPendingNotification(
+            shouldNotify = shouldNotify,
+            canPost = canPost,
+            post = {
+                notificationManager.notify(
+                    event.messageId,
+                    MESSAGE_NOTIFICATION_ID,
+                    messageNotification(event),
+                )
+            },
+            consume = {
+                check(app.container.database.pendingMessageNotifications().delete(event.messageId) == 1) {
+                    "Pending notification disappeared before consumption: ${event.messageId}"
+                }
+            },
+        )
     }
 
     private fun createNotificationChannels() {
@@ -260,3 +266,19 @@ internal fun notificationIntentData(messageId: String?): String =
                 .encodeToString(messageId.toByteArray(Charsets.UTF_8))
         }"
     }
+
+/** 明确抑制时消费，暂不可投递时保留，系统投递成功后再消费。 */
+internal suspend fun deliverPendingNotification(
+    shouldNotify: Boolean,
+    canPost: Boolean,
+    post: () -> Unit,
+    consume: suspend () -> Unit,
+) {
+    if (!shouldNotify) {
+        consume()
+        return
+    }
+    if (!canPost) return
+    post()
+    consume()
+}

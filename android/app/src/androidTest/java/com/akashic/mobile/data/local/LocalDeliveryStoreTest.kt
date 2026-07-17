@@ -211,6 +211,62 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun pendingNotificationAndCursorSurviveDatabaseRestart() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "pending-notification-${System.nanoTime()}.db"
+        val cacheRoot = context.cacheDir.resolve("pending-notification-${System.nanoTime()}")
+        var persisted = Room.databaseBuilder(context, AppDatabase::class.java, name).build()
+        try {
+            val persistedStore = LocalDeliveryStore(
+                persisted,
+                MediaCacheStore(cacheRoot, persisted.mediaAttachments()),
+            )
+            persistedStore.savePairedProfile(
+                ServerProfileEntity("restart", "restart", "restart-device", "alias", "pin", "[]", "[]", "[]", 1),
+                RealtimeCursorEntity("restart-device", "restart", 0, 0, 1),
+            )
+            persisted.conversations().upsert(
+                ConversationEntity("mobile:restart", "restart", "restart", 1),
+            )
+            persistedStore.applyEvent(
+                serverId = "restart",
+                deviceId = "restart-device",
+                envelope = WireEnvelope(
+                    v = 1,
+                    kind = WireKind.EVENT,
+                    type = "message.final",
+                    id = "01J00000000000000000000000",
+                    connectionEpoch = 1,
+                    eventSeq = 1,
+                    sessionId = "mobile:restart",
+                    turnId = "turn",
+                    payload = buildJsonObject {
+                        put("message_id", "mobile:restart:assistant:final")
+                        put("content", "重启后仍需通知")
+                    },
+                ),
+                updatedAt = 2,
+            )
+            persisted.close()
+
+            persisted = Room.databaseBuilder(context, AppDatabase::class.java, name).build()
+            assertEquals(
+                "重启后仍需通知",
+                persisted.pendingMessageNotifications().get("mobile:restart:assistant:final")?.content,
+            )
+            assertEquals(
+                "重启后仍需通知",
+                persisted.messages().get("mobile:restart:assistant:final")?.text,
+            )
+            assertEquals(1L, persisted.realtimeCursors().get("restart-device")?.lastAcknowledgedEventSeq)
+        } finally {
+            if (persisted.isOpen) persisted.close()
+            context.deleteDatabase(name)
+            cacheRoot.deleteRecursively()
+        }
+    }
+
+    @Test
     fun historyReplacesLiveBlocksForTheSameCanonicalMessage() = runBlocking {
         store.applyEvent(
             "server",
