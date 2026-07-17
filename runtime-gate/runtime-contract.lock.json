@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "profile": "mobile-pr1-v1",
+  "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
+  "source_commit": "d3a019d79bd5b65c3761e17a6bfde5ad9c4a3da7",
+  "source_tree": "477dbf87be46b8e1a342d6db320e5a1a005745c3",
+  "source_schema_path": "schema/mobile-realtime-v1.json",
+  "source_schema_sha256": "114e2cd9472b5f7d05a421668ab42778c2f0d6520d75346f27f27e1c3f8b3584",
+  "scenario_catalog": "runtime-gate/scenarios.json",
+  "scenario_catalog_sha256": "cd37a4d8dab4f36d08a5b8bf77eb03d62fe7f7927b4d0deb7f5576b3beced5ab"
+}
