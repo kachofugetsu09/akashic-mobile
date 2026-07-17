@@ -2,6 +2,7 @@
 set -euo pipefail
 
 printf '%s\n' "$*" >>"${DEVICE_GATE_FAKE_ADB_LOG:?}"
+readonly mode="${DEVICE_GATE_FAKE_MODE:?}"
 
 if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "get-state" ]]; then
     printf 'device\n'
@@ -10,7 +11,39 @@ fi
 
 if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "shell" &&
     "${4:-}" == "pm" && "${5:-}" == "list" && "${6:-}" == "packages" && "${7:-}" == "-u" ]]; then
-    printf 'package:%s\n' "${DEVICE_GATE_FAKE_COLLISION_ID:?}"
+    if [[ "$mode" == "collision" ]]; then
+        printf 'package:%s\n' "${DEVICE_GATE_FAKE_COLLISION_ID:?}"
+    fi
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "install" ]]; then
+    printf 'Success\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "uninstall" ]]; then
+    printf 'Success\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "shell" &&
+    "${4:-}" == "am" && "${5:-}" == "instrument" ]]; then
+    case "$mode" in
+        success)
+            printf 'INSTRUMENTATION_RESULT: stream=\n\nOK (1 test)\n\nINSTRUMENTATION_CODE: -1\n'
+            ;;
+        zero)
+            printf 'INSTRUMENTATION_RESULT: stream=\n\nOK (0 tests)\n\nINSTRUMENTATION_CODE: -1\n'
+            ;;
+        failure)
+            printf 'INSTRUMENTATION_RESULT: stream=\n\nFAILURES!!!\nTests run: 1, Failures: 1\n\nINSTRUMENTATION_CODE: -1\n'
+            ;;
+        *)
+            printf 'fake adb has no instrumentation result for mode: %s\n' "$mode" >&2
+            exit 97
+            ;;
+    esac
     exit 0
 fi
 

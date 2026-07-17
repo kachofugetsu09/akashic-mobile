@@ -59,6 +59,21 @@ read_target_package_id() {
         head -n 1
 }
 
+require_passing_phase() {
+    local phase_file="$1"
+    local test_name="$2"
+    local phase_text
+    phase_text="$(tr -d '\r' <"$phase_file")"
+
+    if grep -Eq 'FAILURES!!!|INSTRUMENTATION_(FAILED|ABORTED)|shortMsg=|Process crashed' <<<"$phase_text"; then
+        die "instrumentation reported a failure: $test_name"
+    fi
+    [[ "$(grep -Ec '^OK \(1 test\)$' <<<"$phase_text" || true)" == "1" ]] ||
+        die "instrumentation must execute exactly one test: $test_name"
+    [[ "$(grep -Ec '^INSTRUMENTATION_CODE: -1$' <<<"$phase_text" || true)" == "1" ]] ||
+        die "instrumentation did not finish successfully: $test_name"
+}
+
 serial=""
 run_id=""
 tests=()
@@ -209,10 +224,12 @@ for index in "${!tests[@]}"; do
         instrumentation_args+=("-e" "${runner_arg%%=*}" "${runner_arg#*=}")
     done
     instrumentation_args+=("-e" "class" "${tests[$index]}")
+    phase_file="$report_dir/phase-$((index + 1)).txt"
     adb -s "$serial" shell am instrument -w -r \
         "${instrumentation_args[@]}" \
         "$test_application_id/$runner" |
-        tee "$report_dir/phase-$((index + 1)).txt"
+        tee "$phase_file"
+    require_passing_phase "$phase_file" "${tests[$index]}"
     if ((index + 1 < ${#tests[@]})); then
         adb -s "$serial" shell am force-stop "$application_id"
     fi
