@@ -72,6 +72,8 @@ def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
     if _sha256(catalog_path) != expected_catalog_hash:
         raise ValueError("runtime scenario catalog hash 不匹配")
     catalog = _read_object(catalog_path)
+    if _required_text(catalog, "profile") != _required_text(lock, "profile"):
+        raise ValueError("runtime lock 与 scenario catalog profile 不一致")
     scenarios = catalog.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("runtime scenario catalog 必须包含场景")

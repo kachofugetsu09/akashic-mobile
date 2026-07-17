@@ -69,9 +69,6 @@ class LocalDeliveryStore(
     ) {
         require(message.sessionId == conversation.sessionId) { "Message and conversation session mismatch" }
         require(command.serverId == conversation.serverId) { "Outbox and conversation server mismatch" }
-        require(conversation.remoteState != ConversationRemoteState.DELETED) {
-            "Cannot enqueue into a remotely deleted session"
-        }
         database.withTransaction {
             requireConversationOwner(conversation.serverId, conversation.sessionId)
             database.conversations().upsert(conversation)
@@ -178,16 +175,7 @@ class LocalDeliveryStore(
         database.withTransaction {
             database.conversations().listForServer(serverId)
                 .filterNot { it.sessionId in remoteSessionIds }
-                .filterNot { it.remoteState == ConversationRemoteState.LOCAL }
-                .forEach { conversation ->
-                    check(
-                        database.conversations().updateRemoteState(
-                            conversation.sessionId,
-                            ConversationRemoteState.DELETED,
-                        ) == 1,
-                    ) { "Catalog session disappeared during reconciliation: ${conversation.sessionId}" }
-                    database.messages().deleteSessionProjection(conversation.sessionId)
-                }
+                .forEach { database.messages().deleteSessionProjection(it.sessionId) }
             database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
         }
     }
@@ -262,7 +250,6 @@ class LocalDeliveryStore(
                     serverId = serverId,
                     title = item.title,
                     updatedAt = Instant.parse(item.updatedAt).toEpochMilli(),
-                    remoteState = ConversationRemoteState.REMOTE,
                 ),
             )
         }
@@ -280,13 +267,7 @@ class LocalDeliveryStore(
         }
         if (conversation == null) {
             database.conversations().upsert(
-                ConversationEntity(
-                    sessionId,
-                    serverId,
-                    "新对话",
-                    System.currentTimeMillis(),
-                    ConversationRemoteState.REMOTE,
-                ),
+                ConversationEntity(sessionId, serverId, "新对话", System.currentTimeMillis()),
             )
         }
         payload.items.forEach { remote ->
@@ -389,7 +370,6 @@ class LocalDeliveryStore(
                 serverId = serverId,
                 title = payloadText(envelope, "title") ?: current?.title ?: "新对话",
                 updatedAt = updatedAt,
-                remoteState = ConversationRemoteState.REMOTE,
             ),
         )
     }
