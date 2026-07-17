@@ -28,6 +28,8 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
+                    onRetryDownloadedAttachment = {},
+                    onOpenDownloadedAttachment = {},
                     onSend = { _, _, _ -> },
                     onStop = {},
                 )
@@ -50,6 +52,8 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
+                    onRetryDownloadedAttachment = {},
+                    onOpenDownloadedAttachment = {},
                     onSend = { _, ids, report ->
                         assertEquals(listOf("file"), ids)
                         sends += 1
@@ -73,6 +77,8 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
+                    onRetryDownloadedAttachment = {},
+                    onOpenDownloadedAttachment = {},
                     onSend = { _, _, _ -> },
                     onStop = {},
                 )
@@ -90,6 +96,8 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
+                    onRetryDownloadedAttachment = {},
+                    onOpenDownloadedAttachment = {},
                     onSend = { _, _, _ -> },
                     onStop = {},
                 )
@@ -107,6 +115,8 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
+                    onRetryDownloadedAttachment = {},
+                    onOpenDownloadedAttachment = {},
                     onSend = { _, _, report -> report(false) },
                     onStop = {},
                 )

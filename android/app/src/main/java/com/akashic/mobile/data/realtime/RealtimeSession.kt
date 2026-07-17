@@ -1,23 +1,28 @@
 package com.akashic.mobile.data.realtime
 
 import android.net.Uri
+import android.database.sqlite.SQLiteException
 import android.os.Build
+import android.util.Log
 import com.akashic.mobile.data.local.AttachmentDraftStore
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
 import com.akashic.mobile.data.local.ConversationRemoteState
 import com.akashic.mobile.data.local.LocalDeliveryStore
+import com.akashic.mobile.data.local.MediaCacheStore
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.ServerProfileEntity
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.domain.model.EndpointRoute
 import com.akashic.mobile.domain.model.ServerEndpoint
+import java.io.IOException
 import java.util.UUID
 import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -161,6 +166,7 @@ class RealtimeSession(
     private val database: AppDatabase,
     private val deliveryStore: LocalDeliveryStore,
     private val attachmentDrafts: AttachmentDraftStore,
+    private val mediaCache: MediaCacheStore,
     private val preferences: AppPreferences,
     private val deviceKeys: DeviceKeyStore,
     private val scope: CoroutineScope,
@@ -194,6 +200,15 @@ class RealtimeSession(
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
     )
+    private val downloads = AttachmentDownloadCoordinator(
+        dao = database.mediaAttachments(),
+        cache = mediaCache,
+        sendCommand = ::sendAttachmentCommand,
+        onTransportUnavailable = ::scheduleReconnect,
+        onDownloadFailed = { message ->
+            mutableState.value = mutableState.value.copy(errorMessage = message)
+        },
+    )
     private val mutableState = MutableStateFlow(MobileSessionState())
     val state: StateFlow<MobileSessionState> = mutableState.asStateFlow()
 
@@ -219,7 +234,18 @@ class RealtimeSession(
 
     fun start() {
         scope.launch {
-            attachmentDrafts.reconcile()
+            val cacheReady = try {
+                attachmentDrafts.reconcile()
+                mediaCache.reconcile()
+                true
+            } catch (error: IOException) {
+                failStartup("startup_cache_io", "启动缓存检查失败：${error.message}", error)
+                false
+            } catch (error: SecurityException) {
+                failStartup("startup_cache_security", "启动缓存路径不安全：${error.message}", error)
+                false
+            }
+            if (!cacheReady) return@launch
             mutex.withLock {
                 val settings = preferences.settings.first()
                 profile = settings.currentServerId?.let { database.serverProfiles().get(it) }
@@ -289,6 +315,8 @@ class RealtimeSession(
                 ackJob?.cancel()
                 ackJob = null
                 socket.close(reason = "user requested re-pairing")
+                uploads.onDisconnected()
+                downloads.onDisconnected()
                 pendingPairing = null
                 profile = null
                 resetGenerationState()
@@ -362,6 +390,22 @@ class RealtimeSession(
                         uploads.resumeIfIdle(serverId)
                     }
                 }
+            }
+        }
+    }
+
+    fun retryDownloadedAttachment(attachmentId: String) {
+        scope.launch {
+            mutex.withLock {
+                downloads.retry(attachmentId)
+            }
+        }
+    }
+
+    fun touchDownloadedAttachment(attachmentId: String) {
+        scope.launch {
+            check(database.mediaAttachments().touch(attachmentId, System.currentTimeMillis()) == 1) {
+                "附件未缓存完成: $attachmentId"
             }
         }
     }
@@ -498,7 +542,7 @@ class RealtimeSession(
     }
 
     override fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
-        scope.launch {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
             mutex.withLock {
                 if (!shouldAcceptCandidateFrame(currentGeneration(), activeCandidate, candidateId)) {
                     if (candidateId.generation == currentGeneration() && activeCandidate != null) {
@@ -509,18 +553,43 @@ class RealtimeSession(
                 try {
                     handleEnvelope(candidateId, envelope)
                 } catch (error: IllegalArgumentException) {
-                    val message = "连接协议校验失败：${error.message}"
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = message,
-                    )
-                    if (candidateId == activeCandidate) {
-                        check(socket.closeActive(candidateId, 4406, "invalid authenticated server frame")) {
-                            "Active realtime candidate disappeared during protocol rejection"
-                        }
-                        scheduleReconnect(message)
-                    } else {
-                        socket.rejectPreAuth(candidateId, 4406, "invalid pre-auth server frame")
-                    }
+                    failCandidateProtocol(candidateId, "连接协议校验失败：${error.message}")
+                } catch (error: IllegalStateException) {
+                    failCandidateProtocol(candidateId, "连接状态校验失败：${error.message}")
+                } catch (error: ArithmeticException) {
+                    failCandidateProtocol(candidateId, "连接协议数值溢出")
+                } catch (error: SQLiteException) {
+                    failCandidateProtocol(candidateId, "本地数据库处理失败：${error.message}")
+                } catch (error: IOException) {
+                    failCandidateProtocol(candidateId, "本地文件处理失败：${error.message}")
+                } catch (error: SecurityException) {
+                    failCandidateProtocol(candidateId, "本地缓存路径不安全：${error.message}")
+                }
+            }
+        }
+    }
+
+    override fun onBinary(candidateId: SocketCandidateId, chunk: AttachmentChunkCodec.DecodedChunk) {
+        scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            mutex.withLock {
+                if (candidateId != activeCandidate) {
+                    socket.rejectPreAuth(candidateId, 4406, "binary frame before authentication")
+                    return@withLock
+                }
+                try {
+                    downloads.onBinary(chunk)
+                } catch (error: IllegalArgumentException) {
+                    failDownloadConnection("附件下载协议校验失败：${error.message}")
+                } catch (error: IllegalStateException) {
+                    failDownloadConnection("附件下载状态失败：${error.message}")
+                } catch (error: IOException) {
+                    failDownloadConnection("附件缓存写入失败：${error.message}")
+                } catch (error: SQLiteException) {
+                    failDownloadConnection("附件下载数据库失败：${error.message}")
+                } catch (error: ArithmeticException) {
+                    failDownloadConnection("附件下载长度溢出")
+                } catch (error: SecurityException) {
+                    failDownloadConnection("附件缓存路径不安全")
                 }
             }
         }
@@ -727,16 +796,39 @@ class RealtimeSession(
                             reconcileCatalogAndRequestHistory(currentProfile.serverId, envelope)
                         }
                     }
-                    "history.page" -> requestNextHistoryPage(envelope)
+                    "history.page" -> {
+                        requestNextHistoryPage(envelope)
+                        downloads.resumeIfIdle(currentProfile.serverId)
+                    }
                     "attachment.progress" -> uploads.onProgress(
                         ProtocolCodec.decodePayload(envelope.payload),
                     )
+                    "message.final", "message.proactive" ->
+                        downloads.resumeIfIdle(currentProfile.serverId)
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),
                     )
                 }
             }
             WireKind.REPLY -> {
+                if (envelope.type.startsWith("attachment.download.")) {
+                    try {
+                        check(downloads.onReply(envelope)) { "收到未知附件下载 reply" }
+                    } catch (error: IllegalArgumentException) {
+                        failDownloadConnection("附件下载 reply 无效：${error.message}")
+                    } catch (error: IllegalStateException) {
+                        failDownloadConnection("附件下载状态失败：${error.message}")
+                    } catch (error: IOException) {
+                        failDownloadConnection("附件缓存提交失败：${error.message}")
+                    } catch (error: SQLiteException) {
+                        failDownloadConnection("附件下载数据库失败：${error.message}")
+                    } catch (error: ArithmeticException) {
+                        failDownloadConnection("附件下载长度溢出")
+                    } catch (error: SecurityException) {
+                        failDownloadConnection("附件缓存路径不安全")
+                    }
+                    return
+                }
                 if (uploads.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
                 if (id in pendingSyncCommands && envelope.type.endsWith(".error")) {
@@ -911,7 +1003,9 @@ class RealtimeSession(
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
         )
-        uploads.onConnectionReady(requireNotNull(profile).serverId)
+        val serverId = requireNotNull(profile).serverId
+        uploads.onConnectionReady(serverId)
+        downloads.onConnectionReady(serverId)
         flushOutbox()
     }
 
@@ -1090,6 +1184,7 @@ class RealtimeSession(
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
         uploads.onDisconnected()
+        downloads.onDisconnected()
         retryCount += 1
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(
@@ -1126,10 +1221,41 @@ class RealtimeSession(
         ackJob = null
         pendingAckCount = 0
         uploads.onDisconnected()
+        downloads.onDisconnected()
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.CLOSED),
             errorMessage = "协议不兼容（$code），请升级电脑端或手机客户端",
         )
+    }
+
+    private fun failDownloadConnection(message: String) {
+        downloads.onDisconnected()
+        mutableState.value = mutableState.value.copy(errorMessage = message)
+        val candidateId = requireNotNull(activeCandidate) { "附件下载失败时不存在活动连接" }
+        check(socket.closeActive(candidateId, 4406, "invalid attachment download state"))
+        scheduleReconnect(message)
+    }
+
+    private fun failStartup(code: String, message: String, error: Throwable) {
+        Log.e(TAG, message, error)
+        mutableState.value = mutableState.value.copy(
+            initialized = true,
+            connection = mutableState.value.connection.copy(
+                phase = ConnectionPhase.FAILED,
+                lastErrorCode = code,
+            ),
+            errorMessage = message,
+        )
+    }
+
+    private fun failCandidateProtocol(candidateId: SocketCandidateId, message: String) {
+        mutableState.value = mutableState.value.copy(errorMessage = message)
+        if (candidateId == activeCandidate) {
+            check(socket.closeActive(candidateId, 4406, "invalid authenticated server frame"))
+            scheduleReconnect(message)
+        } else {
+            socket.rejectPreAuth(candidateId, 4406, "invalid pre-auth server frame")
+        }
     }
 
     private fun resetGenerationState() {
@@ -1143,6 +1269,7 @@ class RealtimeSession(
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
         uploads.onDisconnected()
+        downloads.onDisconnected()
     }
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(
@@ -1163,6 +1290,7 @@ class RealtimeSession(
         map { ServerEndpoint(it, emptyList(), EndpointRoute.TUNNEL) }
 
     private companion object {
+        const val TAG = "RealtimeSession"
         val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive", "attachments-v1")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
         const val HISTORY_PAGE_SIZE = 10

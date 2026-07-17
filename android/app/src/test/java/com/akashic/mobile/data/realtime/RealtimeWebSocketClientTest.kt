@@ -106,6 +106,8 @@ class RealtimeWebSocketClientTest {
 
         override fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) = Unit
 
+        override fun onBinary(candidateId: SocketCandidateId, chunk: AttachmentChunkCodec.DecodedChunk) = Unit
+
         override fun onClosed(candidateId: SocketCandidateId, code: Int, reason: String) {
             closed += candidateId
         }

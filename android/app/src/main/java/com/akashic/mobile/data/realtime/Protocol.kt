@@ -104,6 +104,33 @@ data class AttachmentFinishPayload(
 )
 
 @Serializable
+data class AttachmentDescriptor(
+    @SerialName("attachment_id") val attachmentId: String,
+    val filename: String,
+    @SerialName("content_type") val contentType: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+)
+
+@Serializable
+data class AttachmentDownloadPayload(
+    @SerialName("attachment_id") val attachmentId: String,
+    val offset: Long,
+)
+
+@Serializable
+data class AttachmentDownloadReplyPayload(
+    @SerialName("attachment_id") val attachmentId: String,
+    val filename: String,
+    @SerialName("content_type") val contentType: String,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+    val offset: Long,
+    @SerialName("next_offset") val nextOffset: Long,
+    val complete: Boolean,
+)
+
+@Serializable
 data class EventAckPayload(
     @SerialName("through_event_seq")
     val throughEventSeq: Long,
@@ -170,7 +197,7 @@ data class RemoteHistoryMessage(
     val extra: JsonObject,
     val ts: String,
     @SerialName("client_message_id") val clientMessageId: String? = null,
-    val attachments: JsonArray = JsonArray(emptyList()),
+    val attachments: List<AttachmentDescriptor> = emptyList(),
 )
 
 @Serializable
@@ -199,6 +226,7 @@ object ProtocolCodec {
             "turn.stop",
             "attachment.begin",
             "attachment.finish",
+            "attachment.download",
             "device.update",
             "ping",
         ),
