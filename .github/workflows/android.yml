@@ -49,9 +49,10 @@ jobs:
           core_root="${RUNNER_TEMP}/akashic-agent"
           git init "${core_root}"
           git -C "${core_root}" remote add origin "${core_repository}"
-          git -C "${core_root}" fetch --depth=1 origin "${runtime_revision}"
-          git -C "${core_root}" fetch --depth=1 origin "${capability_commit}"
-          git -C "${core_root}" fetch --depth=1 origin "${protocol_commit}"
+          git -C "${core_root}" fetch --depth=1 origin \
+            "${runtime_revision}" \
+            "${capability_commit}" \
+            "${protocol_commit}"
           git -C "${core_root}" checkout --detach "${runtime_revision}"
           python3 runtime-gate/verify_contract.py --mobile-root . --core-root "${core_root}"
 

@@ -16,6 +16,29 @@ def _git(repository: Path, *arguments: str) -> str:
 
 
 class VerifyContractTest(unittest.TestCase):
+    def test_workflow_fetches_all_core_revisions_in_one_command(self) -> None:
+        workflow = (
+            Path(__file__).parents[1] / ".github" / "workflows" / "android.yml"
+        )
+        lines = workflow.read_text(encoding="utf-8").splitlines()
+        fetch_indices = [
+            index
+            for index, line in enumerate(lines)
+            if 'git -C "${core_root}" fetch' in line
+        ]
+
+        self.assertEqual(len(fetch_indices), 1)
+        fetch_index = fetch_indices[0]
+        self.assertEqual(
+            [line.strip() for line in lines[fetch_index : fetch_index + 4]],
+            [
+                'git -C "${core_root}" fetch --depth=1 origin \\',
+                '"${runtime_revision}" \\',
+                '"${capability_commit}" \\',
+                '"${protocol_commit}"',
+            ],
+        )
+
     def test_runtime_tree_tampering_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = Path(directory)
