@@ -33,8 +33,10 @@ class AttachmentDownloadCoordinatorTest {
         coordinator.onConnectionReady("server")
         val first = commands.single()
         coordinator.onBinary(chunk(transfer, 0, content.copyOfRange(0, AttachmentChunkCodec.MAX_CHUNK_BYTES)))
+        assertEquals(0L, dao.get(transfer.attachmentId)!!.transferredBytes)
         coordinator.onReply(reply(first, transfer, AttachmentChunkCodec.MAX_CHUNK_BYTES.toLong(), complete = false))
 
+        assertEquals(AttachmentChunkCodec.MAX_CHUNK_BYTES.toLong(), dao.get(transfer.attachmentId)!!.transferredBytes)
         assertEquals(2, commands.size)
         assertEquals(AttachmentChunkCodec.MAX_CHUNK_BYTES.toLong(), commands.last().offset)
         val second = commands.last()
@@ -54,7 +56,7 @@ class AttachmentDownloadCoordinatorTest {
     }
 
     @Test
-    fun `reconnect resumes from fsynced offset before missing reply`() = runBlocking {
+    fun `reconnect replays confirmed offset when reply is missing`() = runBlocking {
         val content = ByteArray(AttachmentChunkCodec.MAX_CHUNK_BYTES + 1) { 7 }
         val transfer = transfer(content)
         val dao = FakeMediaAttachmentDao(transfer)
@@ -68,8 +70,9 @@ class AttachmentDownloadCoordinatorTest {
         val resumedCommands = mutableListOf<SentCommand>()
         coordinator(dao, resumedCommands, mutableListOf()).onConnectionReady("server")
 
-        assertEquals(AttachmentChunkCodec.MAX_CHUNK_BYTES.toLong(), dao.get(transfer.attachmentId)!!.transferredBytes)
-        assertEquals(AttachmentChunkCodec.MAX_CHUNK_BYTES.toLong(), resumedCommands.single().offset)
+        assertEquals(0L, dao.get(transfer.attachmentId)!!.transferredBytes)
+        assertEquals(0L, resumedCommands.single().offset)
+        assertEquals(0L, File("${transfer.cachePath}.part").length())
     }
 
     @Test

@@ -47,7 +47,7 @@ class AttachmentDownloadCoordinator(
         startNext()
     }
 
-    /** 接收服务端先于 reply 发来的单个附件分片并持久化 offset。 */
+    /** 接收服务端先于 reply 发来的单个附件分片，但不提前确认 offset。 */
     suspend fun onBinary(chunk: AttachmentChunkCodec.DecodedChunk) {
         val current = requireNotNull(active) { "收到未请求的附件二进制帧" }
         require(current.received == null) { "同一下载命令收到多个二进制帧" }
@@ -56,7 +56,7 @@ class AttachmentDownloadCoordinator(
         val nextOffset = Math.addExact(chunk.offset, chunk.payload.size.toLong())
         require(nextOffset <= current.transfer.sizeBytes) { "附件二进制超过声明大小" }
 
-        // 1. 分片 fsync 成功后才推进持久化 offset
+        // 1. 先持久化分片，等待配对的 reply 校验后再确认 offset
         val partial = cache.partialFile(current.transfer)
         check(partial.parentFile?.isDirectory == true || partial.parentFile?.mkdirs() == true) {
             "无法创建附件缓存目录"
@@ -68,14 +68,6 @@ class AttachmentDownloadCoordinator(
             file.write(chunk.payload)
             file.fd.sync()
         }
-        check(
-            dao.updateDownload(
-                attachmentId = current.transfer.attachmentId,
-                transferredBytes = nextOffset,
-                state = "downloading",
-                updatedAt = System.currentTimeMillis(),
-            ) == 1,
-        ) { "下载记录已消失: ${current.transfer.attachmentId}" }
         active = current.copy(received = chunk)
     }
 
@@ -92,6 +84,16 @@ class AttachmentDownloadCoordinator(
         val reply = ProtocolCodec.decodePayload<AttachmentDownloadReplyPayload>(envelope.payload)
         validateReply(current.transfer, chunk, reply)
         val nextOffset = Math.addExact(chunk.offset, chunk.payload.size.toLong())
+        if (!reply.complete) {
+            check(
+                dao.updateDownload(
+                    attachmentId = current.transfer.attachmentId,
+                    transferredBytes = nextOffset,
+                    state = "downloading",
+                    updatedAt = System.currentTimeMillis(),
+                ) == 1,
+            ) { "下载记录已消失: ${current.transfer.attachmentId}" }
+        }
         active = null
         if (reply.complete) finish(current.transfer, nextOffset) else startNext()
         return true
@@ -144,14 +146,8 @@ class AttachmentDownloadCoordinator(
     }
 
     private suspend fun reconcilePartial(transfer: MediaAttachmentEntity): MediaAttachmentEntity {
-        val partial = cache.partialFile(transfer)
-        val actual = if (partial.exists()) partial.length() else 0L
-        require(actual <= transfer.sizeBytes) { "附件临时文件超过声明大小" }
-        if (actual == transfer.transferredBytes) return transfer
-        check(
-            dao.updateDownload(transfer.attachmentId, actual, "downloading", System.currentTimeMillis()) == 1,
-        ) { "下载记录已消失: ${transfer.attachmentId}" }
-        return transfer.copy(transferredBytes = actual, state = "downloading")
+        cache.truncatePartialToConfirmedOffset(transfer)
+        return transfer
     }
 
     private fun validateReply(

@@ -30,19 +30,20 @@ class MediaCacheStoreTest {
     }
 
     @Test
-    fun `reconcile publishes fully fsynced part left before reply`() = runBlocking {
+    fun `reconcile discards fully fsynced part left before reply`() = runBlocking {
         val dao = FakeMediaDao()
         val cache = MediaCacheStore(temporary.root, dao)
         val content = byteArrayOf(4, 5, 6)
         val transfer = transfer(cache, "01ARZ3NDEKTSV4RRFFQ69G5FAV", content, "downloading")
-        dao.values += transfer.copy(transferredBytes = content.size.toLong())
+        dao.values += transfer
         File("${transfer.cachePath}.part").writeBytes(content)
 
         cache.reconcile()
 
-        assertEquals("cached", dao.get(transfer.attachmentId)!!.state)
-        assertTrue(File(transfer.cachePath).exists())
-        assertFalse(File("${transfer.cachePath}.part").exists())
+        assertEquals("pending", dao.get(transfer.attachmentId)!!.state)
+        assertEquals(0L, dao.get(transfer.attachmentId)!!.transferredBytes)
+        assertFalse(File(transfer.cachePath).exists())
+        assertEquals(0L, File("${transfer.cachePath}.part").length())
     }
 
     @Test

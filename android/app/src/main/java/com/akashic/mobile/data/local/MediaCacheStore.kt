@@ -2,9 +2,9 @@ package com.akashic.mobile.data.local
 
 import java.io.File
 import java.io.FileInputStream
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.LinkOption
-import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 class MediaCacheStore(
@@ -24,6 +24,19 @@ class MediaCacheStore(
     fun finalFile(transfer: MediaAttachmentEntity): File = requireRegularPath(rawFile(transfer, ".bin"))
 
     fun partialFile(transfer: MediaAttachmentEntity): File = requireRegularPath(rawFile(transfer, ".bin.part"))
+
+    /** 丢弃未获 reply 确认的分片，只保留 Room 记录的 confirmed offset。 */
+    fun truncatePartialToConfirmedOffset(transfer: MediaAttachmentEntity) {
+        require(transfer.transferredBytes in 0..transfer.sizeBytes) { "附件确认 offset 超出声明大小" }
+        val partial = partialFile(transfer)
+        val actual = if (partial.exists()) partial.length() else 0L
+        require(actual >= transfer.transferredBytes) { "附件临时文件短于已确认 offset" }
+        if (actual == transfer.transferredBytes) return
+        RandomAccessFile(partial, "rw").use { file ->
+            file.setLength(transfer.transferredBytes)
+            file.fd.sync()
+        }
+    }
 
     /** 启动时校准 DB/文件状态、删除孤儿，并执行引用感知配额回收。 */
     suspend fun reconcile() {
@@ -95,27 +108,8 @@ class MediaCacheStore(
             deleteIfExists(final)
         }
 
-        val actual = if (partial.exists()) partial.length() else 0L
-        if (actual > transfer.sizeBytes) {
-            deleteIfExists(partial)
-            check(dao.updateDownload(transfer.attachmentId, 0, "failed", System.currentTimeMillis()) == 1)
-            return
-        }
-        if (actual == transfer.sizeBytes && actual > 0) {
-            if (isComplete(partial, transfer)) {
-                Files.move(
-                    partial.toPath(),
-                    final.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-                check(dao.markCached(transfer.attachmentId, System.currentTimeMillis()) == 1)
-            } else {
-                deleteIfExists(partial)
-                check(dao.updateDownload(transfer.attachmentId, 0, "failed", System.currentTimeMillis()) == 1)
-            }
-            return
-        }
+        truncatePartialToConfirmedOffset(transfer)
+        val actual = transfer.transferredBytes
         val state = if (transfer.state == "failed") "failed" else if (actual == 0L) "pending" else "downloading"
         if (transfer.transferredBytes != actual || transfer.state != state) {
             check(dao.updateDownload(transfer.attachmentId, actual, state, System.currentTimeMillis()) == 1)
