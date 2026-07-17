@@ -19,7 +19,7 @@ cd android
 
 连接个人设备时，禁止直接运行 `connectedDebugAndroidTest`。它不能在安装前证明候选包不会覆盖设备上的现有应用或测试数据。
 
-使用 `android/device-gate.sh`。脚本要求源码 worktree 干净，只接受受限字符组成的设备序列号、测试方法和 runner 参数，并给本次运行生成独立的 `com.akashic.mobile.review.<run-id>` application ID。它会先构建 APK、读取 APK 中的真实 package/target package、枚举设备已有 package，确认无碰撞后才以禁止替换的方式安装。每个 `--test` 是独立 instrumentation 阶段，阶段之间会强制停止应用进程；只有 runner 明确报告一个指定测试开始并成功结束时，该阶段才通过。
+使用 `android/device-gate.sh`。脚本要求源码 worktree 干净且同一 Android worktree 同时只运行一个 Gate，只接受受限字符组成的设备序列号、测试方法和 runner 参数，并给本次运行生成独立的 `com.akashic.mobile.review.<run-id>` application ID。它会先构建 APK、读取 APK 中的真实 package/target package、枚举设备已有 package，确认无碰撞后才以禁止替换的方式安装。每个 `--test` 是独立 instrumentation 阶段，阶段之间会强制停止应用进程；只有 runner 明确报告一个指定测试开始并成功结束时，该阶段才通过。
 
 ```bash
 cd android

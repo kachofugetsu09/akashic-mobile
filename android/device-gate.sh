@@ -130,6 +130,7 @@ done
 [[ -n "$serial" ]] || die "--serial is required"
 ((${#tests[@]} > 0)) || die "at least one --test is required"
 command -v adb >/dev/null 2>&1 || die "adb is required"
+command -v flock >/dev/null 2>&1 || die "flock is required"
 [[ "$serial" =~ ^[A-Za-z0-9._:-]{1,128}$ ]] ||
     die "serial contains unsupported characters"
 
@@ -155,6 +156,9 @@ readonly script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly repository_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
 [[ -z "$(git -C "$repository_root" status --porcelain)" ]] ||
     die "source worktree must be clean before a physical-device Gate"
+mkdir -p "$script_dir/build"
+exec {gate_lock_fd}>"$script_dir/build/device-gate.lock"
+flock -n "$gate_lock_fd" || die "another device Gate is using this Android worktree"
 readonly suffix=".review.${run_id}"
 readonly expected_application_id="${REVIEW_APPLICATION_ID_PREFIX}${run_id}"
 readonly expected_test_application_id="${expected_application_id}.test"
