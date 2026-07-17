@@ -11,6 +11,7 @@ import com.akashic.mobile.data.local.ConversationEntity
 import com.akashic.mobile.data.local.ConversationRemoteState
 import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.MediaCacheStore
+import com.akashic.mobile.data.local.PendingTurnStopEntity
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.ServerProfileEntity
 import com.akashic.mobile.domain.model.ConnectionPhase
@@ -215,6 +216,9 @@ class RealtimeSession(
     )
     private val stops = TurnStopCoordinator(
         send = ::sendTurnStopCommand,
+        onPersist = ::persistTurnStop,
+        onRemovePersisted = ::removePersistedTurnStop,
+        onClearPersisted = ::clearPersistedTurnStops,
         onTransportUnavailable = ::scheduleReconnect,
         onError = { message ->
             mutableState.value = mutableState.value.copy(errorMessage = message)
@@ -332,11 +336,11 @@ class RealtimeSession(
                 uploads.onDisconnected()
                 downloads.onDisconnected()
                 pendingPairing = null
-                profile = null
                 resetGenerationState()
-                stops.reset()
+                stops.reset(clearPersisted = true)
                 preferences.selectServer(null)
                 preferences.selectSession(null)
+                profile = null
                 mutableState.value = MobileSessionState(
                     initialized = true,
                     scanGeneration = mutableState.value.scanGeneration + 1,
@@ -562,13 +566,20 @@ class RealtimeSession(
     fun selectSession(sessionId: String) {
         scope.launch {
             mutex.withLock {
-                // 1. 校验会话归属
-                require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
-                val currentProfile = requireNotNull(profile) { "Pair a server before selecting a session" }
-                val conversation = requireNotNull(database.conversations().get(sessionId)) {
-                    "Unknown mobile session: $sessionId"
+                // 1. 通知 Intent 是外部边界，失效目标必须反馈而不是抛进后台协程
+                val currentProfile = profile
+                val conversation = database.conversations().get(sessionId)
+                if (
+                    !MOBILE_SESSION.matches(sessionId) ||
+                    currentProfile == null ||
+                    conversation == null ||
+                    conversation.serverId != currentProfile.serverId
+                ) {
+                    mutableState.value = mutableState.value.copy(
+                        errorMessage = "目标会话已被删除或尚未同步",
+                    )
+                    return@withLock
                 }
-                require(conversation.serverId == currentProfile.serverId) { "Mobile session belongs to another server" }
 
                 // 2. 持久化选择
                 preferences.selectSession(sessionId)
@@ -809,6 +820,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         requestedHistoryPages.clear()
         retryCount = 0
+        restoreTurnStops(currentProfile.serverId)
         val cursor = requireNotNull(database.realtimeCursors().get(currentProfile.deviceId))
         check(
             socket.send(
@@ -1138,6 +1150,49 @@ class RealtimeSession(
         )
     }
 
+    private suspend fun persistTurnStop(request: TurnStopRequest) {
+        val currentProfile = requireNotNull(profile) { "停止生成时不存在已配对服务器" }
+        database.pendingTurnStops().insert(
+            PendingTurnStopEntity(
+                commandId = request.commandId,
+                serverId = currentProfile.serverId,
+                sessionId = request.sessionId,
+                turnId = request.turnId,
+                createdAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    private suspend fun removePersistedTurnStop(commandId: String) {
+        check(database.pendingTurnStops().delete(commandId) == 1) {
+            "持久停止请求不存在: $commandId"
+        }
+    }
+
+    private suspend fun clearPersistedTurnStops() {
+        profile?.let { database.pendingTurnStops().deleteForServer(it.serverId) }
+    }
+
+    /** 从 streaming 消息与 stop outbox 恢复进程死亡前的 turn 状态。 */
+    private suspend fun restoreTurnStops(serverId: String) {
+        val activeMessages = database.messages().activeAssistantTurns(serverId)
+        require(activeMessages.distinctBy { it.sessionId }.size == activeMessages.size) {
+            "同一会话存在多个 streaming assistant turn"
+        }
+        val activeTurns = activeMessages.associate { message ->
+            require(message.messageId.startsWith(ASSISTANT_TURN_PREFIX)) {
+                "Streaming assistant message identity is invalid: ${message.messageId}"
+            }
+            val turnId = message.messageId.removePrefix(ASSISTANT_TURN_PREFIX)
+            require(turnId.isNotBlank()) { "Streaming assistant turn id is empty" }
+            message.sessionId to turnId
+        }
+        val pending = database.pendingTurnStops().listForServer(serverId).map { stop ->
+            TurnStopRequest(stop.commandId, stop.sessionId, stop.turnId)
+        }
+        stops.restore(activeTurns, pending)
+    }
+
     private suspend fun flushOutbox() {
         if (outboxFlight.commandId != null) return
         val currentProfile = requireNotNull(profile)
@@ -1411,5 +1466,6 @@ class RealtimeSession(
         const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
+        const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }

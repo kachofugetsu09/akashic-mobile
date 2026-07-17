@@ -34,6 +34,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.ui.conversation.MobileConversationScaffold
 import com.akashic.mobile.ui.design.AkashicTheme
 import com.akashic.mobile.ui.pairing.PairingScreen
@@ -45,9 +46,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedSessionId.value = intent.getStringExtra(MobileConnectionService.EXTRA_SESSION_ID)
+        requestedSessionId.value = consumeRequestedSession(intent)
         notificationsEnabled.value = NotificationManagerCompat.from(this).areNotificationsEnabled()
-        MobileConnectionService.start(this)
+        (application as App).container.realtimeSession.start()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
@@ -73,9 +74,19 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(session.hasProfile) {
                     if (session.hasProfile) MobileConnectionService.start(this@MainActivity)
                 }
-                LaunchedEffect(session.initialized, session.hasProfile, requestedSessionId.value) {
+                LaunchedEffect(
+                    session.initialized,
+                    session.hasProfile,
+                    session.connection.phase,
+                    requestedSessionId.value,
+                ) {
                     val sessionId = requestedSessionId.value
-                    if (session.initialized && session.hasProfile && sessionId != null) {
+                    if (
+                        session.initialized &&
+                        session.hasProfile &&
+                        session.connection.phase == ConnectionPhase.READY &&
+                        sessionId != null
+                    ) {
                         viewModel.selectSession(sessionId)
                         requestedSessionId.value = null
                     }
@@ -121,7 +132,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        requestedSessionId.value = intent.getStringExtra(MobileConnectionService.EXTRA_SESSION_ID)
+        requestedSessionId.value = consumeRequestedSession(intent)
+        setIntent(intent)
     }
 
     override fun onResume() {
@@ -142,6 +154,13 @@ class MainActivity : ComponentActivity() {
     private fun markNotificationPermissionRequested() {
         getSharedPreferences(PERMISSION_PREFERENCES, MODE_PRIVATE)
             .edit { putBoolean(KEY_NOTIFICATION_PERMISSION_REQUESTED, true) }
+    }
+
+    /** 读取一次通知目标并从 Activity Intent 中移除，避免重建时重复跳转。 */
+    private fun consumeRequestedSession(intent: Intent): String? {
+        val sessionId = intent.getStringExtra(MobileConnectionService.EXTRA_SESSION_ID)
+        intent.removeExtra(MobileConnectionService.EXTRA_SESSION_ID)
+        return sessionId
     }
 
     private fun openNotificationSettings() {

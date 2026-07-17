@@ -2,6 +2,7 @@ package com.akashic.mobile.data.realtime
 
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -9,7 +10,7 @@ import org.junit.Test
 
 class TurnStopCoordinatorTest {
     @Test
-    fun duplicateStopAndReconnectReuseOneCommandIdentity() {
+    fun duplicateStopAndReconnectReuseOneCommandIdentity() = runBlocking {
         val sent = mutableListOf<TurnStopRequest>()
         var changes = 0
         val coordinator = coordinator(sent = sent, onStateChanged = { changes += 1 })
@@ -26,7 +27,7 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
-    fun resumeIdentityUsesTurnIdsInsteadOfSessionIds() {
+    fun resumeIdentityUsesTurnIdsInsteadOfSessionIds() = runBlocking {
         val coordinator = coordinator()
         coordinator.onTurnStarted("mobile:one", "turn-1")
         coordinator.onTurnStarted("mobile:two", "turn-2")
@@ -35,7 +36,28 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
-    fun stopReplyClearsPendingAndProtocolErrorIsVisible() {
+    fun processRestartRestoresAndReplaysThePersistedStopIdentity() = runBlocking {
+        val persisted = mutableListOf<TurnStopRequest>()
+        val first = coordinator(onPersist = persisted::add)
+        first.onTurnStarted("mobile:one", "turn-1")
+        val request = first.requestStop("mobile:one")
+
+        val replayed = mutableListOf<TurnStopRequest>()
+        val restored = coordinator(
+            sent = replayed,
+            onRemovePersisted = { commandId -> persisted.removeAll { it.commandId == commandId } },
+        )
+        restored.restore(mapOf("mobile:one" to "turn-1"), persisted)
+        restored.onConnectionReady()
+
+        assertEquals(listOf(request), replayed)
+        assertTrue(restored.isStopping("mobile:one"))
+        restored.onTurnTerminal("mobile:one", "turn-1")
+        assertTrue(persisted.isEmpty())
+    }
+
+    @Test
+    fun stopReplyClearsPendingAndProtocolErrorIsVisible() = runBlocking {
         val sent = mutableListOf<TurnStopRequest>()
         val errors = mutableListOf<String>()
         val coordinator = coordinator(sent = sent, onError = errors::add)
@@ -60,7 +82,7 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
-    fun terminalThenReplyAllowsStoppingNextTurn() {
+    fun terminalThenReplyAllowsStoppingNextTurn() = runBlocking {
         val sent = mutableListOf<TurnStopRequest>()
         val coordinator = coordinator(sent = sent)
         coordinator.onTurnStarted("mobile:one", "turn-1")
@@ -79,7 +101,7 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
-    fun replyThenTerminalAllowsStoppingNextTurn() {
+    fun replyThenTerminalAllowsStoppingNextTurn() = runBlocking {
         val coordinator = coordinator()
         coordinator.onTurnStarted("mobile:one", "turn-1")
         val request = coordinator.requestStop("mobile:one")
@@ -92,7 +114,7 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
-    fun terminalThenErrorAllowsStoppingNextTurn() {
+    fun terminalThenErrorAllowsStoppingNextTurn() = runBlocking {
         val errors = mutableListOf<String>()
         val coordinator = coordinator(onError = errors::add)
         coordinator.onTurnStarted("mobile:one", "turn-1")
@@ -128,10 +150,16 @@ class TurnStopCoordinatorTest {
 
     private fun coordinator(
         sent: MutableList<TurnStopRequest> = mutableListOf(),
+        onPersist: suspend (TurnStopRequest) -> Unit = {},
+        onRemovePersisted: suspend (String) -> Unit = {},
+        onClearPersisted: suspend () -> Unit = {},
         onError: (String) -> Unit = {},
         onStateChanged: () -> Unit = {},
     ) = TurnStopCoordinator(
         send = { request -> sent.add(request) },
+        onPersist = onPersist,
+        onRemovePersisted = onRemovePersisted,
+        onClearPersisted = onClearPersisted,
         onTransportUnavailable = {},
         onError = onError,
         onStateChanged = onStateChanged,

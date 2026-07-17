@@ -101,6 +101,19 @@ interface MessageDao {
         latestUpdatedAt: Long,
     ): List<MessageEntity>
 
+    @Query(
+        """
+        SELECT messages.* FROM messages
+        INNER JOIN conversations ON conversations.sessionId = messages.sessionId
+        WHERE conversations.serverId = :serverId
+          AND messages.role = 'assistant'
+          AND messages.deliveryState = 'streaming'
+          AND messages.messageId LIKE 'assistant:%'
+        ORDER BY messages.createdAt, messages.messageId
+        """,
+    )
+    suspend fun activeAssistantTurns(serverId: String): List<MessageEntity>
+
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: String): Int
 
@@ -201,6 +214,21 @@ interface PendingMessageNotificationDao {
 
     @Query("DELETE FROM pending_message_notifications WHERE messageId = :messageId")
     suspend fun delete(messageId: String): Int
+}
+
+@Dao
+interface PendingTurnStopDao {
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    suspend fun insert(stop: PendingTurnStopEntity)
+
+    @Query("SELECT * FROM pending_turn_stops WHERE serverId = :serverId ORDER BY createdAt, commandId")
+    suspend fun listForServer(serverId: String): List<PendingTurnStopEntity>
+
+    @Query("DELETE FROM pending_turn_stops WHERE commandId = :commandId")
+    suspend fun delete(commandId: String): Int
+
+    @Query("DELETE FROM pending_turn_stops WHERE serverId = :serverId")
+    suspend fun deleteForServer(serverId: String): Int
 }
 
 @Dao

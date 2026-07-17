@@ -19,6 +19,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MediaAttachmentEntity::class,
         MessageAttachmentEntity::class,
         PendingMessageNotificationEntity::class,
+        PendingTurnStopEntity::class,
     ],
     version = 4,
     exportSchema = true,
@@ -39,6 +40,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun mediaAttachments(): MediaAttachmentDao
 
     abstract fun pendingMessageNotifications(): PendingMessageNotificationDao
+
+    abstract fun pendingTurnStops(): PendingTurnStopDao
 
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
@@ -72,6 +75,9 @@ abstract class AppDatabase : RoomDatabase() {
                 if (!db.hasColumn("conversations", "remoteState")) {
                     addConversationRemoteState(db)
                 }
+
+                // 4. stop 命令必须跨 Android 进程死亡继续使用同一身份
+                createPendingTurnStopTable(db)
             }
         }
 
@@ -177,6 +183,28 @@ abstract class AppDatabase : RoomDatabase() {
                 "CREATE INDEX `index_pending_message_notifications_createdAt` " +
                     "ON `pending_message_notifications` (`createdAt`)",
             )
+        }
+
+        private fun createPendingTurnStopTable(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE `pending_turn_stops` (
+                    `commandId` TEXT NOT NULL,
+                    `serverId` TEXT NOT NULL,
+                    `sessionId` TEXT NOT NULL,
+                    `turnId` TEXT NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    PRIMARY KEY(`commandId`),
+                    FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            db.execSQL("CREATE INDEX `index_pending_turn_stops_serverId` ON `pending_turn_stops` (`serverId`)")
+            db.execSQL(
+                "CREATE UNIQUE INDEX `index_pending_turn_stops_serverId_sessionId` " +
+                    "ON `pending_turn_stops` (`serverId`, `sessionId`)",
+            )
+            db.execSQL("CREATE INDEX `index_pending_turn_stops_createdAt` ON `pending_turn_stops` (`createdAt`)")
         }
 
         private fun SupportSQLiteDatabase.hasTable(tableName: String): Boolean = query(

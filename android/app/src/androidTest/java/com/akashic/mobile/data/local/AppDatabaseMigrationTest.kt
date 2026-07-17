@@ -41,6 +41,7 @@ class AppDatabaseMigrationTest {
             )
             assertSingleInt(database, "SELECT COUNT(*) FROM media_attachments", 0)
             assertSingleInt(database, "SELECT COUNT(*) FROM pending_message_notifications", 0)
+            assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
         }
     }
 
@@ -68,6 +69,7 @@ class AppDatabaseMigrationTest {
                 ConversationRemoteState.UNKNOWN,
             )
             assertSingleInt(database, "SELECT COUNT(*) FROM pending_message_notifications", 0)
+            assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
         }
     }
 
@@ -91,7 +93,12 @@ class AppDatabaseMigrationTest {
                 "INSERT INTO pending_message_notifications VALUES(" +
                     "'notice', 'server', 'mobile:test', '完成', 1, 5)",
             )
+            database.execSQL(
+                "INSERT INTO pending_turn_stops VALUES(" +
+                    "'stop', 'server', 'mobile:test', 'turn-1', 6)",
+            )
             assertSingleString(database, "SELECT content FROM pending_message_notifications", "完成")
+            assertSingleString(database, "SELECT turnId FROM pending_turn_stops", "turn-1")
         }
     }
 
@@ -123,6 +130,7 @@ class AppDatabaseMigrationTest {
                 "SELECT remoteState FROM conversations",
                 ConversationRemoteState.UNKNOWN,
             )
+            assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
         }
     }
 

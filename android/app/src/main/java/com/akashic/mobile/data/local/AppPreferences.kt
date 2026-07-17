@@ -1,7 +1,6 @@
 package com.akashic.mobile.data.local
 
 import android.content.Context
-import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -14,7 +13,6 @@ data class AppSettings(
     val currentServerId: String?,
     val currentSessionId: String?,
     val theme: String,
-    val keepRealtimeInBackground: Boolean,
 )
 
 class AppPreferences(private val context: Context) {
@@ -23,7 +21,6 @@ class AppPreferences(private val context: Context) {
             currentServerId = values[CURRENT_SERVER_ID],
             currentSessionId = values[CURRENT_SESSION_ID],
             theme = values[THEME] ?: "system",
-            keepRealtimeInBackground = values[KEEP_REALTIME_IN_BACKGROUND] ?: false,
         )
     }
 
@@ -44,14 +41,9 @@ class AppPreferences(private val context: Context) {
         context.settingsDataStore.edit { values -> values[THEME] = theme }
     }
 
-    suspend fun setBackgroundRealtime(enabled: Boolean) {
-        context.settingsDataStore.edit { values -> values[KEEP_REALTIME_IN_BACKGROUND] = enabled }
-    }
-
     private companion object {
         val CURRENT_SERVER_ID = stringPreferencesKey("current_server_id")
         val CURRENT_SESSION_ID = stringPreferencesKey("current_session_id")
         val THEME = stringPreferencesKey("theme")
-        val KEEP_REALTIME_IN_BACKGROUND = booleanPreferencesKey("keep_realtime_in_background")
     }
 }
