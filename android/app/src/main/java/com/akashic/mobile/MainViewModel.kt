@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.akashic.mobile.data.local.MessageWithBlocks
-import com.akashic.mobile.data.local.ConversationRemoteState
 import com.akashic.mobile.data.local.decodeStoredToolBlock
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
@@ -46,23 +45,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val conversationState = combine(sessionState, messageGraph, conversations) { session, graph, conversations ->
         val messages = graph.map(::toMessageUi)
         val connection = connectionPresentation(session.connection)
-        val selectedConversation = conversations.singleOrNull { it.sessionId == session.currentSessionId }
-        val remoteDeleted = selectedConversation?.remoteState == ConversationRemoteState.DELETED
         ConversationUiState(
             connectionLabel = connection.label,
             connectionStatus = connection.status,
-            connectionNotice = if (remoteDeleted) {
-                "电脑端已删除此会话，本地未发送内容已保留"
-            } else {
-                connection.notice
-            },
+            connectionNotice = connection.notice,
             sessions = conversations
                 .filter { it.sessionId.startsWith("mobile:") }
                 .map { SessionUi(it.sessionId, it.title) },
             selectedSessionId = session.currentSessionId,
             messages = messages,
             isStreaming = graph.any { it.message.deliveryState == "streaming" },
-            canSend = session.hasProfile && !remoteDeleted,
+            canSend = session.hasProfile,
         )
     }.stateIn(
         viewModelScope,

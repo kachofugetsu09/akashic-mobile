@@ -241,12 +241,8 @@ class LocalDeliveryStoreTest {
 
     @Test
     fun catalogReconciliationRemovesOnlyAbsentRebuildableProjection() = runBlocking {
-        database.conversations().upsert(
-            ConversationEntity("mobile:kept", "server", "保留", 1, ConversationRemoteState.REMOTE),
-        )
-        database.conversations().upsert(
-            ConversationEntity("mobile:gone", "server", "已删除", 1, ConversationRemoteState.REMOTE),
-        )
+        database.conversations().upsert(ConversationEntity("mobile:kept", "server", "保留", 1))
+        database.conversations().upsert(ConversationEntity("mobile:gone", "server", "已删除", 1))
         database.conversations().upsert(ConversationEntity("mobile:local", "server", "本地未决", 1))
         database.messages().upsert(
             MessageEntity("kept-message", null, "mobile:kept", "assistant", "在目录中", "complete", 1, 1),
@@ -272,52 +268,8 @@ class LocalDeliveryStoreTest {
         assertEquals(null, database.messages().get("gone-message"))
         assertEquals(null, database.conversations().get("mobile:gone"))
         assertNotNull(database.messages().get("user:$clientId"))
-        assertEquals(
-            ConversationRemoteState.LOCAL,
-            database.conversations().get("mobile:local")!!.remoteState,
-        )
-        assertEquals(clientId, database.outbox().dispatchable("server").single().commandId)
+        assertNotNull(database.conversations().get("mobile:local"))
         assertNotNull(database.conversations().get("mobile:test"))
-    }
-
-    @Test
-    fun `catalog deletion preserves but blocks pending work`() = runBlocking {
-        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        database.conversations().upsert(
-            ConversationEntity(
-                "mobile:blocked",
-                "server",
-                "迁移会话",
-                1,
-                ConversationRemoteState.UNKNOWN,
-            ),
-        )
-        database.messages().upsert(
-            MessageEntity("user:$clientId", clientId, "mobile:blocked", "user", "待发送", "pending", 1, 1),
-        )
-        database.outbox().enqueue(
-            OutboxCommandEntity(clientId, "server", "{}", "pending", 0, 1, null),
-        )
-
-        store.reconcileSessionCatalog(
-            serverId = "server",
-            remoteSessionIds = emptySet(),
-            preservedSessionId = "mobile:blocked",
-        )
-
-        assertEquals(
-            ConversationRemoteState.DELETED,
-            database.conversations().get("mobile:blocked")!!.remoteState,
-        )
-        assertNotNull(database.messages().get("user:$clientId"))
-        assertNotNull(database.outbox().get(clientId))
-        assertEquals(emptyList<OutboxCommandEntity>(), database.outbox().dispatchable("server"))
-
-        assertEquals(
-            1,
-            database.conversations().updateRemoteState("mobile:blocked", ConversationRemoteState.REMOTE),
-        )
-        assertEquals(clientId, database.outbox().dispatchable("server").single().commandId)
     }
 
     @Test

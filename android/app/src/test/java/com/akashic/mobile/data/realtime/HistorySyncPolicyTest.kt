@@ -38,10 +38,4 @@ class HistorySyncPolicyTest {
         }
     }
 
-    @Test
-    fun `only rejection of selected deleted session clears selection`() {
-        assertEquals(true, shouldClearRejectedSession("session_not_found", "mobile:a", "mobile:a"))
-        assertEquals(false, shouldClearRejectedSession("session_not_found", "mobile:b", "mobile:a"))
-        assertEquals(false, shouldClearRejectedSession("invalid_request", "mobile:a", "mobile:a"))
-    }
 }

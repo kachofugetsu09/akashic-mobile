@@ -17,7 +17,7 @@ class AppDatabaseMigrationTest {
     )
 
     @Test
-    fun migrate1To2RequiresCatalogBeforeDispatchingOldSessions() {
+    fun migrate1To2PreservesConversationWithNeutralCatalogState() {
         helper.createDatabase(DATABASE_NAME, 1).apply {
             execSQL(
                 "INSERT INTO server_profiles VALUES(" +
