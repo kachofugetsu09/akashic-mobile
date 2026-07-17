@@ -59,7 +59,7 @@ fun MobileConversationScaffold(
     onAttach: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onRetryAttachment: (String) -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String, List<String>, (Boolean) -> Unit) -> Unit,
     onStop: () -> Unit,
 ) {
     val drawerState = rememberDrawerState(DrawerValue.Closed)

@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlin.math.ceil
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -114,7 +115,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onQrCode(value: String) = container.realtimeSession.beginPairing(value)
 
-    fun sendMessage(value: String) = container.realtimeSession.sendMessage(value)
+    fun sendMessage(
+        value: String,
+        expectedAttachmentIds: List<String>,
+        onPersisted: (Boolean) -> Unit,
+    ) = container.realtimeSession.sendMessage(value, expectedAttachmentIds) { persisted ->
+        viewModelScope.launch { onPersisted(persisted) }
+    }
 
     fun addAttachments(uris: List<android.net.Uri>) = container.realtimeSession.addAttachments(uris)
 

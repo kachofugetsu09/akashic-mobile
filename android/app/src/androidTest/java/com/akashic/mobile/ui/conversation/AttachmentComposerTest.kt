@@ -3,9 +3,11 @@ package com.akashic.mobile.ui.conversation
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertRangeInfoEquals
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import com.akashic.mobile.ui.design.AkashicTheme
@@ -26,7 +28,7 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
-                    onSend = {},
+                    onSend = { _, _, _ -> },
                     onStop = {},
                 )
             }
@@ -48,7 +50,11 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
-                    onSend = { sends += 1 },
+                    onSend = { _, ids, report ->
+                        assertEquals(listOf("file"), ids)
+                        sends += 1
+                        report(true)
+                    },
                     onStop = {},
                 )
             }
@@ -67,7 +73,7 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
-                    onSend = {},
+                    onSend = { _, _, _ -> },
                     onStop = {},
                 )
             }
@@ -84,12 +90,32 @@ class AttachmentComposerTest {
                     onAttach = {},
                     onRemoveAttachment = {},
                     onRetryAttachment = {},
-                    onSend = {},
+                    onSend = { _, _, _ -> },
                     onStop = {},
                 )
             }
         }
         compose.onNodeWithContentDescription("移除附件 报告.pdf").assertDoesNotExist()
+    }
+
+    @Test
+    fun rejectedDraftSetPreservesComposerInput() {
+        compose.setContent {
+            AkashicTheme {
+                ConversationScreen(
+                    state = state(ComposerAttachmentState.READY, 100),
+                    onAttach = {},
+                    onRemoveAttachment = {},
+                    onRetryAttachment = {},
+                    onSend = { _, _, report -> report(false) },
+                    onStop = {},
+                )
+            }
+        }
+
+        compose.onNodeWithTag("composer-input").performTextInput("保留我")
+        compose.onNodeWithTag("composer-send-stop").performClick()
+        compose.onNodeWithTag("composer-input").assertTextContains("保留我")
     }
 
     private fun state(attachmentState: ComposerAttachmentState, progress: Int) =

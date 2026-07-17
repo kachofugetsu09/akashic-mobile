@@ -120,7 +120,7 @@ fun ConversationScreen(
     onAttach: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onRetryAttachment: (String) -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String, List<String>, (Boolean) -> Unit) -> Unit,
     onStop: () -> Unit,
 ) {
     var composerText by rememberSaveable { mutableStateOf("") }
@@ -149,10 +149,14 @@ fun ConversationScreen(
                 onRemoveAttachment = onRemoveAttachment,
                 onRetryAttachment = onRetryAttachment,
                 onSend = {
-                    onSend(composerText)
-                    composerText = ""
-                    focusManager.clearFocus(force = true)
-                    keyboardController?.hide()
+                    val expectedAttachmentIds = state.attachments.map { it.id }
+                    onSend(composerText, expectedAttachmentIds) { persisted ->
+                        if (persisted) {
+                            composerText = ""
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                        }
+                    }
                 },
                 onStop = onStop,
             )
@@ -609,6 +613,7 @@ private fun ConversationBottomBar(
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier
                     .weight(1f)
+                    .testTag("composer-input")
                     .padding(horizontal = 8.dp, vertical = 10.dp),
                 decorationBox = { innerTextField ->
                     Box(contentAlignment = Alignment.CenterStart) {
@@ -886,7 +891,7 @@ private fun ConversationLightPreview() {
             onAttach = {},
             onRemoveAttachment = {},
             onRetryAttachment = {},
-            onSend = {},
+            onSend = { _, _, _ -> },
             onStop = {},
         )
     }
@@ -903,7 +908,7 @@ private fun ConversationDarkPreview() {
             onAttach = {},
             onRemoveAttachment = {},
             onRetryAttachment = {},
-            onSend = {},
+            onSend = { _, _, _ -> },
             onStop = {},
         )
     }

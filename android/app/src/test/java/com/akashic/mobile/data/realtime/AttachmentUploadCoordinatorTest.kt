@@ -209,6 +209,12 @@ class AttachmentUploadCoordinatorTest {
             return 1
         }
 
+        override suspend fun retryFailed(attachmentId: String, updatedAt: Long): Int {
+            if (value.attachmentId != attachmentId || value.state != "failed") return 0
+            value = value.copy(state = "pending", updatedAt = updatedAt)
+            return 1
+        }
+
         override suspend fun markSent(ids: List<String>, updatedAt: Long): Int = updateMany(ids, "sent", updatedAt)
 
         override suspend fun markSending(ids: List<String>, updatedAt: Long): Int =
