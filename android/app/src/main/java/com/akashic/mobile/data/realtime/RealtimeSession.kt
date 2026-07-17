@@ -5,15 +5,12 @@ import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
 import com.akashic.mobile.data.local.LocalDeliveryStore
-import com.akashic.mobile.data.local.MessageEntity
-import com.akashic.mobile.data.local.OutboxCommandEntity
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.ServerProfileEntity
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.domain.model.EndpointRoute
 import com.akashic.mobile.domain.model.ServerEndpoint
-import java.time.Instant
 import java.util.UUID
 import kotlin.math.min
 import kotlin.random.Random
@@ -234,45 +231,11 @@ class RealtimeSession(
                     }
                 require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
                 val now = System.currentTimeMillis()
-                val commandId = Ulid.next(now)
-                val clientMessageId = Ulid.next(now)
-                val payload = MessageSendPayload(
-                    clientMessageId = clientMessageId,
-                    sessionId = sessionId,
-                    text = body,
-                    mediaRefs = emptyList(),
-                    clientCreatedAt = Instant.ofEpochMilli(now).toString(),
-                )
-                val envelope = WireEnvelope(
-                    v = WIRE_PROTOCOL_VERSION,
-                    kind = WireKind.COMMAND,
-                    type = "message.send",
-                    id = commandId,
-                    connectionEpoch = 1,
-                    sessionId = sessionId,
-                    payload = ProtocolCodec.json().encodeToJsonElement(MessageSendPayload.serializer(), payload).jsonObject,
-                )
+                val pending = preparePendingMessageSend(currentProfile.serverId, sessionId, body, now)
                 deliveryStore.enqueueMessage(
                     conversation = ConversationEntity(sessionId, currentProfile.serverId, "新对话", now),
-                    message = MessageEntity(
-                        messageId = "user:$clientMessageId",
-                        clientMessageId = clientMessageId,
-                        sessionId = sessionId,
-                        role = "user",
-                        text = body,
-                        deliveryState = "pending",
-                        createdAt = now,
-                        updatedAt = now,
-                    ),
-                    command = OutboxCommandEntity(
-                        commandId = commandId,
-                        serverId = currentProfile.serverId,
-                        envelopeJson = ProtocolCodec.encode(envelope),
-                        state = "pending",
-                        attemptCount = 0,
-                        createdAt = now,
-                        lastAttemptAt = null,
-                    ),
+                    message = pending.message,
+                    command = pending.command,
                 )
                 if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
             }

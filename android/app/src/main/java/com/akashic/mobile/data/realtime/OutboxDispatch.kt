@@ -1,6 +1,63 @@
 package com.akashic.mobile.data.realtime
 
+import com.akashic.mobile.data.local.MessageEntity
+import com.akashic.mobile.data.local.OutboxCommandEntity
+import java.time.Instant
+import kotlinx.serialization.json.jsonObject
+
 internal const val CLOSE_COMMAND_REJECTED = 4410
+
+internal data class PendingMessageSend(
+    val message: MessageEntity,
+    val command: OutboxCommandEntity,
+)
+
+/** 用同一个幂等身份构造本地消息和可重放命令。 */
+internal fun preparePendingMessageSend(
+    serverId: String,
+    sessionId: String,
+    body: String,
+    now: Long,
+    clientMessageId: String = Ulid.next(now),
+): PendingMessageSend {
+    val payload = MessageSendPayload(
+        clientMessageId = clientMessageId,
+        sessionId = sessionId,
+        text = body,
+        mediaRefs = emptyList(),
+        clientCreatedAt = Instant.ofEpochMilli(now).toString(),
+    )
+    val envelope = WireEnvelope(
+        v = WIRE_PROTOCOL_VERSION,
+        kind = WireKind.COMMAND,
+        type = "message.send",
+        id = clientMessageId,
+        connectionEpoch = 1,
+        sessionId = sessionId,
+        payload = ProtocolCodec.json().encodeToJsonElement(MessageSendPayload.serializer(), payload).jsonObject,
+    )
+    return PendingMessageSend(
+        message = MessageEntity(
+            messageId = "user:$clientMessageId",
+            clientMessageId = clientMessageId,
+            sessionId = sessionId,
+            role = "user",
+            text = body,
+            deliveryState = "pending",
+            createdAt = now,
+            updatedAt = now,
+        ),
+        command = OutboxCommandEntity(
+            commandId = clientMessageId,
+            serverId = serverId,
+            envelopeJson = ProtocolCodec.encode(envelope),
+            state = "pending",
+            attemptCount = 0,
+            createdAt = now,
+            lastAttemptAt = null,
+        ),
+    )
+}
 
 internal enum class OutboxFailureDisposition {
     RETRY_ORIGINAL,

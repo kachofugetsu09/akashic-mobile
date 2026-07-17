@@ -32,4 +32,24 @@ class OutboxDispatchTest {
         )
         assertEquals(OutboxFailureDisposition.FAIL, messageSendFailureDisposition("invalid_session"))
     }
+
+    @Test
+    fun `production enqueue payload uses one idempotency identity`() {
+        val clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val pending = preparePendingMessageSend(
+            serverId = "server",
+            sessionId = "mobile:00000000-0000-0000-0000-000000000001",
+            body = "hello",
+            now = 1_700_000_000_000,
+            clientMessageId = clientMessageId,
+        )
+        val envelope = ProtocolCodec.decode(pending.command.envelopeJson)
+        val payload = ProtocolCodec.decodePayload<MessageSendPayload>(envelope.payload)
+
+        assertEquals(clientMessageId, pending.command.commandId)
+        assertEquals(pending.command.commandId, envelope.id)
+        assertEquals(envelope.id, payload.clientMessageId)
+        assertEquals("user:$clientMessageId", pending.message.messageId)
+        assertEquals(clientMessageId, pending.message.clientMessageId)
+    }
 }
