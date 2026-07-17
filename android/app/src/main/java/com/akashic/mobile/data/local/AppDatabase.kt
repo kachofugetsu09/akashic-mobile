@@ -18,8 +18,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         RealtimeCursorEntity::class,
         MediaAttachmentEntity::class,
         MessageAttachmentEntity::class,
+        PendingMessageNotificationEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -37,12 +38,14 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun mediaAttachments(): MediaAttachmentDao
 
+    abstract fun pendingMessageNotifications(): PendingMessageNotificationDao
+
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
             context.applicationContext,
             AppDatabase::class.java,
             "akashic-mobile.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -67,12 +70,41 @@ abstract class AppDatabase : RoomDatabase() {
 
                 // 2. 补齐旧 PR4 v2 缺少的会话归属列
                 if (!db.hasColumn("conversations", "remoteState")) {
-                    db.execSQL(
-                        "ALTER TABLE `conversations` ADD COLUMN `remoteState` " +
-                            "TEXT NOT NULL DEFAULT 'unknown'",
-                    )
+                    addConversationRemoteState(db)
                 }
             }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. v3 必须已经完整拥有 PR4 的两张媒体表
+                check(
+                    db.hasTable("media_attachments") && db.hasTable("message_attachments"),
+                ) { "Version 3 media schema is incomplete" }
+
+                // 2. 规范 PR4 v3 在这一层获得持久通知队列
+                val hasNotifications = db.hasTable("pending_message_notifications")
+                if (hasNotifications) {
+                    check(
+                        db.hasIndex("index_pending_message_notifications_serverId") &&
+                            db.hasIndex("index_pending_message_notifications_createdAt"),
+                    ) { "Version 3 notification schema is incomplete" }
+                } else {
+                    createPendingNotificationTable(db)
+                }
+
+                // 3. 已公开旧 PR5 v3 在这一层获得会话归属列
+                if (!db.hasColumn("conversations", "remoteState")) {
+                    addConversationRemoteState(db)
+                }
+            }
+        }
+
+        private fun addConversationRemoteState(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE `conversations` ADD COLUMN `remoteState` " +
+                    "TEXT NOT NULL DEFAULT 'unknown'",
+            )
         }
 
         private fun createMediaTables(db: SupportSQLiteDatabase) {
@@ -122,9 +154,39 @@ abstract class AppDatabase : RoomDatabase() {
             )
         }
 
+        private fun createPendingNotificationTable(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE `pending_message_notifications` (
+                    `messageId` TEXT NOT NULL,
+                    `serverId` TEXT NOT NULL,
+                    `sessionId` TEXT NOT NULL,
+                    `content` TEXT NOT NULL,
+                    `hasAttachments` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    PRIMARY KEY(`messageId`),
+                    FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                "CREATE INDEX `index_pending_message_notifications_serverId` " +
+                    "ON `pending_message_notifications` (`serverId`)",
+            )
+            db.execSQL(
+                "CREATE INDEX `index_pending_message_notifications_createdAt` " +
+                    "ON `pending_message_notifications` (`createdAt`)",
+            )
+        }
+
         private fun SupportSQLiteDatabase.hasTable(tableName: String): Boolean = query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
             arrayOf(tableName),
+        ).use { cursor -> cursor.moveToFirst() }
+
+        private fun SupportSQLiteDatabase.hasIndex(indexName: String): Boolean = query(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+            arrayOf(indexName),
         ).use { cursor -> cursor.moveToFirst() }
 
         private fun SupportSQLiteDatabase.hasColumn(tableName: String, columnName: String): Boolean =

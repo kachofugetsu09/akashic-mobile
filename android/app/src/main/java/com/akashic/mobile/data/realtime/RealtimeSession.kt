@@ -19,6 +19,7 @@ import com.akashic.mobile.domain.model.EndpointRoute
 import com.akashic.mobile.domain.model.ServerEndpoint
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
@@ -34,6 +35,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
@@ -49,6 +51,8 @@ data class MobileSessionState(
     val serverId: String? = null,
     val pairingConfirmationCode: String? = null,
     val currentSessionId: String? = null,
+    val activeTurnId: String? = null,
+    val isStopping: Boolean = false,
     val errorMessage: String? = null,
 )
 
@@ -209,9 +213,17 @@ class RealtimeSession(
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
     )
+    private val stops = TurnStopCoordinator(
+        send = ::sendTurnStopCommand,
+        onTransportUnavailable = ::scheduleReconnect,
+        onError = { message ->
+            mutableState.value = mutableState.value.copy(errorMessage = message)
+        },
+        onStateChanged = ::publishTurnState,
+    )
     private val mutableState = MutableStateFlow(MobileSessionState())
     val state: StateFlow<MobileSessionState> = mutableState.asStateFlow()
-
+    private val started = AtomicBoolean(false)
     private var profile: ServerProfileEntity? = null
     private var pendingPairing: PendingPairing? = null
     private var pairingConfirmationGeneration: Long? = null
@@ -233,6 +245,7 @@ class RealtimeSession(
     private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
 
     fun start() {
+        if (!started.compareAndSet(false, true)) return
         scope.launch {
             val cacheReady = try {
                 attachmentDrafts.reconcile()
@@ -292,6 +305,7 @@ class RealtimeSession(
                         initialized = true,
                         connection = ConnectionState(phase = ConnectionPhase.CONNECTING),
                     )
+                    stops.reset()
                     connectQr(qr)
                 }
             } catch (error: IllegalArgumentException) {
@@ -320,6 +334,7 @@ class RealtimeSession(
                 pendingPairing = null
                 profile = null
                 resetGenerationState()
+                stops.reset()
                 preferences.selectServer(null)
                 preferences.selectSession(null)
                 mutableState.value = MobileSessionState(
@@ -454,16 +469,43 @@ class RealtimeSession(
                             mediaRefs = attachmentIds,
                             displayText = displayText,
                         )
+                        val conversation = conversationForMessage(
+                            currentProfile,
+                            sessionId,
+                            displayText,
+                            now,
+                        )
+                        val cachedAttachments = try {
+                            attachments.map { transfer ->
+                                mediaCache.importOutbound(
+                                    transfer,
+                                    attachmentDrafts.fileFor(transfer.attachmentId),
+                                    now,
+                                )
+                            }
+                        } catch (error: IOException) {
+                            mutableState.value = mutableState.value.copy(
+                                errorMessage = "保存已发送附件失败：${error.message}",
+                            )
+                            return@withLock
+                        } catch (error: SecurityException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "附件缓存路径不安全")
+                            return@withLock
+                        } catch (error: IllegalArgumentException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                            return@withLock
+                        } catch (error: IllegalStateException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                            return@withLock
+                        } catch (error: ArithmeticException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "附件缓存配额计算溢出")
+                            return@withLock
+                        }
                         deliveryStore.enqueueMessage(
-                            conversation = conversationForMessage(
-                                currentProfile,
-                                sessionId,
-                                displayText,
-                                now,
-                            ),
+                            conversation = conversation,
                             message = pending.message,
                             command = pending.command,
-                            attachmentIds = attachmentIds,
+                            attachments = cachedAttachments,
                         )
                         reportResult(true)
                         if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
@@ -488,6 +530,30 @@ class RealtimeSession(
                 // 2. 切换当前会话
                 preferences.selectSession(sessionId)
                 mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+                publishTurnState()
+            }
+        }
+    }
+
+    fun stopCurrentTurn() {
+        scope.launch {
+            mutex.withLock {
+                val sessionId = mutableState.value.currentSessionId
+                if (sessionId == null || stops.activeTurnId(sessionId) == null) {
+                    mutableState.value = mutableState.value.copy(
+                        errorMessage = "当前会话没有正在生成的内容",
+                    )
+                    return@withLock
+                }
+                stops.requestStop(sessionId)
+            }
+        }
+    }
+
+    fun dismissError() {
+        scope.launch {
+            mutex.withLock {
+                mutableState.value = mutableState.value.copy(errorMessage = null)
             }
         }
     }
@@ -507,6 +573,7 @@ class RealtimeSession(
                 // 2. 持久化选择
                 preferences.selectSession(sessionId)
                 mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+                publishTurnState()
             }
         }
     }
@@ -753,7 +820,12 @@ class RealtimeSession(
                     connectionEpoch = accepted.connectionEpoch,
                     payload = buildJsonObject {
                         put("last_ack", cursor.lastAcknowledgedEventSeq)
-                        put("active_turns", kotlinx.serialization.json.JsonArray(emptyList()))
+                        put(
+                            "active_turns",
+                            kotlinx.serialization.json.JsonArray(
+                                stops.activeTurnIds().map(::JsonPrimitive),
+                            ),
+                        )
                     },
                 ),
             ),
@@ -785,6 +857,21 @@ class RealtimeSession(
                 )
                 recordAck(eventSeq)
                 when (envelope.type) {
+                    "turn.started" -> stops.onTurnStarted(
+                        requireNotNull(envelope.sessionId),
+                        requireNotNull(envelope.turnId),
+                    )
+                    "turn.interrupted" -> stops.onTurnTerminal(
+                        requireNotNull(envelope.sessionId),
+                        requireNotNull(envelope.turnId),
+                    )
+                    "message.final" -> {
+                        stops.onTurnTerminal(
+                            requireNotNull(envelope.sessionId),
+                            requireNotNull(envelope.turnId),
+                        )
+                        downloads.resumeIfIdle(currentProfile.serverId)
+                    }
                     "sync.completed" -> {
                         if (completedSyncGeneration == syncGeneration) return
                         completedSyncGeneration = syncGeneration
@@ -803,7 +890,7 @@ class RealtimeSession(
                     "attachment.progress" -> uploads.onProgress(
                         ProtocolCodec.decodePayload(envelope.payload),
                     )
-                    "message.final", "message.proactive" ->
+                    "message.proactive" ->
                         downloads.resumeIfIdle(currentProfile.serverId)
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),
@@ -811,6 +898,7 @@ class RealtimeSession(
                 }
             }
             WireKind.REPLY -> {
+                if (stops.onReply(envelope)) return
                 if (envelope.type.startsWith("attachment.download.")) {
                     try {
                         check(downloads.onReply(envelope)) { "收到未知附件下载 reply" }
@@ -1006,6 +1094,7 @@ class RealtimeSession(
         val serverId = requireNotNull(profile).serverId
         uploads.onConnectionReady(serverId)
         downloads.onConnectionReady(serverId)
+        stops.onConnectionReady()
         flushOutbox()
     }
 
@@ -1027,6 +1116,24 @@ class RealtimeSession(
                 connectionEpoch = epoch,
                 sessionId = sessionId,
                 payload = payload,
+            ),
+        )
+    }
+
+    private fun sendTurnStopCommand(request: TurnStopRequest): Boolean {
+        val epoch = activeEpoch ?: return false
+        val candidate = activeCandidate ?: return false
+        return socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = "turn.stop",
+                id = request.commandId,
+                connectionEpoch = epoch,
+                sessionId = request.sessionId,
+                turnId = request.turnId,
+                payload = buildJsonObject {},
             ),
         )
     }
@@ -1270,6 +1377,14 @@ class RealtimeSession(
         projectionSyncGeneration = null
         uploads.onDisconnected()
         downloads.onDisconnected()
+    }
+
+    private fun publishTurnState() {
+        val sessionId = mutableState.value.currentSessionId
+        mutableState.value = mutableState.value.copy(
+            activeTurnId = stops.activeTurnId(sessionId),
+            isStopping = stops.isStopping(sessionId),
+        )
     }
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(

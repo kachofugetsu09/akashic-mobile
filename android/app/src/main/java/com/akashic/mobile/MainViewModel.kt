@@ -77,6 +77,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 connection.notice
             },
+            errorNotice = session.errorMessage,
             sessions = conversations
                 .filter { it.sessionId.startsWith("mobile:") }
                 .map { SessionUi(it.sessionId, it.title) },
@@ -101,6 +102,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             },
             isStreaming = graph.any { it.message.deliveryState == "streaming" },
+            isStopping = session.isStopping,
+            canStop = session.activeTurnId != null &&
+                session.connection.phase == ConnectionPhase.READY &&
+                !session.isStopping,
             canSend = session.hasProfile && !remoteDeleted,
         )
     }.stateIn(
@@ -110,18 +115,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             connectionLabel = "正在连接",
             connectionStatus = ConnectionStatusUi.CONNECTING,
             connectionNotice = null,
+            errorNotice = null,
             sessions = emptyList(),
             selectedSessionId = null,
             messages = emptyList(),
             attachments = emptyList(),
             isStreaming = false,
+            isStopping = false,
+            canStop = false,
             canSend = false,
         ),
     )
-
-    init {
-        container.realtimeSession.start()
-    }
 
     fun onQrCode(value: String) = container.realtimeSession.beginPairing(value)
 
@@ -132,6 +136,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) = container.realtimeSession.sendMessage(value, expectedAttachmentIds) { persisted ->
         viewModelScope.launch { onPersisted(persisted) }
     }
+
+    fun stopCurrentTurn() = container.realtimeSession.stopCurrentTurn()
+
+    fun dismissError() = container.realtimeSession.dismissError()
 
     fun addAttachments(uris: List<android.net.Uri>) = container.realtimeSession.addAttachments(uris)
 
@@ -149,7 +157,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectSession(sessionId: String) = container.realtimeSession.selectSession(sessionId)
 
-    fun restartPairing() = container.realtimeSession.restartPairing()
+    fun restartPairing() = MobileConnectionService.disconnect(getApplication())
 
     private fun toMessageUi(graph: MessageWithBlocks): MessageUi {
         val message = graph.message

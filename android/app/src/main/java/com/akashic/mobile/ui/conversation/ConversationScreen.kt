@@ -94,6 +94,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
@@ -112,6 +114,7 @@ import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -124,6 +127,7 @@ fun ConversationScreen(
     onStop: () -> Unit,
     onRetryDownloadedAttachment: (String) -> Unit,
     onOpenDownloadedAttachment: (String) -> Unit,
+    onDismissError: () -> Unit,
 ) {
     var composerText by rememberSaveable { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
@@ -144,7 +148,10 @@ fun ConversationScreen(
                     if (outgoingMessageTextLength(value) <= MAX_MESSAGE_TEXT_LENGTH) composerText = value
                 },
                 connectionNotice = state.connectionNotice,
+                errorNotice = state.errorNotice,
                 isStreaming = state.isStreaming,
+                isStopping = state.isStopping,
+                canStop = state.canStop,
                 enabled = state.canSend,
                 attachments = state.attachments,
                 onAttach = onAttach,
@@ -161,6 +168,7 @@ fun ConversationScreen(
                     }
                 },
                 onStop = onStop,
+                onDismissError = onDismissError,
             )
         },
     ) { contentPadding ->
@@ -266,15 +274,19 @@ private fun MessageList(
     val listState = rememberLazyListState()
     var followsBottom by remember { mutableStateOf(true) }
     val bottomThreshold = with(LocalDensity.current) { 48.dp.roundToPx() }
+    val contentRevision = remember(messages) { messageContentRevision(messages) }
 
     LaunchedEffect(listState, bottomThreshold) {
         snapshotFlow {
             val layout = listState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull()
-            val atBottom = last == null || (
-                last.index == layout.totalItemsCount - 1 &&
-                    last.offset + last.size <= layout.viewportEndOffset + bottomThreshold
-                )
+            val atBottom = isConversationAtBottom(
+                totalItems = layout.totalItemsCount,
+                lastVisibleIndex = last?.index,
+                lastVisibleEnd = last?.let { it.offset + it.size },
+                viewportEnd = layout.viewportEndOffset,
+                threshold = bottomThreshold,
+            )
             listState.isScrollInProgress to atBottom
         }.collect { (isScrolling, atBottom) ->
             if (isScrolling) followsBottom = atBottom
@@ -282,36 +294,61 @@ private fun MessageList(
         }
     }
 
-    LaunchedEffect(messages) {
+    LaunchedEffect(contentRevision) {
         if (followsBottom) listState.scrollToItem(messages.size)
     }
 
+    LaunchedEffect(listState, messages.size) {
+        snapshotFlow {
+            val layout = listState.layoutInfo
+            val last = layout.visibleItemsInfo.lastOrNull()
+            listOf(
+                layout.totalItemsCount,
+                last?.index ?: -1,
+                last?.offset ?: 0,
+                last?.size ?: 0,
+                layout.viewportEndOffset,
+            )
+        }.distinctUntilChanged().collect {
+            if (followsBottom && !listState.isScrollInProgress && listState.layoutInfo.totalItemsCount > 0) {
+                listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+            }
+        }
+    }
+
     LazyColumn(
-        modifier = modifier.fillMaxSize(),
+        modifier = modifier
+            .fillMaxSize()
+            .testTag("conversation-message-list"),
+        userScrollEnabled = true,
         state = listState,
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 20.dp),
     ) {
         itemsIndexed(messages, key = { _, message -> message.id }) { index, message ->
-            if (index > 0) {
-                Spacer(Modifier.height(14.dp))
-                if (messages[index - 1]::class == message::class) {
-                    HorizontalDivider(
-                        color = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f),
-                    )
+            Box(Modifier.testTag("message-${message.id}")) {
+                Column {
+                    if (index > 0) {
+                        Spacer(Modifier.height(14.dp))
+                        if (messages[index - 1]::class == message::class) {
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.24f),
+                            )
+                        }
+                        Spacer(Modifier.height(14.dp))
+                    }
+                    when (message) {
+                        is MessageUi.User -> UserMessage(
+                            message,
+                            onRetryDownloadedAttachment,
+                            onOpenDownloadedAttachment,
+                        )
+                        is MessageUi.AssistantTurn -> AssistantTurn(
+                            message,
+                            onRetryDownloadedAttachment,
+                            onOpenDownloadedAttachment,
+                        )
+                    }
                 }
-                Spacer(Modifier.height(14.dp))
-            }
-            when (message) {
-                is MessageUi.User -> UserMessage(
-                    message,
-                    onRetryDownloadedAttachment,
-                    onOpenDownloadedAttachment,
-                )
-                is MessageUi.AssistantTurn -> AssistantTurn(
-                    message,
-                    onRetryDownloadedAttachment,
-                    onOpenDownloadedAttachment,
-                )
             }
         }
         item(key = "message-list-bottom") {
@@ -592,7 +629,10 @@ private fun ConversationBottomBar(
     text: String,
     onTextChange: (String) -> Unit,
     connectionNotice: String?,
+    errorNotice: String?,
     isStreaming: Boolean,
+    isStopping: Boolean,
+    canStop: Boolean,
     enabled: Boolean,
     attachments: List<ComposerAttachmentUi>,
     onAttach: () -> Unit,
@@ -600,6 +640,7 @@ private fun ConversationBottomBar(
     onRetryAttachment: (String) -> Unit,
     onSend: () -> Unit,
     onStop: () -> Unit,
+    onDismissError: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -609,6 +650,13 @@ private fun ConversationBottomBar(
             .imePadding()
             .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
     ) {
+        if (errorNotice != null) {
+            DismissibleErrorNotice(
+                message = errorNotice,
+                onDismiss = onDismissError,
+                modifier = Modifier.padding(bottom = 8.dp),
+            )
+        }
         if (connectionNotice != null) {
             Text(
                 text = connectionNotice,
@@ -672,13 +720,54 @@ private fun ConversationBottomBar(
             )
             SendStopButton(
                 showStop = isStreaming,
-                enabled = isStreaming || (
+                isStopping = isStopping,
+                enabled = if (isStreaming) {
+                    canStop
+                } else {
                     enabled &&
                         (text.isNotBlank() || attachments.isNotEmpty()) &&
                         attachments.all { it.state == ComposerAttachmentState.READY }
-                    ),
+                },
                 onClick = if (isStreaming) onStop else onSend,
             )
+        }
+    }
+}
+
+@Composable
+private fun DismissibleErrorNotice(
+    message: String,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        shape = MaterialTheme.shapes.medium,
+        modifier = modifier
+            .fillMaxWidth()
+            .semantics { liveRegion = LiveRegionMode.Assertive }
+            .testTag("conversation-error-notice"),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.ErrorOutline,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 10.dp, vertical = 12.dp),
+            )
+            TactileIconButton(onClick = onDismiss) {
+                Icon(Icons.Rounded.Close, contentDescription = "关闭错误提示")
+            }
         }
     }
 }
@@ -848,6 +937,7 @@ private fun TactileIconButton(
 @Composable
 private fun SendStopButton(
     showStop: Boolean,
+    isStopping: Boolean,
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
@@ -865,8 +955,49 @@ private fun SendStopButton(
             .testTag("composer-send-stop")
             .pressScale(interactionSource, enabled),
     ) {
-        ContextualSendStopIcon(showStop)
+        if (isStopping) {
+            androidx.compose.material3.CircularProgressIndicator(
+                color = MaterialTheme.colorScheme.onPrimary,
+                strokeWidth = 2.dp,
+                modifier = Modifier
+                    .size(22.dp)
+                    .semantics { stateDescription = "正在停止生成" },
+            )
+        } else {
+            ContextualSendStopIcon(showStop)
+        }
     }
+}
+
+internal fun isConversationAtBottom(
+    totalItems: Int,
+    lastVisibleIndex: Int?,
+    lastVisibleEnd: Int?,
+    viewportEnd: Int,
+    threshold: Int,
+): Boolean = lastVisibleIndex == null || (
+    lastVisibleIndex == totalItems - 1 &&
+        requireNotNull(lastVisibleEnd) <= viewportEnd + threshold
+    )
+
+internal fun messageContentRevision(messages: List<MessageUi>): Int = messages.fold(1) { hash, message ->
+    val messageHash = when (message) {
+        is MessageUi.User -> listOf(
+            message.id,
+            message.text,
+            message.deliveryLabel,
+            message.attachments.joinToString { "${it.id}:${it.state}:${it.transferredBytes}" },
+        ).hashCode()
+        is MessageUi.AssistantTurn -> listOf(
+            message.id,
+            message.intro,
+            message.answer,
+            message.isStreaming,
+            message.blocks.joinToString { "${it.id}:${it.state}:${it.detail}" },
+            message.attachments.joinToString { "${it.id}:${it.state}:${it.transferredBytes}" },
+        ).hashCode()
+    }
+    31 * hash + messageHash
 }
 
 @Composable
@@ -935,6 +1066,7 @@ private fun ConversationLightPreview() {
             onRetryAttachment = {},
             onRetryDownloadedAttachment = {},
             onOpenDownloadedAttachment = {},
+            onDismissError = {},
             onSend = { _, _, _ -> },
             onStop = {},
         )
@@ -954,6 +1086,7 @@ private fun ConversationDarkPreview() {
             onRetryAttachment = {},
             onRetryDownloadedAttachment = {},
             onOpenDownloadedAttachment = {},
+            onDismissError = {},
             onSend = { _, _, _ -> },
             onStop = {},
         )

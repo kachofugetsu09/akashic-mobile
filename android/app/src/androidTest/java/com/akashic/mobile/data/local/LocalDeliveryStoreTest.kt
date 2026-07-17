@@ -15,6 +15,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -289,6 +290,89 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun deliveredMessagesPersistBeyondTheFormerInMemoryQueueCapacity() = runBlocking {
+        repeat(65) { index ->
+            val sequence = index + 1L
+            store.applyEvent(
+                serverId = "server",
+                deviceId = "device",
+                envelope = WireEnvelope(
+                    v = 1,
+                    kind = WireKind.EVENT,
+                    type = "message.proactive",
+                    id = "proactive-$sequence",
+                    connectionEpoch = 1,
+                    eventSeq = sequence,
+                    sessionId = "mobile:test",
+                    payload = buildJsonObject { put("content", "主动消息 $sequence") },
+                ),
+                updatedAt = sequence,
+            )
+        }
+
+        assertEquals(65, database.pendingMessageNotifications().countForServer("server"))
+        assertEquals(
+            "主动消息 1",
+            database.pendingMessageNotifications().get("proactive:proactive-1")?.content,
+        )
+        assertEquals(
+            "主动消息 65",
+            database.pendingMessageNotifications().get("proactive:proactive-65")?.content,
+        )
+        assertEquals(65L, database.realtimeCursors().get("device")?.lastAcknowledgedEventSeq)
+    }
+
+    @Test
+    fun invalidNotificationPayloadDoesNotAdvanceCursorOrPersistMessage() = runBlocking {
+        val envelope = event(
+            1,
+            "message.final",
+            buildJsonObject {
+                put("message_id", "mobile:test:invalid")
+                put("content", "不会提交")
+                put("attachments", JsonPrimitive("broken"))
+            },
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { store.applyEvent("server", "device", envelope, 2) }
+        }
+        assertEquals(0L, database.realtimeCursors().get("device")?.lastAcknowledgedEventSeq)
+        assertEquals(null, database.messages().get("mobile:test:invalid"))
+        assertEquals(0, database.pendingMessageNotifications().countForServer("server"))
+    }
+
+    @Test
+    fun resetProjectionCleanupPreservesPendingNotificationSnapshot() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "message.final",
+                buildJsonObject {
+                    put("message_id", "mobile:test:pending-notification")
+                    put("content", "仍需通知")
+                },
+            ),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(50, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
+            3,
+            preservedSessionId = "mobile:test",
+        )
+
+        assertEquals(null, database.messages().get("mobile:test:pending-notification"))
+        assertEquals(
+            "仍需通知",
+            database.pendingMessageNotifications().get("mobile:test:pending-notification")?.content,
+        )
+    }
+
+    @Test
     fun historyReplacesLiveBlocksForTheSameCanonicalMessage() = runBlocking {
         store.applyEvent(
             "server",
@@ -396,6 +480,7 @@ class LocalDeliveryStoreTest {
     @Test
     fun historyCanonicalIdReplacesOptimisticUserMessage() = runBlocking {
         val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val attachmentId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
         database.messages().upsert(
             MessageEntity(
                 messageId = "user:$clientId",
@@ -407,6 +492,10 @@ class LocalDeliveryStoreTest {
                 createdAt = 1,
                 updatedAt = 1,
             ),
+        )
+        database.mediaAttachments().upsert(mediaAttachment(attachmentId))
+        database.mediaAttachments().linkAll(
+            listOf(MessageAttachmentEntity("user:$clientId", attachmentId, 0)),
         )
         store.applyEvent(
             "server",
@@ -424,6 +513,15 @@ class LocalDeliveryStoreTest {
                         put("role", "user")
                         put("content", "本地问题")
                         put("extra", buildJsonObject {})
+                        put("attachments", buildJsonArray {
+                            add(buildJsonObject {
+                                put("attachment_id", attachmentId)
+                                put("filename", "image.png")
+                                put("content_type", "image/png")
+                                put("size_bytes", 1_048_579)
+                                put("sha256", "a".repeat(64))
+                            })
+                        })
                         put("ts", "2026-07-14T16:00:00Z")
                     })
                 })
@@ -435,6 +533,110 @@ class LocalDeliveryStoreTest {
         val canonical = database.messages().get("mobile:test:user:canonical")!!
         assertEquals(clientId, canonical.clientMessageId)
         assertEquals("complete", canonical.deliveryState)
+        assertEquals(
+            listOf(attachmentId),
+            database.mediaAttachments().forMessage("mobile:test:user:canonical").map { it.attachmentId },
+        )
+    }
+
+    @Test
+    fun gapResetClearsOnlyServerProjectionAndPreservesLocalWork() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity("remote", null, "mobile:test", "assistant", "旧投影", "complete", 1, 1),
+        )
+        database.messages().upsert(
+            MessageEntity("user:$clientId", clientId, "mobile:test", "user", "待发送", "pending", 2, 2),
+        )
+        database.outbox().enqueue(
+            OutboxCommandEntity(clientId, "server", "{}", "pending", 0, 2, null),
+        )
+        database.attachmentTransfers().upsert(transfer("ready", 1_048_579, "draft"))
+        store.savePairedProfile(
+            ServerProfileEntity("other", "other", "other-device", "alias", "pin", "[]", "[]", "[]", 1),
+            RealtimeCursorEntity("other-device", "other", 0, 0, 1),
+        )
+        database.conversations().upsert(ConversationEntity("mobile:other", "other", "other", 1))
+        database.messages().upsert(
+            MessageEntity("other-message", null, "mobile:other", "assistant", "其他电脑", "complete", 1, 1),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(50, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
+            3,
+            preservedSessionId = "mobile:test",
+        )
+
+        assertEquals(50, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
+        assertEquals(null, database.messages().get("remote"))
+        assertNotNull(database.messages().get("user:$clientId"))
+        assertNotNull(database.outbox().get(clientId))
+        assertNotNull(database.attachmentTransfers().get("draft"))
+        assertEquals("其他电脑", database.messages().get("other-message")!!.text)
+    }
+
+    @Test
+    fun repeatedResetRebuildsHistoryAttachmentsAndThenAcceptsLiveEvents() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(100, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(200, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
+            3,
+        )
+        val descriptor = buildJsonObject {
+            put("attachment_id", "01ARZ3NDEKTSV4RRFFQ69G5FAW")
+            put("filename", "history.png")
+            put("content_type", "image/png")
+            put("size_bytes", 3)
+            put("sha256", "a".repeat(64))
+        }
+        store.applyEvent(
+            "server",
+            "device",
+            event(201, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:history")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "历史恢复")
+                        put("extra", buildJsonObject {})
+                        put("attachments", buildJsonArray { add(descriptor) })
+                        put("ts", "2026-07-14T16:00:05Z")
+                    })
+                })
+            }),
+            4,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(202, "message.final", buildJsonObject {
+                put("message_id", "mobile:test:live")
+                put("content", "重建后的实时消息")
+            }),
+            5,
+        )
+
+        assertEquals(202, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
+        assertEquals("历史恢复", database.messages().get("mobile:test:history")!!.text)
+        assertEquals("重建后的实时消息", database.messages().get("mobile:test:live")!!.text)
+        assertEquals(
+            listOf("01ARZ3NDEKTSV4RRFFQ69G5FAW"),
+            database.mediaAttachments().forMessage("mobile:test:history").map { it.attachmentId },
+        )
     }
 
     @Test
@@ -649,12 +851,61 @@ class LocalDeliveryStoreTest {
                 createdAt = 2,
                 lastAttemptAt = null,
             ),
-            attachmentIds = listOf("attachment"),
+            attachments = listOf(mediaAttachment("attachment")),
         )
 
         assertEquals("sending", database.attachmentTransfers().get("attachment")!!.state)
-        assertEquals(listOf("attachment"), store.acknowledgeOutbox(command.id, 3))
+        assertEquals(
+            listOf("attachment"),
+            database.mediaAttachments().forMessage("user:${payload.clientMessageId}").map { it.attachmentId },
+        )
+        assertEquals(
+            listOf("attachment"),
+            store.acknowledgeOutbox(command.id, 3),
+        )
         assertEquals("sent", database.attachmentTransfers().get("attachment")!!.state)
+        assertEquals(
+            listOf("attachment"),
+            database.mediaAttachments().forMessage("user:${payload.clientMessageId}").map { it.attachmentId },
+        )
+    }
+
+    @Test
+    fun sentAttachmentLinkAndCachePathSurviveDatabaseRestart() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val name = "sent-media-${System.nanoTime()}.db"
+        val cachedFile = context.cacheDir.resolve("sent-media-${System.nanoTime()}.bin")
+            .apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val messageId = "user:01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val attachment = mediaAttachment("01ARZ3NDEKTSV4RRFFQ69G5FAW").copy(
+            sizeBytes = 3,
+            transferredBytes = 3,
+            cachePath = cachedFile.absolutePath,
+        )
+        var persisted = Room.databaseBuilder(context, AppDatabase::class.java, name).build()
+        try {
+            persisted.serverProfiles().upsert(
+                ServerProfileEntity("restart", "restart", "restart-device", "alias", "pin", "[]", "[]", "[]", 1),
+            )
+            persisted.conversations().upsert(ConversationEntity("mobile:restart", "restart", "restart", 1))
+            persisted.messages().upsert(
+                MessageEntity(messageId, messageId.removePrefix("user:"), "mobile:restart", "user", "附件：image.png", "sent", 1, 1),
+            )
+            persisted.mediaAttachments().upsert(attachment.copy(serverId = "restart", sessionId = "mobile:restart"))
+            persisted.mediaAttachments().linkAll(
+                listOf(MessageAttachmentEntity(messageId, attachment.attachmentId, 0)),
+            )
+            persisted.close()
+
+            persisted = Room.databaseBuilder(context, AppDatabase::class.java, name).build()
+            val restored = persisted.mediaAttachments().forMessage(messageId).single()
+            assertEquals(cachedFile.absolutePath, restored.cachePath)
+            assertEquals(byteArrayOf(1, 2, 3).toList(), cachedFile.readBytes().toList())
+        } finally {
+            persisted.close()
+            context.deleteDatabase(name)
+            cachedFile.delete()
+        }
     }
 
     @Test
@@ -796,6 +1047,21 @@ class LocalDeliveryStoreTest {
         sha256 = "a".repeat(64),
         transferredBytes = offset,
         state = state,
+        updatedAt = 1,
+    )
+
+    private fun mediaAttachment(id: String) = MediaAttachmentEntity(
+        attachmentId = id,
+        serverId = "server",
+        sessionId = "mobile:test",
+        filename = "image.png",
+        contentType = "image/png",
+        sizeBytes = 1_048_579,
+        sha256 = "a".repeat(64),
+        transferredBytes = 1_048_579,
+        state = "cached",
+        cachePath = "cache/$id.bin",
+        lastAccessedAt = 1,
         updatedAt = 1,
     )
 
