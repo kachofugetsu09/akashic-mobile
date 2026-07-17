@@ -54,6 +54,7 @@ data class MobileSessionState(
     val currentSessionId: String? = null,
     val activeTurnId: String? = null,
     val isStopping: Boolean = false,
+    val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
 
@@ -247,6 +248,7 @@ class RealtimeSession(
     private var projectionSyncGeneration: Long? = null
     private val pendingSyncCommands = mutableMapOf<String, PendingSyncCommand>()
     private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
+    private var pendingCommandListId: String? = null
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -345,6 +347,56 @@ class RealtimeSession(
                     initialized = true,
                     scanGeneration = mutableState.value.scanGeneration + 1,
                 )
+            }
+        }
+    }
+
+    /** 保留配对身份，清除服务端投影后重新拉取全部手机会话。 */
+    fun reloadFromServer() {
+        scope.launch {
+            mutex.withLock {
+                // 1. 只允许稳定空闲连接发起重建
+                val currentProfile = requireNotNull(profile) { "Pair a server before reloading history" }
+                check(mutableState.value.connection.phase == ConnectionPhase.READY) {
+                    "History reload requires a ready connection"
+                }
+                check(mutableState.value.activeTurnId == null) { "History reload cannot interrupt an active turn" }
+                mutableState.value = mutableState.value.copy(
+                    connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
+                    errorMessage = null,
+                )
+
+                // 2. 清理本地投影；即使附件文件清理失败，也继续恢复消息视图
+                var cleanupHandled = false
+                val cleanupError = try {
+                    deliveryStore.clearReloadableCache(
+                        serverId = currentProfile.serverId,
+                        preservedSessionId = mutableState.value.currentSessionId,
+                    )
+                    cleanupHandled = true
+                    null
+                } catch (error: IOException) {
+                    cleanupHandled = true
+                    "部分附件缓存未清理：${error.message}"
+                } catch (error: SecurityException) {
+                    cleanupHandled = true
+                    "附件缓存路径不安全：${error.message}"
+                } catch (error: SQLiteException) {
+                    cleanupHandled = true
+                    "本地消息缓存清理失败：${error.message}"
+                } finally {
+                    if (!cleanupHandled) {
+                        mutableState.value = mutableState.value.copy(
+                            connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
+                        )
+                    }
+                }
+
+                // 3. 沿现有认证连接重新获取会话目录和完整历史
+                beginResetRebuild()
+                if (cleanupError != null) {
+                    mutableState.value = mutableState.value.copy(errorMessage = cleanupError)
+                }
             }
         }
     }
@@ -515,6 +567,32 @@ class RealtimeSession(
                         if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
                     }
                 }
+            }
+        }
+    }
+
+    /** 发送不携带或消费附件草稿的纯文本命令。 */
+    fun sendCommand(command: String) {
+        scope.launch {
+            mutex.withLock {
+                val currentProfile = requireNotNull(profile) { "Pair a server before sending" }
+                val body = validateOutgoingMessageText(command)
+                val sessionId = ensureCurrentSession(currentProfile)
+                require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                val now = System.currentTimeMillis()
+                val pending = preparePendingMessageSend(
+                    serverId = currentProfile.serverId,
+                    sessionId = sessionId,
+                    body = body,
+                    now = now,
+                )
+                deliveryStore.enqueueMessage(
+                    conversation = conversationForMessage(currentProfile, sessionId, body, now),
+                    message = pending.message,
+                    command = pending.command,
+                    attachments = emptyList(),
+                )
+                if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
             }
         }
     }
@@ -931,6 +1009,18 @@ class RealtimeSession(
                 }
                 if (uploads.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
+                if (envelope.type == "command.list.ok") {
+                    applyCommandListReply(envelope)
+                    return
+                }
+                if (envelope.type == "command.list.error" && id == pendingCommandListId) {
+                    pendingCommandListId = null
+                    mutableState.value = mutableState.value.copy(
+                        errorMessage = envelope.payload["message"]?.jsonPrimitive?.content
+                            ?: "加载快捷命令失败",
+                    )
+                    return
+                }
                 if (id in pendingSyncCommands && envelope.type.endsWith(".error")) {
                     val pending = requireNotNull(pendingSyncCommands.remove(id))
                     require(pending.generation == syncGeneration) { "收到旧 generation 的历史同步错误" }
@@ -991,6 +1081,47 @@ class RealtimeSession(
     private fun requestSessionList() {
         if (hasPendingSyncCommand("session.list")) return
         sendSyncCommand(type = "session.list", sessionId = null, payload = buildJsonObject {})
+    }
+
+    private fun requestCommandList() {
+        if (pendingCommandListId != null) return
+        val epoch = requireNotNull(activeEpoch) { "快捷命令同步需要认证连接" }
+        val candidate = requireNotNull(activeCandidate) { "快捷命令同步需要可用 endpoint" }
+        val commandId = Ulid.next()
+        pendingCommandListId = commandId
+        val sent = socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = "command.list",
+                id = commandId,
+                connectionEpoch = epoch,
+                payload = buildJsonObject {},
+            ),
+        )
+        if (!sent) {
+            pendingCommandListId = null
+            scheduleReconnect("快捷命令未进入 WebSocket 队列")
+        }
+    }
+
+    /** 校验服务端命令目录并发布给界面。 */
+    private fun applyCommandListReply(envelope: WireEnvelope) {
+        val commandId = requireNotNull(envelope.id)
+        require(commandId == pendingCommandListId) { "收到未知快捷命令 reply: $commandId" }
+        val payload = ProtocolCodec.decodePayload<CommandListPayload>(envelope.payload)
+        val commands = payload.items.map { item ->
+            require(COMMAND_NAME.matches(item.command)) { "快捷命令名称无效: ${item.command}" }
+            require(item.description.isNotBlank() && item.description.length <= 256) {
+                "快捷命令说明无效: ${item.command}"
+            }
+            require(item.command != "stop") { "stop 由生成中止控件拥有" }
+            item
+        }
+        require(commands.map { it.command }.distinct().size == commands.size) { "快捷命令名称重复" }
+        pendingCommandListId = null
+        mutableState.value = mutableState.value.copy(commands = commands)
     }
 
     private fun hasPendingSyncCommand(type: String): Boolean =
@@ -1092,6 +1223,7 @@ class RealtimeSession(
         syncGeneration += 1
         completedSyncGeneration = syncGeneration
         pendingSyncCommands.clear()
+        pendingCommandListId = null
         requestedHistoryPages.clear()
         beginProjectionSync()
     }
@@ -1104,6 +1236,7 @@ class RealtimeSession(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
         )
         val serverId = requireNotNull(profile).serverId
+        requestCommandList()
         uploads.onConnectionReady(serverId)
         downloads.onConnectionReady(serverId)
         stops.onConnectionReady()
@@ -1343,6 +1476,7 @@ class RealtimeSession(
         ackJob = null
         pendingAckCount = 0
         pendingSyncCommands.clear()
+        pendingCommandListId = null
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
         uploads.onDisconnected()
@@ -1428,6 +1562,7 @@ class RealtimeSession(
         activeEpoch = null
         outboxFlight.reset()
         pendingSyncCommands.clear()
+        pendingCommandListId = null
         requestedHistoryPages.clear()
         projectionSyncGeneration = null
         uploads.onDisconnected()
@@ -1463,6 +1598,7 @@ class RealtimeSession(
         const val TAG = "RealtimeSession"
         val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive", "attachments-v1")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+        val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
         const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32

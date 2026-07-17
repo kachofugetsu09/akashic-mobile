@@ -171,6 +171,17 @@ data class SessionListPayload(
 )
 
 @Serializable
+data class CommandListPayload(
+    val items: List<RemoteCommandItem>,
+)
+
+@Serializable
+data class RemoteCommandItem(
+    val command: String,
+    val description: String,
+)
+
+@Serializable
 data class RemoteSessionSummary(
     @SerialName("session_id") val sessionId: String,
     val title: String,
@@ -227,6 +238,7 @@ object ProtocolCodec {
             "attachment.begin",
             "attachment.finish",
             "attachment.download",
+            "command.list",
             "device.update",
             "ping",
         ),

@@ -19,7 +19,7 @@ class AppDatabaseMigrationTest {
     )
 
     @Test
-    fun migrateCanonical1To4BuildsTheLayeredSchemaWithoutLosingMessages() {
+    fun migrateCanonical1To5BuildsTheLayeredSchemaWithoutLosingMessages() {
         helper.createDatabase(CANONICAL_DATABASE_NAME, 1).apply {
             insertVersion1BaseRows()
             close()
@@ -27,11 +27,12 @@ class AppDatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             CANONICAL_DATABASE_NAME,
-            4,
+            5,
             true,
             AppDatabase.MIGRATION_1_2,
             AppDatabase.MIGRATION_2_3,
             AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5,
         ).use { database ->
             assertSingleString(database, "SELECT text FROM messages", "旧消息")
             assertSingleString(
@@ -39,14 +40,14 @@ class AppDatabaseMigrationTest {
                 "SELECT remoteState FROM conversations",
                 ConversationRemoteState.UNKNOWN,
             )
-            assertSingleInt(database, "SELECT COUNT(*) FROM media_attachments", 0)
+            assertSingleNull(database, "SELECT serverSeq FROM messages")
             assertSingleInt(database, "SELECT COUNT(*) FROM pending_message_notifications", 0)
             assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
         }
     }
 
     @Test
-    fun migratePublishedPr4Version2To4PreservesMediaAndAddsOwnershipAndNotifications() {
+    fun migratePublishedPr4Version2To5PreservesMediaAndAddsLaterState() {
         helper.createDatabase(PUBLISHED_PR4_DATABASE_NAME, 1).apply {
             insertVersion1BaseRows()
             createMediaTables()
@@ -57,12 +58,149 @@ class AppDatabaseMigrationTest {
 
         helper.runMigrationsAndValidate(
             PUBLISHED_PR4_DATABASE_NAME,
-            4,
+            5,
             true,
             AppDatabase.MIGRATION_2_3,
             AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5,
         ).use { database ->
             assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
+            assertSingleString(
+                database,
+                "SELECT remoteState FROM conversations",
+                ConversationRemoteState.UNKNOWN,
+            )
+            assertSingleNull(database, "SELECT serverSeq FROM messages")
+        }
+    }
+
+    @Test
+    fun migrateFinalPr4Version3To5PreservesOwnershipAndMedia() {
+        helper.createDatabase(FINAL_PR4_DATABASE_NAME, 3).apply {
+            insertVersion3BaseRows()
+            insertMediaRows()
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            FINAL_PR4_DATABASE_NAME,
+            5,
+            true,
+            AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5,
+        ).use { database ->
+            assertSingleString(database, "SELECT remoteState FROM conversations", ConversationRemoteState.REMOTE)
+            assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
+            assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
+        }
+    }
+
+    @Test
+    fun migratePublishedPr5Version3To5PreservesNotificationsAndMedia() {
+        helper.createDatabase(PUBLISHED_PR5_DATABASE_NAME, 1).apply {
+            insertVersion1BaseRows()
+            createMediaTables()
+            createPendingNotificationTable(includeIndexes = true)
+            insertMediaRows()
+            insertNotification("待展示")
+            execSQL("PRAGMA user_version = 3")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            PUBLISHED_PR5_DATABASE_NAME,
+            5,
+            true,
+            AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5,
+        ).use { database ->
+            assertSingleString(database, "SELECT content FROM pending_message_notifications", "待展示")
+            assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
+            assertSingleString(
+                database,
+                "SELECT remoteState FROM conversations",
+                ConversationRemoteState.UNKNOWN,
+            )
+            assertSingleNull(database, "SELECT serverSeq FROM messages")
+        }
+    }
+
+    @Test
+    fun migrateFinalPr5Version4PreservesDurableStateAndAddsServerSequence() {
+        helper.createDatabase(FINAL_PR5_DATABASE_NAME, 4).apply {
+            insertVersion4BaseRows()
+            insertMediaRows()
+            insertNotification("仍需通知")
+            execSQL("INSERT INTO pending_turn_stops VALUES('stop', 'server', 'mobile:test', 'turn-1', 6)")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            FINAL_PR5_DATABASE_NAME,
+            5,
+            true,
+            AppDatabase.MIGRATION_4_5,
+        ).use { database ->
+            assertSingleString(database, "SELECT remoteState FROM conversations", ConversationRemoteState.REMOTE)
+            assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
+            assertSingleString(database, "SELECT content FROM pending_message_notifications", "仍需通知")
+            assertSingleString(database, "SELECT turnId FROM pending_turn_stops", "turn-1")
+            assertSingleNull(database, "SELECT serverSeq FROM messages")
+        }
+    }
+
+    @Test
+    fun migrateReviewedPr6Version4PreservesSequenceAndNotificationAndAddsPr5State() {
+        helper.createDatabase(REVIEWED_PR6_DATABASE_NAME, 1).apply {
+            insertVersion1BaseRows()
+            createMediaTables()
+            createPendingNotificationTable(includeIndexes = true)
+            execSQL("ALTER TABLE `messages` ADD COLUMN `serverSeq` INTEGER")
+            execSQL("UPDATE messages SET serverSeq = 9 WHERE messageId = 'old-message'")
+            insertMediaRows()
+            insertNotification("旧 PR6 通知")
+            execSQL("PRAGMA user_version = 4")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            REVIEWED_PR6_DATABASE_NAME,
+            5,
+            true,
+            AppDatabase.MIGRATION_4_5,
+        ).use { database ->
+            assertSingleLong(database, "SELECT serverSeq FROM messages", 9)
+            assertSingleString(database, "SELECT content FROM pending_message_notifications", "旧 PR6 通知")
+            assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
+            assertSingleString(
+                database,
+                "SELECT remoteState FROM conversations",
+                ConversationRemoteState.UNKNOWN,
+            )
+            assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
+        }
+    }
+
+    @Test
+    fun migrateOriginalPublicPr6Version3ThroughPr5LayerTo5() {
+        helper.createDatabase(ORIGINAL_PR6_DATABASE_NAME, 1).apply {
+            insertVersion1BaseRows()
+            createMediaTables()
+            execSQL("ALTER TABLE `messages` ADD COLUMN `serverSeq` INTEGER")
+            execSQL("UPDATE messages SET serverSeq = 7 WHERE messageId = 'old-message'")
+            insertMediaRows()
+            execSQL("PRAGMA user_version = 3")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            ORIGINAL_PR6_DATABASE_NAME,
+            5,
+            true,
+            AppDatabase.MIGRATION_3_4,
+            AppDatabase.MIGRATION_4_5,
+        ).use { database ->
+            assertSingleLong(database, "SELECT serverSeq FROM messages", 7)
             assertSingleString(
                 database,
                 "SELECT remoteState FROM conversations",
@@ -74,101 +212,46 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
-    fun migrateFinalPr4Version3PreservesOwnershipAndMediaAndAddsNotifications() {
-        helper.createDatabase(FINAL_PR4_DATABASE_NAME, 3).apply {
-            insertVersion3BaseRows()
-            insertMediaRows()
-            close()
-        }
-
-        helper.runMigrationsAndValidate(
-            FINAL_PR4_DATABASE_NAME,
-            4,
-            true,
-            AppDatabase.MIGRATION_3_4,
-        ).use { database ->
-            assertSingleString(database, "SELECT remoteState FROM conversations", ConversationRemoteState.REMOTE)
-            assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
-            database.execSQL(
-                "INSERT INTO pending_message_notifications VALUES(" +
-                    "'notice', 'server', 'mobile:test', '完成', 1, 5)",
-            )
-            database.execSQL(
-                "INSERT INTO pending_turn_stops VALUES(" +
-                    "'stop', 'server', 'mobile:test', 'turn-1', 6)",
-            )
-            assertSingleString(database, "SELECT content FROM pending_message_notifications", "完成")
-            assertSingleString(database, "SELECT turnId FROM pending_turn_stops", "turn-1")
-        }
-    }
-
-    @Test
-    fun migratePublishedPr5Version3PreservesNotificationAndMediaAndAddsOwnership() {
-        helper.createDatabase(PUBLISHED_PR5_DATABASE_NAME, 1).apply {
-            insertVersion1BaseRows()
-            createMediaTables()
-            createPendingNotificationTable(includeIndexes = true)
-            insertMediaRows()
-            execSQL(
-                "INSERT INTO pending_message_notifications VALUES(" +
-                    "'notice', 'server', 'mobile:test', '待展示', 1, 5)",
-            )
-            execSQL("PRAGMA user_version = 3")
-            close()
-        }
-
-        helper.runMigrationsAndValidate(
-            PUBLISHED_PR5_DATABASE_NAME,
-            4,
-            true,
-            AppDatabase.MIGRATION_3_4,
-        ).use { database ->
-            assertSingleString(database, "SELECT content FROM pending_message_notifications", "待展示")
-            assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
-            assertSingleString(
-                database,
-                "SELECT remoteState FROM conversations",
-                ConversationRemoteState.UNKNOWN,
-            )
-            assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
-        }
-    }
-
-    @Test
-    fun migratePartialVersion3FailsLoudly() {
+    fun migratePartialVersion4FailsLoudly() {
         helper.createDatabase(PARTIAL_DATABASE_NAME, 1).apply {
             createMediaTables()
-            createPendingNotificationTable(includeIndexes = false)
-            execSQL("PRAGMA user_version = 3")
+            createPendingNotificationTable(includeIndexes = true)
+            createPendingTurnStopTable(includeIndexes = false)
+            execSQL("PRAGMA user_version = 4")
             close()
         }
 
         assertThrows(IllegalStateException::class.java) {
             helper.runMigrationsAndValidate(
                 PARTIAL_DATABASE_NAME,
-                4,
+                5,
                 true,
-                AppDatabase.MIGRATION_3_4,
+                AppDatabase.MIGRATION_4_5,
             )
         }
     }
 
     private fun SupportSQLiteDatabase.insertVersion1BaseRows() {
-        execSQL(
-            "INSERT INTO server_profiles VALUES(" +
-                "'server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
-        )
+        insertServer()
         execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2)")
         insertMessage()
     }
 
     private fun SupportSQLiteDatabase.insertVersion3BaseRows() {
+        insertServer()
+        execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 'remote')")
+        insertMessage()
+    }
+
+    private fun SupportSQLiteDatabase.insertVersion4BaseRows() {
+        insertVersion3BaseRows()
+    }
+
+    private fun SupportSQLiteDatabase.insertServer() {
         execSQL(
             "INSERT INTO server_profiles VALUES(" +
                 "'server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
         )
-        execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 'remote')")
-        insertMessage()
     }
 
     private fun SupportSQLiteDatabase.insertMessage() {
@@ -185,6 +268,13 @@ class AppDatabaseMigrationTest {
                 "3, 'sha', 3, 'available', '/cache/old.txt', 4, 4)",
         )
         execSQL("INSERT INTO message_attachments VALUES('old-message', 'attachment', 0)")
+    }
+
+    private fun SupportSQLiteDatabase.insertNotification(content: String) {
+        execSQL(
+            "INSERT INTO pending_message_notifications VALUES(" +
+                "'notice', 'server', 'mobile:test', '$content', 1, 5)",
+        )
     }
 
     private fun SupportSQLiteDatabase.createMediaTables() {
@@ -261,6 +351,30 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    private fun SupportSQLiteDatabase.createPendingTurnStopTable(includeIndexes: Boolean) {
+        execSQL(
+            """
+            CREATE TABLE `pending_turn_stops` (
+                `commandId` TEXT NOT NULL,
+                `serverId` TEXT NOT NULL,
+                `sessionId` TEXT NOT NULL,
+                `turnId` TEXT NOT NULL,
+                `createdAt` INTEGER NOT NULL,
+                PRIMARY KEY(`commandId`),
+                FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        if (includeIndexes) {
+            execSQL("CREATE INDEX `index_pending_turn_stops_serverId` ON `pending_turn_stops` (`serverId`)")
+            execSQL(
+                "CREATE UNIQUE INDEX `index_pending_turn_stops_serverId_sessionId` " +
+                    "ON `pending_turn_stops` (`serverId`, `sessionId`)",
+            )
+            execSQL("CREATE INDEX `index_pending_turn_stops_createdAt` ON `pending_turn_stops` (`createdAt`)")
+        }
+    }
+
     private fun assertSingleString(
         database: SupportSQLiteDatabase,
         query: String,
@@ -269,6 +383,24 @@ class AppDatabaseMigrationTest {
         database.query(query).use { cursor ->
             check(cursor.moveToFirst())
             assertEquals(expected, cursor.getString(0))
+        }
+    }
+
+    private fun assertSingleLong(
+        database: SupportSQLiteDatabase,
+        query: String,
+        expected: Long,
+    ) {
+        database.query(query).use { cursor ->
+            check(cursor.moveToFirst())
+            assertEquals(expected, cursor.getLong(0))
+        }
+    }
+
+    private fun assertSingleNull(database: SupportSQLiteDatabase, query: String) {
+        database.query(query).use { cursor ->
+            check(cursor.moveToFirst())
+            assertEquals(true, cursor.isNull(0))
         }
     }
 
@@ -284,10 +416,13 @@ class AppDatabaseMigrationTest {
     }
 
     private companion object {
-        const val CANONICAL_DATABASE_NAME = "migration-canonical-1-4"
-        const val PUBLISHED_PR4_DATABASE_NAME = "migration-published-pr4-2-4"
-        const val FINAL_PR4_DATABASE_NAME = "migration-final-pr4-3-4"
-        const val PUBLISHED_PR5_DATABASE_NAME = "migration-published-pr5-3-4"
-        const val PARTIAL_DATABASE_NAME = "migration-partial-3-4"
+        const val CANONICAL_DATABASE_NAME = "migration-canonical-1-5"
+        const val PUBLISHED_PR4_DATABASE_NAME = "migration-published-pr4-2-5"
+        const val FINAL_PR4_DATABASE_NAME = "migration-final-pr4-3-5"
+        const val PUBLISHED_PR5_DATABASE_NAME = "migration-published-pr5-3-5"
+        const val FINAL_PR5_DATABASE_NAME = "migration-final-pr5-4-5"
+        const val REVIEWED_PR6_DATABASE_NAME = "migration-reviewed-pr6-4-5"
+        const val ORIGINAL_PR6_DATABASE_NAME = "migration-original-pr6-3-5"
+        const val PARTIAL_DATABASE_NAME = "migration-partial-4-5"
     }
 }

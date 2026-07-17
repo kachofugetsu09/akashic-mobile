@@ -21,7 +21,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PendingMessageNotificationEntity::class,
         PendingTurnStopEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -48,14 +48,11 @@ abstract class AppDatabase : RoomDatabase() {
             context.applicationContext,
             AppDatabase::class.java,
             "akashic-mobile.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build()
+        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
-                    "ALTER TABLE `conversations` ADD COLUMN `remoteState` " +
-                        "TEXT NOT NULL DEFAULT 'unknown'",
-                )
+                addConversationRemoteState(db)
             }
         }
 
@@ -75,33 +72,57 @@ abstract class AppDatabase : RoomDatabase() {
                 if (!db.hasColumn("conversations", "remoteState")) {
                     addConversationRemoteState(db)
                 }
-
-                // 4. stop 命令必须跨 Android 进程死亡继续使用同一身份
-                createPendingTurnStopTable(db)
             }
         }
 
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // 1. v3 必须已经完整拥有 PR4 的两张媒体表
+                // 1. v3 必须完整拥有 PR4 的媒体投影
                 check(
                     db.hasTable("media_attachments") && db.hasTable("message_attachments"),
                 ) { "Version 3 media schema is incomplete" }
 
-                // 2. 规范 PR4 v3 在这一层获得持久通知队列
-                val hasNotifications = db.hasTable("pending_message_notifications")
-                if (hasNotifications) {
-                    check(
-                        db.hasIndex("index_pending_message_notifications_serverId") &&
-                            db.hasIndex("index_pending_message_notifications_createdAt"),
-                    ) { "Version 3 notification schema is incomplete" }
+                // 2. 规范 PR4 与公开 PR6 v3 在这一层获得 PR5 持久状态
+                if (db.hasTable("pending_message_notifications")) {
+                    db.requireNotificationIndexes(3)
                 } else {
                     createPendingNotificationTable(db)
                 }
-
-                // 3. 已公开旧 PR5 v3 在这一层获得会话归属列
+                if (db.hasTable("pending_turn_stops")) {
+                    db.requireTurnStopIndexes(3)
+                } else {
+                    createPendingTurnStopTable(db)
+                }
                 if (!db.hasColumn("conversations", "remoteState")) {
                     addConversationRemoteState(db)
+                }
+            }
+        }
+
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 两种已发布 v4 都必须完整保有 media 与通知队列
+                check(
+                    db.hasTable("media_attachments") && db.hasTable("message_attachments"),
+                ) { "Version 4 media schema is incomplete" }
+                check(db.hasTable("pending_message_notifications")) {
+                    "Version 4 notification schema is missing"
+                }
+                db.requireNotificationIndexes(4)
+
+                // 2. 旧 PR6 v4 补 PR5 状态，最终 PR5 v4 保留既有数据
+                if (db.hasTable("pending_turn_stops")) {
+                    db.requireTurnStopIndexes(4)
+                } else {
+                    createPendingTurnStopTable(db)
+                }
+                if (!db.hasColumn("conversations", "remoteState")) {
+                    addConversationRemoteState(db)
+                }
+
+                // 3. 最终 PR5 v4 补稳定服务端顺序，旧 PR6 原值保持不动
+                if (!db.hasColumn("messages", "serverSeq")) {
+                    db.execSQL("ALTER TABLE `messages` ADD COLUMN `serverSeq` INTEGER")
                 }
             }
         }
@@ -205,6 +226,21 @@ abstract class AppDatabase : RoomDatabase() {
                     "ON `pending_turn_stops` (`serverId`, `sessionId`)",
             )
             db.execSQL("CREATE INDEX `index_pending_turn_stops_createdAt` ON `pending_turn_stops` (`createdAt`)")
+        }
+
+        private fun SupportSQLiteDatabase.requireNotificationIndexes(version: Int) {
+            check(
+                hasIndex("index_pending_message_notifications_serverId") &&
+                    hasIndex("index_pending_message_notifications_createdAt"),
+            ) { "Version $version notification schema is incomplete" }
+        }
+
+        private fun SupportSQLiteDatabase.requireTurnStopIndexes(version: Int) {
+            check(
+                hasIndex("index_pending_turn_stops_serverId") &&
+                    hasIndex("index_pending_turn_stops_serverId_sessionId") &&
+                    hasIndex("index_pending_turn_stops_createdAt"),
+            ) { "Version $version turn stop schema is incomplete" }
         }
 
         private fun SupportSQLiteDatabase.hasTable(tableName: String): Boolean = query(

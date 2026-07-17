@@ -11,6 +11,7 @@ import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
 import java.time.Instant
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.add
@@ -461,7 +462,10 @@ class LocalDeliveryStoreTest {
                                 })
                             })
                         })
-                        put("extra", buildJsonObject { put("reasoning_content", "最后判断") })
+                        put("extra", buildJsonObject {
+                            put("reasoning_content", "最后判断")
+                            put("turn_duration_ms", 30_000)
+                        })
                         put("ts", "2026-07-14T16:00:05Z")
                     })
                 })
@@ -472,6 +476,10 @@ class LocalDeliveryStoreTest {
 
         assertEquals("恢复问题", database.messages().get("mobile:test:0")!!.text)
         assertEquals("恢复回答", database.messages().get("mobile:test:1")!!.text)
+        assertEquals(
+            listOf("恢复问题", "恢复回答"),
+            database.messages().observeMessages("mobile:test").first().map { it.text },
+        )
         val blocks = database.messages().getBlocks("mobile:test:1")
         assertEquals(listOf("thinking", "tool", "thinking"), blocks.map { it.kind })
         assertEquals(StoredToolBlock("shell", "读取状态", "完成"), decodeStoredToolBlock(blocks[1].content))
@@ -540,6 +548,137 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun legacyHistoryWithoutClientIdRepairsUniqueOptimisticUserMessage() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val sentAt = Instant.parse("2026-07-14T16:00:00Z").toEpochMilli()
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "user:$clientId",
+                clientMessageId = clientId,
+                sessionId = "mobile:test",
+                role = "user",
+                text = "旧版问题",
+                deliveryState = "sent",
+                createdAt = sentAt,
+                updatedAt = sentAt,
+            ),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:user:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 0)
+                        put("role", "user")
+                        put("content", "旧版问题")
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-07-14T16:00:09Z")
+                    })
+                })
+            }),
+            sentAt + 10_000,
+        )
+
+        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(null, database.messages().get("user:$clientId"))
+        assertEquals("旧版问题", database.messages().get("mobile:test:user:canonical")!!.text)
+    }
+
+    @Test
+    fun legacyHistoryDoesNotGuessBetweenRepeatedIdenticalMessages() = runBlocking {
+        val sentAt = Instant.parse("2026-07-14T16:00:00Z").toEpochMilli()
+        listOf("01ARZ3NDEKTSV4RRFFQ69G5FAV", "01ARZ3NDEKTSV4RRFFQ69G5FAW").forEachIndexed { index, clientId ->
+            database.messages().upsert(
+                MessageEntity(
+                    messageId = "user:$clientId",
+                    clientMessageId = clientId,
+                    sessionId = "mobile:test",
+                    role = "user",
+                    text = "重复问题",
+                    deliveryState = "sent",
+                    createdAt = sentAt + index,
+                    updatedAt = sentAt + index,
+                ),
+            )
+        }
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:user:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 0)
+                        put("role", "user")
+                        put("content", "重复问题")
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-07-14T16:00:09Z")
+                    })
+                })
+            }),
+            sentAt + 10_000,
+        )
+
+        assertEquals(3, database.messages().countForSession("mobile:test"))
+    }
+
+    @Test
+    fun legacyHistoryDoesNotConsumeANewerIdenticalUserMessage() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val historyAt = Instant.parse("2026-07-14T16:00:00Z").toEpochMilli()
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "user:$clientId",
+                clientMessageId = clientId,
+                sessionId = "mobile:test",
+                role = "user",
+                text = "稍后又问的相同问题",
+                deliveryState = "sent",
+                createdAt = historyAt + 30 * 60 * 1_000,
+                updatedAt = historyAt + 30 * 60 * 1_000,
+            ),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:user:old-canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 0)
+                        put("role", "user")
+                        put("content", "稍后又问的相同问题")
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-07-14T16:00:00Z")
+                    })
+                })
+            }),
+            historyAt + 30 * 60 * 1_000,
+        )
+
+        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertNotNull(database.messages().get("user:$clientId"))
+        assertNotNull(database.messages().get("mobile:test:user:old-canonical"))
+    }
+
+    @Test
     fun gapResetClearsOnlyServerProjectionAndPreservesLocalWork() = runBlocking {
         val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         database.messages().upsert(
@@ -575,6 +714,39 @@ class LocalDeliveryStoreTest {
         assertNotNull(database.outbox().get(clientId))
         assertNotNull(database.attachmentTransfers().get("draft"))
         assertEquals("其他电脑", database.messages().get("other-message")!!.text)
+    }
+
+    @Test
+    fun manualReloadClearsCommittedCacheButPreservesPairingAndUnsentWork() = runBlocking {
+        val pendingId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity("remote", null, "mobile:test", "assistant", "旧投影", "complete", 1, 1, 1),
+        )
+        database.messages().upsert(
+            MessageEntity("sent", pendingId, "mobile:test", "user", "已提交", "sent", 2, 2),
+        )
+        database.messages().upsert(
+            MessageEntity("pending", "pending-id", "mobile:test", "user", "待发送", "pending", 3, 3),
+        )
+        database.messages().upsert(
+            MessageEntity("failed", "failed-id", "mobile:test", "user", "发送失败", "failed", 4, 4),
+        )
+        database.outbox().enqueue(
+            OutboxCommandEntity("pending-id", "server", "{}", "pending", 0, 3, null),
+        )
+        database.attachmentTransfers().upsert(transfer("ready", 1_048_579, "draft"))
+
+        store.clearReloadableCache("server", "mobile:test")
+
+        assertEquals(null, database.messages().get("remote"))
+        assertEquals(null, database.messages().get("sent"))
+        assertNotNull(database.messages().get("pending"))
+        assertNotNull(database.messages().get("failed"))
+        assertNotNull(database.outbox().get("pending-id"))
+        assertNotNull(database.attachmentTransfers().get("draft"))
+        assertNotNull(database.serverProfiles().get("server"))
+        assertNotNull(database.realtimeCursors().get("device"))
+        assertNotNull(database.conversations().get("mobile:test"))
     }
 
     @Test

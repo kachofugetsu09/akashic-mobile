@@ -32,6 +32,7 @@ class AttachmentComposerTest {
                     onOpenDownloadedAttachment = {},
                     onDismissError = {},
                     onSend = { _, _, _ -> },
+                    onSendCommand = {},
                     onStop = {},
                 )
             }
@@ -61,6 +62,7 @@ class AttachmentComposerTest {
                         sends += 1
                         report(true)
                     },
+                    onSendCommand = {},
                     onStop = {},
                 )
             }
@@ -83,6 +85,7 @@ class AttachmentComposerTest {
                     onOpenDownloadedAttachment = {},
                     onDismissError = {},
                     onSend = { _, _, _ -> },
+                    onSendCommand = {},
                     onStop = {},
                 )
             }
@@ -103,6 +106,7 @@ class AttachmentComposerTest {
                     onOpenDownloadedAttachment = {},
                     onDismissError = {},
                     onSend = { _, _, _ -> },
+                    onSendCommand = {},
                     onStop = {},
                 )
             }
@@ -123,6 +127,7 @@ class AttachmentComposerTest {
                     onOpenDownloadedAttachment = {},
                     onDismissError = {},
                     onSend = { _, _, report -> report(false) },
+                    onSendCommand = {},
                     onStop = {},
                 )
             }

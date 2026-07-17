@@ -93,6 +93,18 @@ class LocalDeliveryStore(
         }
     }
 
+    /** 清除可从服务端恢复的投影与附件缓存，同时保留配对和未发送工作。 */
+    suspend fun clearReloadableCache(serverId: String, preservedSessionId: String?) {
+        // 1. 原子移除已提交消息，保留待发送消息、草稿和连接身份
+        database.withTransaction {
+            database.messages().deleteServerProjection(serverId)
+            database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
+        }
+
+        // 2. 删除失去消息引用的附件文件和描述符
+        mediaCache.reconcile()
+    }
+
     /** 在同一事务应用有序事件并推进持久化 cursor。 */
     suspend fun applyEvent(
         serverId: String,
@@ -338,9 +350,11 @@ class LocalDeliveryStore(
                 deliveryState = "complete",
                 createdAt = (completedAt - duration).coerceAtMost(completedAt),
                 updatedAt = completedAt,
+                serverSeq = remote.seq.toLong(),
             )
             val sourceId = remote.clientMessageId?.let { "user:$it" }
                 ?: uniqueEphemeralAssistantSourceId(canonical)
+                ?: legacyOptimisticSourceId(canonical)
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
                 serverId = serverId,
@@ -364,6 +378,18 @@ class LocalDeliveryStore(
             canonical.text,
             canonical.updatedAt - LEGACY_IDENTITY_LOOKBACK_MS,
             canonical.updatedAt + LEGACY_IDENTITY_LOOKBACK_MS,
+        )
+        return candidates.singleOrNull()?.messageId
+    }
+
+    /** 仅在唯一匹配时修复旧版缺失 client_message_id 的本地消息身份。 */
+    private suspend fun legacyOptimisticSourceId(canonical: MessageEntity): String? {
+        if (canonical.role != "user" || canonical.clientMessageId != null) return null
+        val candidates = database.messages().findLegacyOptimisticUsers(
+            sessionId = canonical.sessionId,
+            text = canonical.text,
+            earliestCreatedAt = canonical.createdAt - LEGACY_IDENTITY_LOOKBACK_MS,
+            latestCreatedAt = canonical.updatedAt,
         )
         return candidates.singleOrNull()?.messageId
     }
