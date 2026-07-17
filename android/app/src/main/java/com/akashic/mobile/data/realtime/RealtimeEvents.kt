@@ -11,8 +11,9 @@ data class FinalMessageEvent(
 )
 
 internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String = when (envelope.type) {
-    "message.final" -> envelope.payload["message_id"]?.jsonPrimitive?.content
-        ?: "ephemeral:${requireNotNull(envelope.id) { "Final event has no frame id" }}"
+    "message.final" -> requireNotNull(envelope.payload["message_id"]?.jsonPrimitive?.content) {
+        "Final message has no canonical message_id"
+    }
     "message.proactive" -> "proactive:${requireNotNull(envelope.id) { "Proactive event has no frame id" }}"
     else -> error("Unsupported delivered message type: ${envelope.type}")
 }

@@ -75,9 +75,6 @@ abstract class AppDatabase : RoomDatabase() {
                 if (!db.hasColumn("conversations", "remoteState")) {
                     addConversationRemoteState(db)
                 }
-
-                // 4. stop 命令必须跨 Android 进程死亡继续使用同一身份
-                createPendingTurnStopTable(db)
             }
         }
 
@@ -102,6 +99,18 @@ abstract class AppDatabase : RoomDatabase() {
                 // 3. 已公开旧 PR5 v3 在这一层获得会话归属列
                 if (!db.hasColumn("conversations", "remoteState")) {
                     addConversationRemoteState(db)
+                }
+
+                // 4. stop 命令必须跨 Android 进程死亡继续使用同一身份
+                val hasPendingStops = db.hasTable("pending_turn_stops")
+                if (hasPendingStops) {
+                    check(
+                        db.hasIndex("index_pending_turn_stops_serverId") &&
+                            db.hasIndex("index_pending_turn_stops_serverId_sessionId") &&
+                            db.hasIndex("index_pending_turn_stops_createdAt"),
+                    ) { "Version 3 pending stop schema is incomplete" }
+                } else {
+                    createPendingTurnStopTable(db)
                 }
             }
         }

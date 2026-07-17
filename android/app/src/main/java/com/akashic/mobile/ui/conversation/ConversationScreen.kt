@@ -81,6 +81,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
@@ -295,7 +296,10 @@ private fun MessageList(
     }
 
     LaunchedEffect(contentRevision) {
-        if (followsBottom) listState.scrollToItem(messages.size)
+        if (followsBottom) {
+            withFrameNanos {}
+            if (followsBottom) listState.scrollToItem(messages.size)
+        }
     }
 
     LaunchedEffect(listState, messages.size) {
@@ -311,7 +315,14 @@ private fun MessageList(
             )
         }.distinctUntilChanged().collect {
             if (followsBottom && !listState.isScrollInProgress && listState.layoutInfo.totalItemsCount > 0) {
-                listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                withFrameNanos {}
+                if (
+                    followsBottom &&
+                    !listState.isScrollInProgress &&
+                    listState.layoutInfo.totalItemsCount > 0
+                ) {
+                    listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                }
             }
         }
     }

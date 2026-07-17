@@ -74,7 +74,7 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
-    fun migrateFinalPr4Version3PreservesOwnershipAndMediaAndAddsNotifications() {
+    fun migrateFinalPr4Version3AddsNotificationsAndStopsWithoutDataLoss() {
         helper.createDatabase(FINAL_PR4_DATABASE_NAME, 3).apply {
             insertVersion3BaseRows()
             insertMediaRows()
@@ -103,7 +103,7 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
-    fun migratePublishedPr5Version3PreservesNotificationAndMediaAndAddsOwnership() {
+    fun migratePublishedPr5Version3PreservesNotificationsAndAddsStops() {
         helper.createDatabase(PUBLISHED_PR5_DATABASE_NAME, 1).apply {
             insertVersion1BaseRows()
             createMediaTables()
