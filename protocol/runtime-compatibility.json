@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "scope": "runtime_semantics_not_schema",
+  "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
+  "verified_source_commit": "f48608c4447e4f57174eaf6b6c29dc6492607113",
+  "required_semantics": [
+    "message_send_command_id_equals_client_message_id",
+    "command_outcome_unknown_preserves_original_command_id",
+    "message_send_protocol_rejection_uses_close_code_4410",
+    "claimed_deleted_session_is_not_recreated"
+  ]
+}
