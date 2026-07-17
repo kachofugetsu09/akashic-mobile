@@ -222,10 +222,18 @@ class RealtimeSession(
                 try {
                     handleEnvelope(candidateId, envelope)
                 } catch (error: IllegalArgumentException) {
+                    val message = "连接协议校验失败：${error.message}"
                     mutableState.value = mutableState.value.copy(
-                        errorMessage = "连接协议校验失败：${error.message}",
+                        errorMessage = message,
                     )
-                    socket.reject(candidateId, 4406, "invalid authenticated server frame")
+                    if (candidateId == activeCandidate) {
+                        check(socket.closeActive(candidateId, 4406, "invalid authenticated server frame")) {
+                            "Active realtime candidate disappeared during protocol rejection"
+                        }
+                        scheduleReconnect(message)
+                    } else {
+                        socket.rejectPreAuth(candidateId, 4406, "invalid pre-auth server frame")
+                    }
                 }
             }
         }

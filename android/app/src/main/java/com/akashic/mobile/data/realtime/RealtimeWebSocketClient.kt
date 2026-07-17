@@ -32,10 +32,21 @@ interface RealtimeSocketListener {
     fun onRaceExhausted(generation: Long, error: Throwable)
 }
 
-class RealtimeWebSocketClient(
+internal fun interface WebSocketConnector {
+    fun open(client: OkHttpClient, request: Request, listener: WebSocketListener): WebSocket
+}
+
+class RealtimeWebSocketClient internal constructor(
     private val listener: RealtimeSocketListener,
     private val allowInsecureTransport: Boolean,
+    private val connector: WebSocketConnector,
 ) {
+    constructor(listener: RealtimeSocketListener, allowInsecureTransport: Boolean) : this(
+        listener,
+        allowInsecureTransport,
+        WebSocketConnector(OkHttpClient::newWebSocket),
+    )
+
     private data class RaceState(
         val generation: Long,
         val sockets: MutableMap<SocketCandidateId, WebSocket> = mutableMapOf(),
@@ -121,14 +132,27 @@ class RealtimeWebSocketClient(
         return socket.send(ProtocolCodec.encode(envelope))
     }
 
-    fun reject(candidateId: SocketCandidateId, code: Int, reason: String) {
+    /** 拒绝尚未完成认证的候选，不影响已提升的活动连接。 */
+    fun rejectPreAuth(candidateId: SocketCandidateId, code: Int, reason: String): Boolean {
         val socket = synchronized(lock) {
-            val current = state ?: return
-            if (current.generation != candidateId.generation || current.winner == candidateId) return
+            val current = state ?: return false
+            if (current.generation != candidateId.generation || current.winner == candidateId) return false
             current.sockets.remove(candidateId)
-        } ?: return
-        socket.close(code, reason)
+        } ?: return false
+        closeOrCancel(socket, code, reason)
         reportExhaustedIfNeeded(candidateId.generation)
+        return true
+    }
+
+    /** 关闭已认证活动连接，由上层立即安排确定性的重连。 */
+    fun closeActive(candidateId: SocketCandidateId, code: Int, reason: String): Boolean {
+        val socket = synchronized(lock) {
+            val current = state ?: return false
+            if (current.generation != candidateId.generation || current.winner != candidateId) return false
+            current.sockets[candidateId]
+        } ?: return false
+        closeOrCancel(socket, code, reason)
+        return true
     }
 
     fun close(code: Int = 1000, reason: String = "client closed") {
@@ -146,7 +170,7 @@ class RealtimeWebSocketClient(
         }
         val client = clientFor(endpoint)
         val request = Request.Builder().url(endpoint.url).build()
-        val socket = client.newWebSocket(request, socketListener(candidateId, endpoint))
+        val socket = connector.open(client, request, socketListener(candidateId, endpoint))
         synchronized(lock) {
             val current = state
             if (current == null || current.generation != generation || current.winner != null) {
@@ -248,6 +272,10 @@ class RealtimeWebSocketClient(
     private fun closeState(previous: RaceState?, reason: String) {
         previous?.delayedTunnel?.cancel(false)
         previous?.sockets?.values?.forEach { it.close(CLOSE_REPLACED, reason) }
+    }
+
+    private fun closeOrCancel(socket: WebSocket, code: Int, reason: String) {
+        if (!socket.close(code, reason)) socket.cancel()
     }
 
     private companion object {
