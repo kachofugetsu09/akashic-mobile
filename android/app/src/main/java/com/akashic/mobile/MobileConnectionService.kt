@@ -9,6 +9,7 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -132,7 +133,11 @@ class MobileConnectionService : Service() {
                 event = event,
             )
         ) {
-            notificationManager.notify(messageNotificationId(event), messageNotification(event))
+            notificationManager.notify(
+                event.messageId,
+                MESSAGE_NOTIFICATION_ID,
+                messageNotification(event),
+            )
         }
 
         // 3. 仅在系统调用成功或策略明确抑制后删除；进程中断会安全重放
@@ -176,7 +181,7 @@ class MobileConnectionService : Service() {
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.notification_connection_title))
             .setContentText(status)
-            .setContentIntent(openAppIntent(sessionId = null))
+            .setContentIntent(openAppIntent(sessionId = null, messageId = null))
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(privatePublicNotification())
@@ -191,7 +196,7 @@ class MobileConnectionService : Service() {
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(getString(R.string.notification_message_title))
             .setContentText(MessageNotificationPolicy.preview(event))
-            .setContentIntent(openAppIntent(event.sessionId))
+            .setContentIntent(openAppIntent(event.sessionId, event.messageId))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setPublicVersion(privatePublicNotification())
@@ -206,23 +211,19 @@ class MobileConnectionService : Service() {
             .setContentText(getString(R.string.notification_private_text))
             .build()
 
-    private fun openAppIntent(sessionId: String?): PendingIntent {
+    private fun openAppIntent(sessionId: String?, messageId: String?): PendingIntent {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            data = Uri.parse(notificationIntentData(messageId))
             if (sessionId != null) putExtra(EXTRA_SESSION_ID, sessionId)
         }
         return PendingIntent.getActivity(
             this,
-            sessionId?.hashCode() ?: CONNECTION_NOTIFICATION_ID,
+            NOTIFICATION_PENDING_INTENT_REQUEST_CODE,
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
     }
-
-    private fun messageNotificationId(event: FinalMessageEvent): Int =
-        event.messageId.hashCode().let { hash ->
-            if (hash == CONNECTION_NOTIFICATION_ID) hash + 1 else hash
-        }
 
     companion object {
         const val EXTRA_SESSION_ID = "com.akashic.mobile.extra.SESSION_ID"
@@ -231,6 +232,8 @@ class MobileConnectionService : Service() {
         private const val CONNECTION_CHANNEL_ID = "mobile_connection"
         private const val MESSAGE_CHANNEL_ID = "mobile_messages"
         private const val CONNECTION_NOTIFICATION_ID = 1_001
+        private const val MESSAGE_NOTIFICATION_ID = 0
+        private const val NOTIFICATION_PENDING_INTENT_REQUEST_CODE = 1_002
 
         fun start(context: Context) {
             ContextCompat.startForegroundService(
@@ -247,3 +250,13 @@ class MobileConnectionService : Service() {
         }
     }
 }
+
+internal fun notificationIntentData(messageId: String?): String =
+    if (messageId == null) {
+        "akashic://notification/connection"
+    } else {
+        "akashic://notification/message/${
+            java.util.Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(messageId.toByteArray(Charsets.UTF_8))
+        }"
+    }
