@@ -102,8 +102,7 @@ abstract class AppDatabase : RoomDatabase() {
                         `hasAttachments` INTEGER NOT NULL,
                         `createdAt` INTEGER NOT NULL,
                         PRIMARY KEY(`messageId`),
-                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE,
-                        FOREIGN KEY(`messageId`) REFERENCES `messages`(`messageId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
                     )
                     """.trimIndent(),
                 )
