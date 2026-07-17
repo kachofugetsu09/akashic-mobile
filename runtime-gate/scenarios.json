@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-pr2-v1",
+  "profile": "mobile-pr3-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -79,6 +79,18 @@
       "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
       "consumer_test": "every nonempty remote session starts from page one"
+    },
+    {
+      "id": "attachment-upload-resumes-confirmed-offset",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_upload_resumes_from_persisted_offset_and_verifies_digest",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/AttachmentUploadCoordinatorTest.kt",
+      "consumer_test": "uploads one confirmed window then resumes with a new begin id"
+    },
+    {
+      "id": "attachment-filename-is-plain",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_begin_rejects_filename_that_is_not_plain",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/local/AttachmentDraftStoreTest.kt",
+      "consumer_test": "rejects filenames with surrounding whitespace"
     }
   ]
 }
