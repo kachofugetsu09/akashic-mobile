@@ -115,9 +115,46 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrateLegacyPr6Version3AddsNotificationsWithoutDuplicatingServerSequence() {
+        helper.createDatabase(DATABASE_LEGACY_3_4, 2).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2)")
+            execSQL(
+                "INSERT INTO messages VALUES('old-message', NULL, 'mobile:test', 'assistant', '旧消息', 'complete', 3, 4)",
+            )
+            execSQL("ALTER TABLE messages ADD COLUMN serverSeq INTEGER")
+            execSQL("UPDATE messages SET serverSeq = 9 WHERE messageId = 'old-message'")
+            version = 3
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_LEGACY_3_4,
+            4,
+            true,
+            AppDatabase.MIGRATION_3_4,
+        ).use { database ->
+            database.query("SELECT text, serverSeq FROM messages WHERE messageId = 'old-message'").use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("旧消息", cursor.getString(0))
+                assertEquals(9L, cursor.getLong(1))
+            }
+            database.query(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'pending_message_notifications'",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_NAME = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
         const val DATABASE_3_4 = "migration-3-4"
+        const val DATABASE_LEGACY_3_4 = "migration-legacy-pr6-3-4"
     }
 }

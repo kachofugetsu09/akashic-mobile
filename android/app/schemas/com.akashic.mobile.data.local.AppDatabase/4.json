@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 4,
-    "identityHash": "2abddc41c159790277a2897ab4895d4d",
+    "identityHash": "2102961cdedb2852eb72e4ff544ac08d",
     "entities": [
       {
         "tableName": "server_profiles",
@@ -794,7 +794,7 @@
       },
       {
         "tableName": "pending_message_notifications",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`messageId` TEXT NOT NULL, `serverId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `content` TEXT NOT NULL, `hasAttachments` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`messageId`), FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`messageId`) REFERENCES `messages`(`messageId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`messageId` TEXT NOT NULL, `serverId` TEXT NOT NULL, `sessionId` TEXT NOT NULL, `content` TEXT NOT NULL, `hasAttachments` INTEGER NOT NULL, `createdAt` INTEGER NOT NULL, PRIMARY KEY(`messageId`), FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
         "fields": [
           {
             "fieldPath": "messageId",
@@ -870,24 +870,13 @@
             "referencedColumns": [
               "serverId"
             ]
-          },
-          {
-            "table": "messages",
-            "onDelete": "CASCADE",
-            "onUpdate": "NO ACTION",
-            "columns": [
-              "messageId"
-            ],
-            "referencedColumns": [
-              "messageId"
-            ]
           }
         ]
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '2abddc41c159790277a2897ab4895d4d')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '2102961cdedb2852eb72e4ff544ac08d')"
     ]
   }
 }

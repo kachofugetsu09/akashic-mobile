@@ -92,33 +92,58 @@ abstract class AppDatabase : RoomDatabase() {
 
         val MIGRATION_2_3 = object : Migration(2, 3) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
-                    """
-                    CREATE TABLE IF NOT EXISTS `pending_message_notifications` (
-                        `messageId` TEXT NOT NULL,
-                        `serverId` TEXT NOT NULL,
-                        `sessionId` TEXT NOT NULL,
-                        `content` TEXT NOT NULL,
-                        `hasAttachments` INTEGER NOT NULL,
-                        `createdAt` INTEGER NOT NULL,
-                        PRIMARY KEY(`messageId`),
-                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
-                    )
-                    """.trimIndent(),
-                )
-                db.execSQL(
-                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_serverId` ON `pending_message_notifications` (`serverId`)",
-                )
-                db.execSQL(
-                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_createdAt` ON `pending_message_notifications` (`createdAt`)",
-                )
+                createPendingMessageNotifications(db)
             }
         }
 
         val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE `messages` ADD COLUMN `serverSeq` INTEGER")
+                // 1. 兼容已安装 Draft PR6：旧 v3 已有 serverSeq，但还没有通知待办
+                if (!hasColumn(db, "messages", "serverSeq")) {
+                    db.execSQL("ALTER TABLE `messages` ADD COLUMN `serverSeq` INTEGER")
+                }
+
+                // 2. 新 stacked 路径的 v3 已有通知待办；旧 v3 在这里补齐
+                if (!hasTable(db, "pending_message_notifications")) {
+                    createPendingMessageNotifications(db)
+                }
             }
         }
+
+        private fun createPendingMessageNotifications(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS `pending_message_notifications` (
+                    `messageId` TEXT NOT NULL,
+                    `serverId` TEXT NOT NULL,
+                    `sessionId` TEXT NOT NULL,
+                    `content` TEXT NOT NULL,
+                    `hasAttachments` INTEGER NOT NULL,
+                    `createdAt` INTEGER NOT NULL,
+                    PRIMARY KEY(`messageId`),
+                    FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_serverId` ON `pending_message_notifications` (`serverId`)",
+            )
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_createdAt` ON `pending_message_notifications` (`createdAt`)",
+            )
+        }
+
+        private fun hasTable(db: SupportSQLiteDatabase, table: String): Boolean =
+            db.query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                arrayOf(table),
+            ).use { it.moveToFirst() }
+
+        private fun hasColumn(db: SupportSQLiteDatabase, table: String, column: String): Boolean =
+            db.query("PRAGMA table_info(`$table`)").use { cursor ->
+                val nameIndex = cursor.getColumnIndexOrThrow("name")
+                generateSequence { if (cursor.moveToNext()) cursor.getString(nameIndex) else null }
+                    .any { it == column }
+            }
     }
 }
