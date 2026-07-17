@@ -86,7 +86,9 @@ def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
         consumer_test = _required_text(typed_scenario, "consumer_test")
         if not consumer_source.is_file():
             raise ValueError(f"移动端场景测试不存在：{consumer_source}")
-        if f"fun `{consumer_test}`" not in consumer_source.read_text(encoding="utf-8"):
+        consumer_text = consumer_source.read_text(encoding="utf-8")
+        markers = (f"fun `{consumer_test}`", f"fun {consumer_test}(")
+        if not any(marker in consumer_text for marker in markers):
             raise ValueError(f"移动端场景测试标记不存在：{consumer_test}")
 
     # 3. 校验 schema 快照仍对应自己的历史来源，而不是当前核心全集。
