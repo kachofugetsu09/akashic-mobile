@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${DEVICE_GATE_FAKE_ADB_LOG:?}"
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "get-state" ]]; then
+    printf 'device\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "shell" &&
+    "${4:-}" == "pm" && "${5:-}" == "list" && "${6:-}" == "packages" && "${7:-}" == "-u" ]]; then
+    printf 'package:%s\n' "${DEVICE_GATE_FAKE_COLLISION_ID:?}"
+    exit 0
+fi
+
+printf 'fake adb rejected unexpected device mutation: %s\n' "$*" >&2
+exit 97

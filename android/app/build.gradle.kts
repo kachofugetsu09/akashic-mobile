@@ -46,6 +46,14 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+val debugApplicationIdSuffix = providers
+    .gradleProperty("akashicDebugApplicationIdSuffix")
+    .orElse(".debug")
+    .get()
+check(Regex("\\.[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*").matches(debugApplicationIdSuffix)) {
+    "akashicDebugApplicationIdSuffix must contain dot-prefixed application ID segments"
+}
+
 android {
     namespace = "com.akashic.mobile"
     compileSdk = 36
@@ -62,7 +70,7 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = debugApplicationIdSuffix
             versionNameSuffix = "-debug"
             buildConfigField("boolean", "ALLOW_INSECURE_WS", "true")
         }
