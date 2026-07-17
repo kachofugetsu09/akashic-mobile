@@ -85,6 +85,26 @@ class MessageAttachmentsTest {
     }
 
     @Test
+    fun remoteAttachmentStartsOnlyFromExplicitDownloadAction() {
+        var requested: String? = null
+        compose.setContent {
+            AkashicTheme {
+                MessageAttachments(
+                    attachments = listOf(
+                        attachment("remote", MessageAttachmentState.REMOTE, 0),
+                    ),
+                    onRetry = { requested = it },
+                    onOpen = {},
+                )
+            }
+        }
+
+        assertEquals(null, requested)
+        compose.onNodeWithContentDescription("下载 remote.pdf").performClick()
+        assertEquals("remote", requested)
+    }
+
+    @Test
     fun invalidCachedImageFallsBackToOpenableFileRow() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val root = File(context.filesDir, "received-attachments").apply { mkdirs() }

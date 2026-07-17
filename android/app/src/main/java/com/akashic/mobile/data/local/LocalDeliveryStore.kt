@@ -24,6 +24,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
+private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
 
 @Serializable
 internal data class StoredToolBlock(
@@ -238,7 +239,6 @@ class LocalDeliveryStore(
             require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
             remote.clientMessageId?.let(::requireFrameId)
             val messageId = remote.id
-            val sourceId = remote.clientMessageId?.let { "user:$it" }
             val canonical = MessageEntity(
                 messageId = messageId,
                 clientMessageId = remote.clientMessageId,
@@ -249,6 +249,8 @@ class LocalDeliveryStore(
                 createdAt = (completedAt - duration).coerceAtMost(completedAt),
                 updatedAt = completedAt,
             )
+            val sourceId = remote.clientMessageId?.let { "user:$it" }
+                ?: uniqueEphemeralAssistantSourceId(canonical)
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
                 serverId = serverId,
@@ -262,6 +264,18 @@ class LocalDeliveryStore(
                 database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
             }
         }
+    }
+
+    /** 只在时间窗口内候选整体唯一时修复旧版 assistant 临时身份。 */
+    private suspend fun uniqueEphemeralAssistantSourceId(canonical: MessageEntity): String? {
+        if (canonical.role != "assistant") return null
+        val candidates = database.messages().findEphemeralAssistants(
+            canonical.sessionId,
+            canonical.text,
+            canonical.updatedAt - LEGACY_IDENTITY_LOOKBACK_MS,
+            canonical.updatedAt + LEGACY_IDENTITY_LOOKBACK_MS,
+        )
+        return candidates.singleOrNull()?.messageId
     }
 
     private fun historyBlocks(
@@ -618,7 +632,7 @@ class LocalDeliveryStore(
                     sizeBytes = descriptor.sizeBytes,
                     sha256 = descriptor.sha256.lowercase(),
                     transferredBytes = 0,
-                    state = "pending",
+                    state = if (descriptor.sizeBytes >= AUTO_DOWNLOAD_LIMIT_BYTES) "remote" else "pending",
                     cachePath = mediaCache.cachePath(descriptor.attachmentId),
                     lastAccessedAt = updatedAt,
                     updatedAt = updatedAt,
@@ -654,6 +668,7 @@ class LocalDeliveryStore(
 
     private companion object {
         const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
+        const val AUTO_DOWNLOAD_LIMIT_BYTES = 10L * 1024 * 1024
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val FRAME_ID = Regex(
             "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +

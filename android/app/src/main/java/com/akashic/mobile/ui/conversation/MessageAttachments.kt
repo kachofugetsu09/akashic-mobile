@@ -241,6 +241,12 @@ private fun FileAttachmentRow(
                 }
             }
             when (attachment.state) {
+                MessageAttachmentState.REMOTE -> AttachmentActionButton(
+                    onClick = { onRetry(attachment.id) },
+                    contentDescription = "下载 ${attachment.filename}",
+                ) {
+                    Icon(Icons.Rounded.Download, contentDescription = null)
+                }
                 MessageAttachmentState.FAILED,
                 MessageAttachmentState.EVICTED,
                 -> AttachmentActionButton(
@@ -279,6 +285,7 @@ private fun FileAttachmentRow(
 @Composable
 private fun AttachmentStateIcon(state: MessageAttachmentState) {
     val icon = when (state) {
+        MessageAttachmentState.REMOTE -> Icons.Rounded.Download
         MessageAttachmentState.PENDING -> Icons.Rounded.Download
         MessageAttachmentState.DOWNLOADING -> Icons.Rounded.Download
         MessageAttachmentState.CACHED -> Icons.Rounded.Description
@@ -291,6 +298,7 @@ private fun AttachmentStateIcon(state: MessageAttachmentState) {
         tint = when (state) {
             MessageAttachmentState.FAILED -> MaterialTheme.colorScheme.error
             MessageAttachmentState.CACHED -> MaterialTheme.colorScheme.onSurfaceVariant
+            MessageAttachmentState.REMOTE,
             MessageAttachmentState.PENDING,
             MessageAttachmentState.DOWNLOADING,
             MessageAttachmentState.EVICTED,
@@ -436,6 +444,7 @@ internal val MessageAttachmentUi.typeLabel: String
     }
 
 internal fun MessageAttachmentUi.stateLabel(progress: Float = this.progress): String = when (state) {
+    MessageAttachmentState.REMOTE -> "尚未下载"
     MessageAttachmentState.PENDING -> "等待下载"
     MessageAttachmentState.DOWNLOADING -> "下载中 ${(progress * 100).roundToInt()}%"
     MessageAttachmentState.CACHED -> "已下载"
