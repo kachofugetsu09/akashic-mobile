@@ -4,7 +4,6 @@ import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.akashic.mobile.data.realtime.AttachmentDownloadCoordinator
 import com.akashic.mobile.data.realtime.MessageSendPayload
 import com.akashic.mobile.data.realtime.ProtocolCodec
 import com.akashic.mobile.data.realtime.WireEnvelope
@@ -111,182 +110,21 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
-    fun finalWithoutMessageIdUsesFrameScopedEphemeralIdentity() = runBlocking {
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "message.final", buildJsonObject { put("content", "控制指令结果") }),
-            2,
-        )
+    fun finalWithoutMessageIdFailsLoudly() = runBlocking {
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent(
+                    "server",
+                    "device",
+                    event(1, "message.final", buildJsonObject { put("content", "控制指令结果") }),
+                    2,
+                )
+            }
+        }
 
-        val ephemeralId = "ephemeral:01J00000000000000000000000"
-        assertEquals("控制指令结果", database.messages().get(ephemeralId)!!.text)
+        assertEquals("Final message has no canonical message_id", error.message)
         assertEquals(null, database.messages().get("assistant:turn"))
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(2, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:history:canonical")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "持久化回答")
-                        put("extra", buildJsonObject { put("reasoning_content", "历史思考") })
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            3,
-        )
-
-        assertEquals(2, database.messages().countForSession("mobile:test"))
-        assertEquals("控制指令结果", database.messages().get(ephemeralId)!!.text)
-        assertEquals("持久化回答", database.messages().get("mobile:test:history:canonical")!!.text)
-        assertEquals(
-            listOf("历史思考"),
-            database.messages().getBlocks("mobile:test:history:canonical").map { it.content },
-        )
-    }
-
-    @Test
-    fun historyMergesTheUniqueClosestEphemeralAssistant() = runBlocking {
-        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
-        database.messages().upsert(
-            MessageEntity(
-                messageId = "ephemeral:unique",
-                clientMessageId = null,
-                sessionId = "mobile:test",
-                role = "assistant",
-                text = "同一回答",
-                deliveryState = "complete",
-                createdAt = completedAt - 5_000,
-                updatedAt = completedAt - 100,
-            ),
-        )
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:canonical:unique")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "同一回答")
-                        put("extra", buildJsonObject {})
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            completedAt,
-        )
-
-        assertEquals(1, database.messages().countForSession("mobile:test"))
-        assertEquals(null, database.messages().get("ephemeral:unique"))
-        assertEquals("同一回答", database.messages().get("mobile:test:canonical:unique")!!.text)
-    }
-
-    @Test
-    fun historyDoesNotGuessBetweenEquidistantRepeatedAnswers() = runBlocking {
-        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
-        listOf(-100L, 100L).forEachIndexed { index, delta ->
-            database.messages().upsert(
-                MessageEntity(
-                    messageId = "ephemeral:tie:$index",
-                    clientMessageId = null,
-                    sessionId = "mobile:test",
-                    role = "assistant",
-                    text = "重复回答",
-                    deliveryState = "complete",
-                    createdAt = completedAt + delta - 5_000,
-                    updatedAt = completedAt + delta,
-                ),
-            )
-        }
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:canonical:tie")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "重复回答")
-                        put("extra", buildJsonObject {})
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            completedAt,
-        )
-
-        assertEquals(3, database.messages().countForSession("mobile:test"))
-        assertNotNull(database.messages().get("ephemeral:tie:0"))
-        assertNotNull(database.messages().get("ephemeral:tie:1"))
-        assertNotNull(database.messages().get("mobile:test:canonical:tie"))
-    }
-
-    @Test
-    fun historyDoesNotGuessTheClosestOfRepeatedAnswers() = runBlocking {
-        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
-        listOf(-100L, -10_000L).forEachIndexed { index, delta ->
-            database.messages().upsert(
-                MessageEntity(
-                    messageId = "ephemeral:repeated:$index",
-                    clientMessageId = null,
-                    sessionId = "mobile:test",
-                    role = "assistant",
-                    text = "重复但不等距",
-                    deliveryState = "complete",
-                    createdAt = completedAt + delta - 5_000,
-                    updatedAt = completedAt + delta,
-                ),
-            )
-        }
-
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "history.page", buildJsonObject {
-                put("total", 1)
-                put("page", 1)
-                put("page_size", 10)
-                put("items", buildJsonArray {
-                    add(buildJsonObject {
-                        put("id", "mobile:test:canonical:repeated")
-                        put("session_key", "mobile:test")
-                        put("seq", 1)
-                        put("role", "assistant")
-                        put("content", "重复但不等距")
-                        put("extra", buildJsonObject {})
-                        put("ts", "2026-07-14T16:00:05Z")
-                    })
-                })
-            }),
-            completedAt,
-        )
-
-        assertEquals(3, database.messages().countForSession("mobile:test"))
-        assertNotNull(database.messages().get("ephemeral:repeated:0"))
-        assertNotNull(database.messages().get("ephemeral:repeated:1"))
-        assertNotNull(database.messages().get("mobile:test:canonical:repeated"))
+        assertEquals(0L, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
     }
 
     @Test
@@ -682,12 +520,8 @@ class LocalDeliveryStoreTest {
 
     @Test
     fun catalogReconciliationRemovesOnlyAbsentRebuildableProjection() = runBlocking {
-        database.conversations().upsert(
-            ConversationEntity("mobile:kept", "server", "保留", 1, ConversationRemoteState.REMOTE),
-        )
-        database.conversations().upsert(
-            ConversationEntity("mobile:gone", "server", "已删除", 1, ConversationRemoteState.REMOTE),
-        )
+        database.conversations().upsert(ConversationEntity("mobile:kept", "server", "保留", 1))
+        database.conversations().upsert(ConversationEntity("mobile:gone", "server", "已删除", 1))
         database.conversations().upsert(ConversationEntity("mobile:local", "server", "本地未决", 1))
         database.messages().upsert(
             MessageEntity("kept-message", null, "mobile:kept", "assistant", "在目录中", "complete", 1, 1),
@@ -713,52 +547,8 @@ class LocalDeliveryStoreTest {
         assertEquals(null, database.messages().get("gone-message"))
         assertEquals(null, database.conversations().get("mobile:gone"))
         assertNotNull(database.messages().get("user:$clientId"))
-        assertEquals(
-            ConversationRemoteState.LOCAL,
-            database.conversations().get("mobile:local")!!.remoteState,
-        )
-        assertEquals(clientId, database.outbox().dispatchable("server").single().commandId)
+        assertNotNull(database.conversations().get("mobile:local"))
         assertNotNull(database.conversations().get("mobile:test"))
-    }
-
-    @Test
-    fun `catalog deletion preserves but blocks pending work`() = runBlocking {
-        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        database.conversations().upsert(
-            ConversationEntity(
-                "mobile:blocked",
-                "server",
-                "迁移会话",
-                1,
-                ConversationRemoteState.UNKNOWN,
-            ),
-        )
-        database.messages().upsert(
-            MessageEntity("user:$clientId", clientId, "mobile:blocked", "user", "待发送", "pending", 1, 1),
-        )
-        database.outbox().enqueue(
-            OutboxCommandEntity(clientId, "server", "{}", "pending", 0, 1, null),
-        )
-
-        store.reconcileSessionCatalog(
-            serverId = "server",
-            remoteSessionIds = emptySet(),
-            preservedSessionId = "mobile:blocked",
-        )
-
-        assertEquals(
-            ConversationRemoteState.DELETED,
-            database.conversations().get("mobile:blocked")!!.remoteState,
-        )
-        assertNotNull(database.messages().get("user:$clientId"))
-        assertNotNull(database.outbox().get(clientId))
-        assertEquals(emptyList<OutboxCommandEntity>(), database.outbox().dispatchable("server"))
-
-        assertEquals(
-            1,
-            database.conversations().updateRemoteState("mobile:blocked", ConversationRemoteState.REMOTE),
-        )
-        assertEquals(clientId, database.outbox().dispatchable("server").single().commandId)
     }
 
     @Test
@@ -961,57 +751,6 @@ class LocalDeliveryStoreTest {
             listOf(attachment.attachmentId),
             database.mediaAttachments().forMessage("mobile:test:1").map { it.attachmentId },
         )
-    }
-
-    @Test
-    fun largeAttachmentWaitsForExplicitDownloadAtTenMiBBoundary() = runBlocking {
-        val smallId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        val largeId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
-        fun descriptor(id: String, sizeBytes: Long) = buildJsonObject {
-            put("attachment_id", id)
-            put("filename", "$id.pdf")
-            put("content_type", "application/pdf")
-            put("size_bytes", sizeBytes)
-            put("sha256", "a".repeat(64))
-        }
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:large-attachment")
-                put("content", "附件")
-                put("attachments", buildJsonArray {
-                    add(descriptor(smallId, 10L * 1024 * 1024 - 1))
-                    add(descriptor(largeId, 10L * 1024 * 1024))
-                })
-            }),
-            2,
-        )
-
-        assertEquals("pending", database.mediaAttachments().get(smallId)!!.state)
-        assertEquals("remote", database.mediaAttachments().get(largeId)!!.state)
-        assertEquals(listOf(smallId), database.mediaAttachments().pendingDownloads("server").map { it.attachmentId })
-
-        mediaCache.reconcile()
-        assertEquals("remote", database.mediaAttachments().get(largeId)!!.state)
-
-        assertEquals(1, database.mediaAttachments().updateDownload(smallId, 0, "failed", 3))
-        val requestedIds = mutableListOf<String>()
-        val downloads = AttachmentDownloadCoordinator(
-            database.mediaAttachments(),
-            mediaCache,
-            sendCommand = { _, _, _, payload ->
-                requestedIds += payload["attachment_id"].toString().trim('"')
-                true
-            },
-            onTransportUnavailable = {},
-            onDownloadFailed = {},
-        )
-        downloads.retry(largeId)
-        downloads.retry(largeId)
-        downloads.onConnectionReady("server")
-
-        assertEquals(listOf(largeId), requestedIds)
     }
 
     @Test

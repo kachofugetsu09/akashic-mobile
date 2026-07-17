@@ -26,7 +26,6 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
-private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
 
 @Serializable
 internal data class StoredToolBlock(
@@ -72,9 +71,6 @@ class LocalDeliveryStore(
     ) {
         require(message.sessionId == conversation.sessionId) { "Message and conversation session mismatch" }
         require(command.serverId == conversation.serverId) { "Outbox and conversation server mismatch" }
-        require(conversation.remoteState != ConversationRemoteState.DELETED) {
-            "Cannot enqueue into a remotely deleted session"
-        }
         database.withTransaction {
             requireConversationOwner(conversation.serverId, conversation.sessionId)
             database.conversations().upsert(conversation)
@@ -205,16 +201,7 @@ class LocalDeliveryStore(
         database.withTransaction {
             database.conversations().listForServer(serverId)
                 .filterNot { it.sessionId in remoteSessionIds }
-                .filterNot { it.remoteState == ConversationRemoteState.LOCAL }
-                .forEach { conversation ->
-                    check(
-                        database.conversations().updateRemoteState(
-                            conversation.sessionId,
-                            ConversationRemoteState.DELETED,
-                        ) == 1,
-                    ) { "Catalog session disappeared during reconciliation: ${conversation.sessionId}" }
-                    database.messages().deleteSessionProjection(conversation.sessionId)
-                }
+                .forEach { database.messages().deleteSessionProjection(it.sessionId) }
             database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
         }
     }
@@ -294,7 +281,6 @@ class LocalDeliveryStore(
                     serverId = serverId,
                     title = item.title,
                     updatedAt = Instant.parse(item.updatedAt).toEpochMilli(),
-                    remoteState = ConversationRemoteState.REMOTE,
                 ),
             )
         }
@@ -312,13 +298,7 @@ class LocalDeliveryStore(
         }
         if (conversation == null) {
             database.conversations().upsert(
-                ConversationEntity(
-                    sessionId,
-                    serverId,
-                    "新对话",
-                    System.currentTimeMillis(),
-                    ConversationRemoteState.REMOTE,
-                ),
+                ConversationEntity(sessionId, serverId, "新对话", System.currentTimeMillis()),
             )
         }
         payload.items.forEach { remote ->
@@ -340,7 +320,6 @@ class LocalDeliveryStore(
                 updatedAt = completedAt,
             )
             val sourceId = remote.clientMessageId?.let { "user:$it" }
-                ?: uniqueEphemeralAssistantSourceId(canonical)
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
                 serverId = serverId,
@@ -354,18 +333,6 @@ class LocalDeliveryStore(
                 database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
             }
         }
-    }
-
-    /** 只在时间窗口内候选整体唯一时修复旧版 assistant 临时身份。 */
-    private suspend fun uniqueEphemeralAssistantSourceId(canonical: MessageEntity): String? {
-        if (canonical.role != "assistant") return null
-        val candidates = database.messages().findEphemeralAssistants(
-            canonical.sessionId,
-            canonical.text,
-            canonical.updatedAt - LEGACY_IDENTITY_LOOKBACK_MS,
-            canonical.updatedAt + LEGACY_IDENTITY_LOOKBACK_MS,
-        )
-        return candidates.singleOrNull()?.messageId
     }
 
     private fun historyBlocks(
@@ -434,7 +401,6 @@ class LocalDeliveryStore(
                 serverId = serverId,
                 title = payloadText(envelope, "title") ?: current?.title ?: "新对话",
                 updatedAt = updatedAt,
-                remoteState = ConversationRemoteState.REMOTE,
             ),
         )
     }
@@ -731,7 +697,7 @@ class LocalDeliveryStore(
                     sizeBytes = descriptor.sizeBytes,
                     sha256 = descriptor.sha256.lowercase(),
                     transferredBytes = 0,
-                    state = if (descriptor.sizeBytes >= AUTO_DOWNLOAD_LIMIT_BYTES) "remote" else "pending",
+                    state = "pending",
                     cachePath = mediaCache.cachePath(descriptor.attachmentId),
                     lastAccessedAt = updatedAt,
                     updatedAt = updatedAt,
@@ -773,7 +739,6 @@ class LocalDeliveryStore(
     private companion object {
         val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
         const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
-        const val AUTO_DOWNLOAD_LIMIT_BYTES = 10L * 1024 * 1024
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val FRAME_ID = Regex(
             "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +

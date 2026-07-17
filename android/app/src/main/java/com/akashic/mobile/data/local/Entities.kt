@@ -10,9 +10,6 @@ import androidx.room.Relation
 
 internal object ConversationRemoteState {
     const val UNKNOWN = "unknown"
-    const val LOCAL = "local"
-    const val REMOTE = "remote"
-    const val DELETED = "deleted"
 }
 
 @Entity(tableName = "server_profiles")
@@ -46,7 +43,7 @@ data class ConversationEntity(
     val title: String,
     val updatedAt: Long,
     @ColumnInfo(defaultValue = "'unknown'")
-    val remoteState: String = ConversationRemoteState.LOCAL,
+    val remoteState: String = ConversationRemoteState.UNKNOWN,
 )
 
 @Entity(

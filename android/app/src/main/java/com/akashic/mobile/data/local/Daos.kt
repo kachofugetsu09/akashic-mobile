@@ -43,9 +43,6 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE serverId = :serverId")
     suspend fun listForServer(serverId: String): List<ConversationEntity>
 
-    @Query("UPDATE conversations SET remoteState = :remoteState WHERE sessionId = :sessionId")
-    suspend fun updateRemoteState(sessionId: String, remoteState: String): Int
-
     @Query(
         """
         DELETE FROM conversations
@@ -244,19 +241,6 @@ interface OutboxDao {
         """,
     )
     suspend fun pending(serverId: String): List<OutboxCommandEntity>
-
-    @Query(
-        """
-        SELECT outbox_commands.* FROM outbox_commands
-        INNER JOIN messages ON messages.clientMessageId = outbox_commands.commandId
-        INNER JOIN conversations ON conversations.sessionId = messages.sessionId
-        WHERE outbox_commands.serverId = :serverId
-          AND outbox_commands.state IN ('pending', 'retry')
-          AND conversations.remoteState IN ('local', 'remote')
-        ORDER BY outbox_commands.createdAt, outbox_commands.commandId
-        """,
-    )
-    suspend fun dispatchable(serverId: String): List<OutboxCommandEntity>
 
     @Query(
         """

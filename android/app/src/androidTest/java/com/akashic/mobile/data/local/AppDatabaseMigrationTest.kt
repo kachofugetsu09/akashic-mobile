@@ -87,7 +87,7 @@ class AppDatabaseMigrationTest {
             true,
             AppDatabase.MIGRATION_3_4,
         ).use { database ->
-            assertSingleString(database, "SELECT remoteState FROM conversations", ConversationRemoteState.REMOTE)
+            assertSingleString(database, "SELECT remoteState FROM conversations", "remote")
             assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
             database.execSQL(
                 "INSERT INTO pending_message_notifications VALUES(" +
