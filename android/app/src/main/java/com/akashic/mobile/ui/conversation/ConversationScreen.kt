@@ -446,7 +446,10 @@ private fun MessageList(
     }
 
     LaunchedEffect(contentRevision) {
-        if (followsBottom) listState.scrollToItem(messages.size)
+        if (followsBottom) {
+            withFrameNanos {}
+            if (followsBottom) listState.scrollToItem(messages.size)
+        }
     }
 
     LaunchedEffect(listState, messages.size) {
@@ -462,8 +465,14 @@ private fun MessageList(
             )
         }.distinctUntilChanged().collect {
             if (followsBottom && !listState.isScrollInProgress && listState.layoutInfo.totalItemsCount > 0) {
-                withFrameNanos { }
-                listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                withFrameNanos {}
+                if (
+                    followsBottom &&
+                    !listState.isScrollInProgress &&
+                    listState.layoutInfo.totalItemsCount > 0
+                ) {
+                    listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                }
             }
         }
     }

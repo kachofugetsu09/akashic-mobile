@@ -50,6 +50,18 @@ def _git_blob(core_root: Path, revision: str, source_path: str) -> bytes:
     ).stdout
 
 
+def _require_tree(core_root: Path, revision: str, expected: str, label: str) -> None:
+    """确认固定 revision 的 tree 未被替换。"""
+    if _git(core_root, f"{revision}^{{tree}}") != expected:
+        raise ValueError(f"{label} tree 与 runtime lock 不一致")
+
+
+def _require_file_digest(path: Path, expected: str, label: str) -> None:
+    """确认固定文件的内容摘要未被替换。"""
+    if _sha256(path) != expected:
+        raise ValueError(f"{label} digest 与 runtime lock 不一致")
+
+
 def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
     """读取并校验 Gate 锁文件，返回锁内容和核心测试 node id。"""
 
@@ -59,12 +71,19 @@ def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
     repository = _required_text(lock, "source_repository")
     if repository != CANONICAL_RUNTIME_REPOSITORY:
         raise ValueError(f"非权威核心仓库：{repository}")
-    for key in ("source_commit", "source_tree"):
+    for key in (
+        "capability_commit",
+        "capability_tree",
+        "provider_runtime_revision",
+        "provider_runtime_tree",
+    ):
         value = _required_text(lock, key)
         if len(value) != FULL_GIT_HASH_LENGTH or any(
             character not in "0123456789abcdef" for character in value
         ):
             raise ValueError(f"{key} 必须是完整的小写 Git SHA")
+    if _required_text(lock, "relationship") != "tested_backward_compatible":
+        raise ValueError("runtime relationship 必须是 tested_backward_compatible")
 
     # 2. 校验场景目录不可脱离锁文件漂移。
     catalog_path = mobile_root / _required_text(lock, "scenario_catalog")
@@ -72,6 +91,8 @@ def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
     if _sha256(catalog_path) != expected_catalog_hash:
         raise ValueError("runtime scenario catalog hash 不匹配")
     catalog = _read_object(catalog_path)
+    if _required_text(catalog, "profile") != _required_text(lock, "profile"):
+        raise ValueError("runtime lock 与 scenario catalog profile 不一致")
     scenarios = catalog.get("scenarios")
     if not isinstance(scenarios, list) or not scenarios:
         raise ValueError("runtime scenario catalog 必须包含场景")
@@ -103,6 +124,13 @@ def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
         character not in "0123456789abcdef" for character in schema_commit
     ):
         raise ValueError("protocol source_commit 必须是完整的小写 Git SHA")
+    if schema_commit != _required_text(lock, "capability_commit"):
+        raise ValueError("协议能力提交与 runtime capability_commit 不一致")
+    if _required_text(schema_source, "sha256") != _required_text(
+        lock,
+        "capability_schema_sha256",
+    ):
+        raise ValueError("协议快照 digest 与 runtime capability schema 不一致")
     return lock, provider_tests
 
 
@@ -111,16 +139,31 @@ def verify_core(mobile_root: Path, core_root: Path) -> list[str]:
 
     lock, provider_tests = load_contract(mobile_root)
 
-    # 1. checkout 和 tree 必须精确命中，禁止用浮动分支代替。
-    if _git(core_root, "HEAD") != _required_text(lock, "source_commit"):
-        raise ValueError("核心 checkout commit 与 runtime lock 不一致")
-    if _git(core_root, "HEAD^{tree}") != _required_text(lock, "source_tree"):
-        raise ValueError("核心 checkout tree 与 runtime lock 不一致")
+    # 1. checkout 和两份 tree 必须精确命中，禁止用浮动分支代替。
+    runtime_revision = _required_text(lock, "provider_runtime_revision")
+    capability_commit = _required_text(lock, "capability_commit")
+    if _git(core_root, "HEAD") != runtime_revision:
+        raise ValueError("核心 checkout revision 与 runtime lock 不一致")
+    _require_tree(
+        core_root,
+        runtime_revision,
+        _required_text(lock, "provider_runtime_tree"),
+        "provider runtime",
+    )
+    _require_tree(
+        core_root,
+        capability_commit,
+        _required_text(lock, "capability_tree"),
+        "capability",
+    )
 
-    # 2. 当前核心 schema 单独锁定，用于识别运行时和协议全集的变化。
+    # 2. 分别校验 provider runtime 与能力锚点的 schema。
     schema_path = core_root / _required_text(lock, "source_schema_path")
-    if _sha256(schema_path) != _required_text(lock, "source_schema_sha256"):
-        raise ValueError("当前核心 schema hash 与 runtime lock 不一致")
+    _require_file_digest(
+        schema_path,
+        _required_text(lock, "provider_runtime_schema_sha256"),
+        "provider runtime schema",
+    )
 
     schema_source = _read_object(mobile_root / "protocol/source.json")
     historical_schema = _git_blob(
@@ -128,7 +171,10 @@ def verify_core(mobile_root: Path, core_root: Path) -> list[str]:
         _required_text(schema_source, "source_commit"),
         _required_text(schema_source, "source_path"),
     )
-    if hashlib.sha256(historical_schema).hexdigest() != _required_text(schema_source, "sha256"):
+    if hashlib.sha256(historical_schema).hexdigest() != _required_text(
+        lock,
+        "capability_schema_sha256",
+    ):
         raise ValueError("协议快照与固定历史核心 commit 不一致")
 
     # 3. 每个场景必须指向当前 checkout 中真实存在的测试文件。
@@ -145,7 +191,12 @@ def main() -> int:
     parser.add_argument("--core-root", type=Path)
     parser.add_argument(
         "--print-field",
-        choices=("source_repository", "source_commit", "protocol_source_commit"),
+        choices=(
+            "source_repository",
+            "capability_commit",
+            "provider_runtime_revision",
+            "protocol_source_commit",
+        ),
     )
     args = parser.parse_args()
 

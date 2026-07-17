@@ -8,6 +8,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -77,5 +78,21 @@ class MessageNotificationPolicyTest {
         assertEquals("proactive:event-42", proactive.messageId)
         assertEquals("后台任务完成", proactive.content)
         assertFalse(proactive.hasAttachments)
+    }
+
+    @Test
+    fun finalNotificationRequiresCanonicalMessageIdentity() {
+        val final = WireEnvelope(
+            v = 1,
+            kind = WireKind.EVENT,
+            type = "message.final",
+            id = "event-42",
+            sessionId = "mobile:session-a",
+            payload = buildJsonObject { put("content", "最终回答") },
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            deliveredFinalMessageEvent(final)
+        }
     }
 }

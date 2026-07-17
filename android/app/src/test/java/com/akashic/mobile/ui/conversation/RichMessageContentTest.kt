@@ -60,6 +60,20 @@ class RichMessageContentTest {
     }
 
     @Test
+    fun rejectsBacktickFenceWhoseInfoStringContainsBackticks() {
+        val content = "```lang`invalid\n$$\nx^2\n$$\n```"
+
+        assertEquals(
+            listOf(
+                RichMessageSegment.Markdown("```lang`invalid"),
+                RichMessageSegment.BlockMath("x^2"),
+                RichMessageSegment.Markdown("```"),
+            ),
+            richMessageSegments(content),
+        )
+    }
+
+    @Test
     fun splitsTheSingleLineDisplayMathUsedByRealHistory() {
         val content = """
             评分器是一个简单的余弦相似度模型：

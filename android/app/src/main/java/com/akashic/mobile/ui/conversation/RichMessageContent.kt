@@ -15,7 +15,9 @@ private fun markdownFence(line: String): MarkdownFence? {
     if (marker != '`' && marker != '~') return null
     val length = line.drop(indent).takeWhile { it == marker }.length
     if (length < 3) return null
-    return MarkdownFence(marker, length, line.drop(indent + length))
+    val tail = line.drop(indent + length)
+    if (marker == '`' && '`' in tail) return null
+    return MarkdownFence(marker, length, tail)
 }
 
 /** 将 Markdown 中的块级公式切成独立原生渲染段。 */

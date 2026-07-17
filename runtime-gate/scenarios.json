@@ -33,24 +33,6 @@
       "consumer_test": "authenticated protocol failure closes winner and reports closure"
     },
     {
-      "id": "deleted-claimed-session-is-not-recreated",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
-      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
-      "consumer_test": "only rejection of selected deleted session clears selection"
-    },
-    {
-      "id": "deleted-session-catalog-blocks-outbox",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_does_not_recreate_a_deleted_claimed_session",
-      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "catalogDeletionPreservesButBlocksPendingWork"
-    },
-    {
-      "id": "session-delete-race-is-not-recreated",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_claimed_message_admission_does_not_recreate_after_exists_check",
-      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/HistorySyncPolicyTest.kt",
-      "consumer_test": "only rejection of selected deleted session clears selection"
-    },
-    {
       "id": "resume-gap-requires-reset",
       "provider_test": "tests/mobile_realtime/test_gateway.py::test_resume_resets_when_durable_inbox_has_sequence_gap",
       "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
@@ -81,10 +63,22 @@
       "consumer_test": "every nonempty remote session starts from page one"
     },
     {
+      "id": "attachment-binary-frame-contract",
+      "provider_test": "tests/mobile_realtime/test_attachments.py::test_binary_chunk_round_trip_and_rejects_oversized_header",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/TransportAndIdsTest.kt",
+      "consumer_test": "attachment chunk uses big endian json header and absolute offset"
+    },
+    {
       "id": "attachment-upload-resumes-confirmed-offset",
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_upload_resumes_from_persisted_offset_and_verifies_digest",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/AttachmentUploadCoordinatorTest.kt",
       "consumer_test": "uploads one confirmed window then resumes with a new begin id"
+    },
+    {
+      "id": "attachment-upload-reaches-agent-media",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_attachment_upload_resumes_and_reaches_agent_media",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "attachmentMessageMovesReadyToSendingThenSent"
     },
     {
       "id": "attachment-filename-is-plain",
@@ -123,6 +117,12 @@
       "consumer_test": "deliveredMessagesPersistBeyondTheFormerInMemoryQueueCapacity"
     },
     {
+      "id": "passive-notification-consumption-is-durable",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_sender_uses_mobile_event_path",
+      "consumer_source": "android/app/src/test/java/com/akashic/mobile/PendingNotificationDeliveryTest.kt",
+      "consumer_test": "disabledPermissionRetainsRequiredNotification"
+    },
+    {
       "id": "turn-stop-survives-client-process-restart",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_turn_stop_accepts_a_shared_mobile_session",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
@@ -139,6 +139,12 @@
       "provider_test": "tests/mobile_realtime/test_channel.py::test_command_list_uses_active_channel_catalog_without_stop",
       "consumer_source": "android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
       "consumer_test": "acceptsUnicodeCommandDescriptionsByCodePoint"
+    },
+    {
+      "id": "mobile-command-text-reaches-agent-unchanged",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_preserves_mobile_slash_command_for_bus",
+      "consumer_source": "android/app/src/androidTest/java/com/akashic/mobile/ui/conversation/ConversationInteractionsTest.kt",
+      "consumer_test": "commandMenuSendsImmediately"
     }
   ]
 }

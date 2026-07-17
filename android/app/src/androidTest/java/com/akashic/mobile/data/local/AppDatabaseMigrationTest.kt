@@ -89,7 +89,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_3_4,
             AppDatabase.MIGRATION_4_5,
         ).use { database ->
-            assertSingleString(database, "SELECT remoteState FROM conversations", ConversationRemoteState.REMOTE)
+            assertSingleString(database, "SELECT remoteState FROM conversations", "remote")
             assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
             assertSingleInt(database, "SELECT COUNT(*) FROM pending_turn_stops", 0)
         }
@@ -141,7 +141,7 @@ class AppDatabaseMigrationTest {
             true,
             AppDatabase.MIGRATION_4_5,
         ).use { database ->
-            assertSingleString(database, "SELECT remoteState FROM conversations", ConversationRemoteState.REMOTE)
+            assertSingleString(database, "SELECT remoteState FROM conversations", "remote")
             assertSingleString(database, "SELECT filename FROM media_attachments", "old.txt")
             assertSingleString(database, "SELECT content FROM pending_message_notifications", "仍需通知")
             assertSingleString(database, "SELECT turnId FROM pending_turn_stops", "turn-1")

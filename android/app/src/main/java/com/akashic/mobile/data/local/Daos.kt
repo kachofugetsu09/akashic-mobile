@@ -43,9 +43,6 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE serverId = :serverId")
     suspend fun listForServer(serverId: String): List<ConversationEntity>
 
-    @Query("UPDATE conversations SET remoteState = :remoteState WHERE sessionId = :sessionId")
-    suspend fun updateRemoteState(sessionId: String, remoteState: String): Int
-
     @Query(
         """
         DELETE FROM conversations
@@ -87,25 +84,6 @@ interface MessageDao {
 
     @Query(
         """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'assistant'
-          AND text = :text
-          AND messageId LIKE 'ephemeral:%'
-          AND deliveryState = 'complete'
-          AND updatedAt BETWEEN :earliestUpdatedAt AND :latestUpdatedAt
-        ORDER BY createdAt, messageId
-        """,
-    )
-    suspend fun findEphemeralAssistants(
-        sessionId: String,
-        text: String,
-        earliestUpdatedAt: Long,
-        latestUpdatedAt: Long,
-    ): List<MessageEntity>
-
-    @Query(
-        """
         SELECT messages.* FROM messages
         INNER JOIN conversations ON conversations.sessionId = messages.sessionId
         WHERE conversations.serverId = :serverId
@@ -116,26 +94,6 @@ interface MessageDao {
         """,
     )
     suspend fun activeAssistantTurns(serverId: String): List<MessageEntity>
-
-    @Query(
-        """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'user'
-          AND text = :text
-          AND messageId LIKE 'user:%'
-          AND clientMessageId IS NOT NULL
-          AND deliveryState IN ('sent', 'complete')
-          AND createdAt BETWEEN :earliestCreatedAt AND :latestCreatedAt
-        ORDER BY createdAt, messageId
-        """,
-    )
-    suspend fun findLegacyOptimisticUsers(
-        sessionId: String,
-        text: String,
-        earliestCreatedAt: Long,
-        latestCreatedAt: Long,
-    ): List<MessageEntity>
 
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: String): Int
@@ -273,19 +231,6 @@ interface OutboxDao {
         """,
     )
     suspend fun pending(serverId: String): List<OutboxCommandEntity>
-
-    @Query(
-        """
-        SELECT outbox_commands.* FROM outbox_commands
-        INNER JOIN messages ON messages.clientMessageId = outbox_commands.commandId
-        INNER JOIN conversations ON conversations.sessionId = messages.sessionId
-        WHERE outbox_commands.serverId = :serverId
-          AND outbox_commands.state IN ('pending', 'retry')
-          AND conversations.remoteState IN ('local', 'remote')
-        ORDER BY outbox_commands.createdAt, outbox_commands.commandId
-        """,
-    )
-    suspend fun dispatchable(serverId: String): List<OutboxCommandEntity>
 
     @Query(
         """

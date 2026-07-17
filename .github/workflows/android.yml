@@ -40,35 +40,39 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 -m unittest discover -s runtime-gate -p 'test_*.py'
           python3 runtime-gate/verify_contract.py --mobile-root .
           core_repository="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field source_repository)"
-          core_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field source_commit)"
+          capability_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field capability_commit)"
+          runtime_revision="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field provider_runtime_revision)"
           protocol_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field protocol_source_commit)"
           core_root="${RUNNER_TEMP}/akashic-agent"
           git init "${core_root}"
           git -C "${core_root}" remote add origin "${core_repository}"
-          git -C "${core_root}" fetch --depth=1 origin "${core_commit}"
-          git -C "${core_root}" fetch --depth=1 origin "${protocol_commit}"
-          git -C "${core_root}" checkout --detach "${core_commit}"
+          git -C "${core_root}" fetch --depth=1 origin \
+            "${runtime_revision}" \
+            "${capability_commit}" \
+            "${protocol_commit}"
+          git -C "${core_root}" checkout --detach "${runtime_revision}"
           python3 runtime-gate/verify_contract.py --mobile-root . --core-root "${core_root}"
 
       - name: Build pinned core Gate image
         shell: bash
         run: |
           set -euo pipefail
-          core_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field source_commit)"
+          runtime_revision="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field provider_runtime_revision)"
           core_root="${RUNNER_TEMP}/akashic-agent"
           docker build \
             --file "${core_root}/docker/debug/Dockerfile" \
-            --tag "akashic-mobile-runtime-gate:${core_commit}" \
+            --tag "akashic-mobile-runtime-gate:${runtime_revision}" \
             "${core_root}"
 
       - name: Run core semantics in an isolated workspace
         shell: bash
         run: |
           set -euo pipefail
-          core_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field source_commit)"
+          runtime_revision="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field provider_runtime_revision)"
           python3 runtime-gate/run_core_contract.py \
             --mobile-root . \
             --core-root "${RUNNER_TEMP}/akashic-agent" \
-            --image "akashic-mobile-runtime-gate:${core_commit}"
+            --image "akashic-mobile-runtime-gate:${runtime_revision}"
