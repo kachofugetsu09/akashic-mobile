@@ -30,7 +30,9 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 data class MobileSessionState(
@@ -54,6 +56,79 @@ internal object FullJitterBackoff {
         random.nextLong(maximumDelayMillis(retry) + 1)
 }
 
+internal const val MAX_MESSAGE_TEXT_LENGTH = 65_536
+
+internal fun outgoingMessageTextLength(text: String): Int =
+    text.codePointCount(0, text.length)
+
+internal fun validateOutgoingMessageText(text: String): String {
+    val body = text.trim()
+    require(body.isNotEmpty()) { "Message text is empty" }
+    require(outgoingMessageTextLength(body) <= MAX_MESSAGE_TEXT_LENGTH) {
+        "Message text exceeds $MAX_MESSAGE_TEXT_LENGTH characters"
+    }
+    return body
+}
+
+internal enum class TerminalProtocolAction {
+    FAIL_ACTIVE_COMMAND,
+    PRESERVE_OUTBOX,
+}
+
+internal fun terminalProtocolAction(code: Int, hasActiveCommand: Boolean): TerminalProtocolAction? = when (code) {
+    CLOSE_COMMAND_REJECTED -> if (hasActiveCommand) {
+        TerminalProtocolAction.FAIL_ACTIVE_COMMAND
+    } else {
+        TerminalProtocolAction.PRESERVE_OUTBOX
+    }
+    4400, 4406 -> TerminalProtocolAction.PRESERVE_OUTBOX
+    else -> null
+}
+
+internal enum class ConnectionDeadlinePhase {
+    CHALLENGE,
+    AUTHENTICATION,
+    SYNC,
+}
+
+internal fun ConnectionDeadlinePhase.deadlineMillis(): Long = when (this) {
+    ConnectionDeadlinePhase.CHALLENGE,
+    ConnectionDeadlinePhase.AUTHENTICATION,
+    -> 10_000L
+    ConnectionDeadlinePhase.SYNC -> 20_000L
+}
+
+internal fun ConnectionDeadlinePhase.timeoutMessage(): String = when (this) {
+    ConnectionDeadlinePhase.CHALLENGE -> "等待电脑握手超时，正在重新连接"
+    ConnectionDeadlinePhase.AUTHENTICATION -> "设备认证超时，正在重新连接"
+    ConnectionDeadlinePhase.SYNC -> "消息同步长时间无进展，正在重新连接"
+}
+
+internal data class ConnectionPhaseDeadline(
+    val generation: Long,
+    val phase: ConnectionDeadlinePhase,
+)
+
+internal fun shouldApplyCandidateOpen(
+    connectionPhase: ConnectionPhase,
+    hasActiveCandidate: Boolean,
+    candidateGeneration: Long,
+    pairingConfirmationGeneration: Long?,
+): Boolean = !hasActiveCandidate &&
+    pairingConfirmationGeneration != candidateGeneration &&
+    connectionPhase in setOf(
+        ConnectionPhase.CONNECTING,
+        ConnectionPhase.SERVER_CHALLENGE,
+        ConnectionPhase.DEGRADED,
+    )
+
+internal fun shouldAcceptCandidateFrame(
+    currentGeneration: Long,
+    activeCandidate: SocketCandidateId?,
+    candidateId: SocketCandidateId,
+): Boolean = candidateId.generation == currentGeneration &&
+    (activeCandidate == null || candidateId == activeCandidate)
+
 class RealtimeSession(
     private val database: AppDatabase,
     private val deliveryStore: LocalDeliveryStore,
@@ -71,17 +146,21 @@ class RealtimeSession(
     private val json = Json { encodeDefaults = true; explicitNulls = false }
     private val mutex = Mutex()
     private val socket = RealtimeWebSocketClient(this, allowInsecureTransport)
+    private val outboxFlight = SingleFlightOutbox()
     private val mutableState = MutableStateFlow(MobileSessionState())
     val state: StateFlow<MobileSessionState> = mutableState.asStateFlow()
 
     private var profile: ServerProfileEntity? = null
     private var pendingPairing: PendingPairing? = null
+    private var pairingConfirmationGeneration: Long? = null
     private val challengedCandidates = mutableSetOf<SocketCandidateId>()
     private val candidateEndpoints = mutableMapOf<SocketCandidateId, ServerEndpoint>()
     private var activeCandidate: SocketCandidateId? = null
     private var activeEpoch: Long? = null
     private var retryCount = 0
     private var reconnectJob: Job? = null
+    private var phaseDeadlineJob: Job? = null
+    private var phaseDeadline: ConnectionPhaseDeadline? = null
     private var ackJob: Job? = null
     private var pendingAckCount = 0
     private var pendingAckSeq = 0L
@@ -124,6 +203,7 @@ class RealtimeSession(
                         signer = { deviceKeys.sign(alias, it) },
                     )
                     pendingPairing = PendingPairing(qr, alias, claim)
+                    pairingConfirmationGeneration = null
                     mutableState.value = MobileSessionState(
                         initialized = true,
                         connection = ConnectionState(phase = ConnectionPhase.CONNECTING),
@@ -143,11 +223,10 @@ class RealtimeSession(
     }
 
     fun sendMessage(text: String) {
+        val body = validateOutgoingMessageText(text)
         scope.launch {
             mutex.withLock {
                 val currentProfile = requireNotNull(profile) { "Pair a server before sending" }
-                val body = text.trim()
-                require(body.isNotEmpty()) { "Message text is empty" }
                 val sessionId = mutableState.value.currentSessionId
                     ?: "mobile:${UUID.randomUUID()}".also {
                         preferences.selectSession(it)
@@ -205,6 +284,20 @@ class RealtimeSession(
             mutex.withLock {
                 if (candidateId.generation != currentGeneration()) return@withLock
                 candidateEndpoints[candidateId] = endpoint
+                if (
+                    !shouldApplyCandidateOpen(
+                        connectionPhase = mutableState.value.connection.phase,
+                        hasActiveCandidate = activeCandidate != null,
+                        candidateGeneration = candidateId.generation,
+                        pairingConfirmationGeneration = pairingConfirmationGeneration,
+                    )
+                ) {
+                    if (activeCandidate != null) {
+                        socket.rejectPreAuth(candidateId, 4406, "late candidate after authentication")
+                    }
+                    return@withLock
+                }
+                armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.CHALLENGE)
                 mutableState.value = mutableState.value.copy(
                     connection = mutableState.value.connection.copy(
                         phase = ConnectionPhase.SERVER_CHALLENGE,
@@ -219,6 +312,12 @@ class RealtimeSession(
     override fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
         scope.launch {
             mutex.withLock {
+                if (!shouldAcceptCandidateFrame(currentGeneration(), activeCandidate, candidateId)) {
+                    if (candidateId.generation == currentGeneration() && activeCandidate != null) {
+                        socket.rejectPreAuth(candidateId, 4406, "late candidate after authentication")
+                    }
+                    return@withLock
+                }
                 try {
                     handleEnvelope(candidateId, envelope)
                 } catch (error: IllegalArgumentException) {
@@ -242,7 +341,13 @@ class RealtimeSession(
     override fun onClosed(candidateId: SocketCandidateId, code: Int, reason: String) {
         scope.launch {
             mutex.withLock {
-                if (candidateId == activeCandidate) scheduleReconnect("连接关闭：$code $reason")
+                if (candidateId != activeCandidate) return@withLock
+                val action = terminalProtocolAction(code, outboxFlight.commandId != null)
+                if (action == null) {
+                    scheduleReconnect("连接关闭：$code $reason")
+                } else {
+                    handleTerminalProtocolClose(code, action)
+                }
             }
         }
     }
@@ -258,7 +363,9 @@ class RealtimeSession(
     override fun onProtocolFailure(candidateId: SocketCandidateId, error: IllegalArgumentException) {
         scope.launch {
             mutex.withLock {
-                mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                if (activeCandidate == null || candidateId == activeCandidate) {
+                    mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                }
             }
         }
     }
@@ -272,6 +379,8 @@ class RealtimeSession(
     }
 
     private suspend fun handleEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
+        if (candidateId.generation != currentGeneration()) return
+        if (activeCandidate != null && candidateId != activeCandidate) return
         when (envelope.type) {
             "server.challenge" -> handleChallenge(candidateId, envelope)
             "pair.pending" -> handlePairPending(candidateId, envelope)
@@ -296,6 +405,7 @@ class RealtimeSession(
         challengedCandidates += candidateId
         if (pairing != null) {
             check(socket.send(candidateId, control("pair.claim", pairing.claim.payload)))
+            armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.AUTHENTICATION)
             return
         }
         val currentProfile = requireNotNull(profile)
@@ -306,6 +416,7 @@ class RealtimeSession(
             signer = { deviceKeys.sign(currentProfile.keyAlias, it) },
         )
         check(socket.send(candidateId, control("device.proof", proof)))
+        armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.AUTHENTICATION)
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEVICE_PROOF),
         )
@@ -317,6 +428,8 @@ class RealtimeSession(
         val pending = ProtocolCodec.decodePayload<PairPendingPayload>(envelope.payload)
         require(pending.pairingId == pairing.qr.pairingId) { "pair.pending pairing_id mismatch" }
         require(pending.confirmationCode == pairing.claim.confirmationCode) { "Pairing confirmation code mismatch" }
+        pairingConfirmationGeneration = candidateId.generation
+        cancelPhaseDeadline()
         mutableState.value = mutableState.value.copy(pairingConfirmationCode = pending.confirmationCode)
     }
 
@@ -344,6 +457,7 @@ class RealtimeSession(
         preferences.selectServer(saved.serverId)
         profile = saved
         pendingPairing = null
+        pairingConfirmationGeneration = null
         mutableState.value = MobileSessionState(
             initialized = true,
             connection = ConnectionState(phase = ConnectionPhase.CONNECTING),
@@ -363,6 +477,7 @@ class RealtimeSession(
         if (!socket.promote(candidateId)) return
         activeCandidate = candidateId
         activeEpoch = accepted.connectionEpoch
+        outboxFlight.reset()
         retryCount = 0
         val cursor = requireNotNull(database.realtimeCursors().get(currentProfile.deviceId))
         check(
@@ -388,8 +503,8 @@ class RealtimeSession(
             ),
             errorMessage = null,
         )
+        armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.SYNC)
         database.outbox().resetInFlight(currentProfile.serverId)
-        flushOutbox()
     }
 
     private suspend fun handleAuthenticatedFrame(candidateId: SocketCandidateId, envelope: WireEnvelope) {
@@ -406,9 +521,13 @@ class RealtimeSession(
                 )
                 recordAck(eventSeq)
                 when (envelope.type) {
-                    "sync.completed" -> mutableState.value = mutableState.value.copy(
-                        connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
-                    )
+                    "sync.completed" -> {
+                        mutableState.value = mutableState.value.copy(
+                            connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
+                        )
+                        cancelPhaseDeadline()
+                        flushOutbox()
+                    }
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),
                     )
@@ -419,31 +538,51 @@ class RealtimeSession(
             }
             WireKind.REPLY -> {
                 val id = requireNotNull(envelope.id)
+                require(id == outboxFlight.commandId) { "收到非活动 outbox 命令的 reply: $id" }
                 if (envelope.type.endsWith(".ok")) {
                     deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
+                    outboxFlight.complete(id)
+                    flushOutbox()
                 } else if (envelope.type.endsWith(".error")) {
-                    deliveryStore.failOutbox(id, System.currentTimeMillis())
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "消息发送失败",
-                    )
+                    val code = envelope.payload["code"]?.jsonPrimitive?.contentOrNull
+                    val message = envelope.payload["message"]?.jsonPrimitive?.contentOrNull ?: "消息发送失败"
+                    when (messageSendFailureDisposition(code)) {
+                        OutboxFailureDisposition.RETRY_ORIGINAL -> {
+                            deliveryStore.retryOutbox(id)
+                            outboxFlight.complete(id)
+                            check(socket.closeActive(candidateId, 1012, "command outcome unknown"))
+                            scheduleReconnect(message)
+                        }
+                        OutboxFailureDisposition.FAIL -> {
+                            deliveryStore.failOutbox(id, System.currentTimeMillis())
+                            outboxFlight.complete(id)
+                            mutableState.value = mutableState.value.copy(errorMessage = message)
+                            flushOutbox()
+                        }
+                    }
                 }
             }
             else -> error("Unexpected authenticated server frame: ${envelope.kind}")
         }
+        if (mutableState.value.connection.phase == ConnectionPhase.SYNCING) {
+            armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.SYNC)
+        }
     }
 
     private suspend fun flushOutbox() {
+        if (outboxFlight.commandId != null) return
         val currentProfile = requireNotNull(profile)
         val epoch = activeEpoch ?: return
         val candidate = activeCandidate ?: return
-        database.outbox().pending(currentProfile.serverId).forEach { command ->
-            val stored = ProtocolCodec.decode(command.envelopeJson)
-            val wire = stored.copy(connectionEpoch = epoch)
-            deliveryStore.markOutboxAttempt(command.commandId, System.currentTimeMillis())
-            if (!socket.send(candidate, wire)) {
-                deliveryStore.retryOutbox(command.commandId)
-                return
-            }
+        val command = database.outbox().pending(currentProfile.serverId).firstOrNull() ?: return
+        val stored = ProtocolCodec.decode(command.envelopeJson)
+        val wire = stored.copy(connectionEpoch = epoch)
+        deliveryStore.markOutboxAttempt(command.commandId, System.currentTimeMillis())
+        check(outboxFlight.claim(command.commandId)) { "Outbox acquired more than one active command" }
+        if (!socket.send(candidate, wire)) {
+            deliveryStore.retryOutbox(command.commandId)
+            outboxFlight.complete(command.commandId)
+            scheduleReconnect("消息命令未进入 WebSocket 队列")
         }
     }
 
@@ -503,10 +642,38 @@ class RealtimeSession(
         )
     }
 
+    /** 为当前连接代际设置唯一的应用层阶段截止时间。 */
+    private fun armPhaseDeadline(generation: Long, phase: ConnectionDeadlinePhase) {
+        require(generation == currentGeneration()) { "连接阶段截止时间属于旧代际" }
+        if (phase != ConnectionDeadlinePhase.SYNC && pairingConfirmationGeneration == generation) return
+        phaseDeadlineJob?.cancel()
+        val deadline = ConnectionPhaseDeadline(generation, phase)
+        phaseDeadline = deadline
+        phaseDeadlineJob = scope.launch {
+            delay(phase.deadlineMillis())
+            mutex.withLock {
+                if (phaseDeadline != deadline || currentGeneration() != generation) return@withLock
+                phaseDeadline = null
+                phaseDeadlineJob = null
+                val message = phase.timeoutMessage()
+                socket.close(reason = message)
+                scheduleReconnect(message)
+            }
+        }
+    }
+
+    private fun cancelPhaseDeadline() {
+        phaseDeadlineJob?.cancel()
+        phaseDeadlineJob = null
+        phaseDeadline = null
+    }
+
     private fun scheduleReconnect(message: String) {
+        cancelPhaseDeadline()
         if (reconnectJob?.isActive == true) return
         activeCandidate = null
         activeEpoch = null
+        outboxFlight.reset()
         ackJob?.cancel()
         ackJob = null
         pendingAckCount = 0
@@ -526,11 +693,38 @@ class RealtimeSession(
         }
     }
 
+    /** 隔离被服务端拒绝的命令，或停止继续撞击不兼容协议。 */
+    private suspend fun handleTerminalProtocolClose(code: Int, action: TerminalProtocolAction) {
+        cancelPhaseDeadline()
+        val currentProfile = requireNotNull(profile)
+        val commandId = outboxFlight.commandId
+        if (action == TerminalProtocolAction.FAIL_ACTIVE_COMMAND && commandId != null) {
+            deliveryStore.failOutbox(commandId, System.currentTimeMillis())
+            outboxFlight.complete(commandId)
+            scheduleReconnect("消息格式无效，已标记发送失败")
+            return
+        }
+
+        database.outbox().resetInFlight(currentProfile.serverId)
+        outboxFlight.reset()
+        activeCandidate = null
+        activeEpoch = null
+        ackJob?.cancel()
+        ackJob = null
+        pendingAckCount = 0
+        mutableState.value = mutableState.value.copy(
+            connection = mutableState.value.connection.copy(phase = ConnectionPhase.CLOSED),
+            errorMessage = "协议不兼容（$code），请升级电脑端或手机客户端",
+        )
+    }
+
     private fun resetGenerationState() {
+        cancelPhaseDeadline()
         challengedCandidates.clear()
         candidateEndpoints.clear()
         activeCandidate = null
         activeEpoch = null
+        outboxFlight.reset()
     }
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(

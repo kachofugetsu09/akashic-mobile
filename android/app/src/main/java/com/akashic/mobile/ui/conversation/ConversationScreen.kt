@@ -72,6 +72,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import com.akashic.mobile.data.realtime.MAX_MESSAGE_TEXT_LENGTH
+import com.akashic.mobile.data.realtime.outgoingMessageTextLength
 import com.akashic.mobile.ui.design.AkashicTheme
 import com.akashic.mobile.ui.design.pressScale
 
@@ -100,7 +102,9 @@ fun ConversationScreen(
         bottomBar = {
             ConversationBottomBar(
                 text = composerText,
-                onTextChange = { composerText = it },
+                onTextChange = { value ->
+                    if (outgoingMessageTextLength(value) <= MAX_MESSAGE_TEXT_LENGTH) composerText = value
+                },
                 isConnectionDegraded = state.isConnectionDegraded,
                 isStreaming = state.isStreaming,
                 enabled = state.canSend,
