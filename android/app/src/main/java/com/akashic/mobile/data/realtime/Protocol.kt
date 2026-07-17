@@ -182,6 +182,8 @@ object ProtocolCodec {
 
     fun json(): Json = json
 
+    internal fun supportedTypes(kind: WireKind): Set<String> = knownTypes[kind].orEmpty()
+
     inline fun <reified T> decodePayload(payload: JsonObject): T = json.decodeFromJsonElement(payload)
 
     private fun validateEnvelope(envelope: WireEnvelope) {

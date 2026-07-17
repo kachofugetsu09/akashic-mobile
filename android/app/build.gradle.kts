@@ -1,3 +1,43 @@
+import groovy.json.JsonSlurper
+import java.security.MessageDigest
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.RegularFileProperty
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
+import org.gradle.api.tasks.TaskAction
+import org.gradle.api.tasks.testing.Test
+
+abstract class VerifyProtocolSnapshot : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val sourceFile: RegularFileProperty
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val snapshotFile: RegularFileProperty
+
+    @TaskAction
+    fun verify() {
+        val metadata = JsonSlurper().parse(sourceFile.get().asFile) as Map<*, *>
+        val snapshotPath = requireNotNull(metadata["snapshot_path"] as? String) {
+            "protocol/source.json is missing snapshot_path"
+        }
+        check(snapshotPath == "protocol/mobile-realtime-v1.json") {
+            "Unexpected protocol snapshot path: $snapshotPath"
+        }
+        val expected = requireNotNull(metadata["sha256"] as? String) {
+            "protocol/source.json is missing sha256"
+        }
+        val actual = MessageDigest.getInstance("SHA-256")
+            .digest(snapshotFile.get().asFile.readBytes())
+            .joinToString("") { "%02x".format(it) }
+        check(actual == expected) {
+            "Protocol snapshot SHA-256 mismatch: expected=$expected actual=$actual"
+        }
+    }
+}
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -55,6 +95,20 @@ kotlin {
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+val repositoryRoot = rootProject.projectDir.parentFile
+val protocolSource = repositoryRoot.resolve("protocol/source.json")
+val verifyProtocolSnapshot by tasks.registering(VerifyProtocolSnapshot::class) {
+    sourceFile.set(protocolSource)
+    snapshotFile.set(repositoryRoot.resolve("protocol/mobile-realtime-v1.json"))
+}
+
+tasks.named("preBuild").configure { dependsOn(verifyProtocolSnapshot) }
+tasks.named("check").configure { dependsOn(verifyProtocolSnapshot) }
+tasks.withType<Test>().configureEach {
+    dependsOn(verifyProtocolSnapshot)
+    systemProperty("akashic.repositoryRoot", repositoryRoot.absolutePath)
 }
 
 dependencies {
