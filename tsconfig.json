@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitReturns": true,
+    "baseUrl": ".",
+    "paths": {
+      "akashic-dashboard": ["types/akashic-dashboard.d.ts"],
+      "@akashic/dashboard-ui": ["frontend/dashboard/src/design/sdk.ts"],
+      "@/*": ["frontend/chat/src/*"]
+    },
+    "noEmit": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["frontend/dashboard/src/**/*.ts", "frontend/dashboard/src/**/*.tsx", "frontend/chat/src/**/*.ts", "frontend/chat/src/**/*.tsx", "plugins/**/*.ts", "plugins/**/*.tsx", "types/**/*.d.ts"]
+}

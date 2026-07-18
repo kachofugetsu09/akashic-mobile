@@ -25,6 +25,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install mobile Web dependencies
+        run: npm ci
+
       - name: Verify Android client
         working-directory: clients/android
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug
