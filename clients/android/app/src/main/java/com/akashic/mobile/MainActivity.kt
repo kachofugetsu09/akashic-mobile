@@ -138,6 +138,7 @@ class MainActivity : ComponentActivity() {
                         MobileWebChat(
                             state = conversation,
                             onSelectSession = viewModel::selectSession,
+                            onRemoveUnavailableSession = viewModel::removeUnavailableSession,
                             onNewSession = viewModel::createSession,
                             onRestartPairing = viewModel::restartPairing,
                             onReloadFromServer = viewModel::reloadFromServer,
@@ -146,6 +147,7 @@ class MainActivity : ComponentActivity() {
                             onRetryAttachment = viewModel::retryAttachment,
                             onContinueMeteredTransfer = viewModel::continueLargeTransfersOnMeteredNetwork,
                             onRetryFailedMessage = viewModel::retryFailedMessage,
+                            onSaveComposerDraft = viewModel::saveComposerDraft,
                             onSaveReadingPosition = viewModel::saveReadingPosition,
                             onMarkSessionReadThrough = viewModel::markSessionReadThrough,
                             onNavigationTargetHandled = viewModel::acknowledgeNavigationTarget,

@@ -40,11 +40,13 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebResourceErrorCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
+import com.akashic.mobile.BuildConfig
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageUi
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
@@ -70,6 +72,7 @@ private const val MOBILE_WEB_RENDER_DEADLINE_MILLIS = 10_000L
 fun MobileWebChat(
     state: ConversationUiState,
     onSelectSession: (String) -> Unit,
+    onRemoveUnavailableSession: (String) -> Unit,
     onNewSession: () -> Unit,
     onRestartPairing: () -> Unit,
     onReloadFromServer: () -> Unit,
@@ -78,6 +81,7 @@ fun MobileWebChat(
     onRetryAttachment: (String) -> Unit,
     onContinueMeteredTransfer: () -> Unit,
     onRetryFailedMessage: (String) -> Unit,
+    onSaveComposerDraft: (String, String, String?) -> Unit,
     onSaveReadingPosition: (String, String, Int) -> Unit,
     onMarkSessionReadThrough: (String, Long) -> Unit,
     onNavigationTargetHandled: (String) -> Unit,
@@ -97,6 +101,7 @@ fun MobileWebChat(
 ) {
     val latestState by rememberUpdatedState(state)
     val mediaRegistry = remember { MobileMediaRegistry() }
+    val shareScope = remember { CoroutineScope(SupervisorJob() + Dispatchers.IO) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var snapshotPump by remember { mutableStateOf<MobileSnapshotPump?>(null) }
     var webLoadError by remember { mutableStateOf<String?>(null) }
@@ -105,6 +110,7 @@ fun MobileWebChat(
     val callbacks by rememberUpdatedState(
         MobileWebCallbacks(
             onSelectSession = onSelectSession,
+            onRemoveUnavailableSession = onRemoveUnavailableSession,
             onNewSession = onNewSession,
             onRestartPairing = onRestartPairing,
             onReloadFromServer = onReloadFromServer,
@@ -113,6 +119,7 @@ fun MobileWebChat(
             onRetryAttachment = onRetryAttachment,
             onContinueMeteredTransfer = onContinueMeteredTransfer,
             onRetryFailedMessage = onRetryFailedMessage,
+            onSaveComposerDraft = onSaveComposerDraft,
             onSaveReadingPosition = onSaveReadingPosition,
             onMarkSessionReadThrough = onMarkSessionReadThrough,
             onNavigationTargetHandled = onNavigationTargetHandled,
@@ -134,6 +141,7 @@ fun MobileWebChat(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
+            shareScope.launch { pruneMobileTextShareCache(mobileTextShareDirectory(context)) }
             val assetLoader = WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
                 .addPathHandler("/media/", mediaRegistry)
@@ -141,6 +149,7 @@ fun MobileWebChat(
             WebView(context).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = false
+                settings.cacheMode = WebSettings.LOAD_NO_CACHE
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -172,6 +181,30 @@ fun MobileWebChat(
                                 ClipData.newPlainText("Akashic message", text),
                             )
                         },
+                        shareText = { requestId, text ->
+                            shareScope.launch {
+                                val prepared = try {
+                                    preparePlainTextShare(context, text)
+                                } catch (_: IOException) {
+                                    null
+                                }
+                                val launched = withContext(Dispatchers.Main) {
+                                    if (prepared === null) {
+                                        Toast.makeText(context, "分享文件准备失败，请重试", Toast.LENGTH_SHORT).show()
+                                        false
+                                    } else {
+                                        launchPlainTextShare(context, prepared)
+                                    }
+                                }
+                                post {
+                                    evaluateJavascript(
+                                        "window.AkashicMobile?.receiveShareResult(" +
+                                            "${JSONObject.quote(requestId)},$launched)",
+                                        null,
+                                    )
+                                }
+                            }
+                        },
                         performActionHaptic = {
                             post {
                                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
@@ -199,7 +232,7 @@ fun MobileWebChat(
                         return true
                     }
                 }
-                loadUrl(MOBILE_WEB_URL)
+                loadUrl(mobileWebUrl(BuildConfig.VERSION_CODE))
                 webView = this
                 snapshotPump = MobileSnapshotPump(this, mediaRegistry)
             }
@@ -250,6 +283,7 @@ fun MobileWebChat(
     }
     DisposableEffect(Unit) {
         onDispose {
+            shareScope.cancel()
             snapshotPump?.cancel()
             webView?.removeJavascriptInterface("AkashicNative")
             webView?.destroy()
@@ -259,6 +293,7 @@ fun MobileWebChat(
 
 private data class MobileWebCallbacks(
     val onSelectSession: (String) -> Unit,
+    val onRemoveUnavailableSession: (String) -> Unit,
     val onNewSession: () -> Unit,
     val onRestartPairing: () -> Unit,
     val onReloadFromServer: () -> Unit,
@@ -267,6 +302,7 @@ private data class MobileWebCallbacks(
     val onRetryAttachment: (String) -> Unit,
     val onContinueMeteredTransfer: () -> Unit,
     val onRetryFailedMessage: (String) -> Unit,
+    val onSaveComposerDraft: (String, String, String?) -> Unit,
     val onSaveReadingPosition: (String, String, Int) -> Unit,
     val onMarkSessionReadThrough: (String, Long) -> Unit,
     val onNavigationTargetHandled: (String) -> Unit,
@@ -289,6 +325,7 @@ private class MobileWebBridge(
     private val reportReady: () -> Unit,
     private val requestSnapshot: () -> Unit,
     private val copyText: (String) -> Unit,
+    private val shareText: (String, String) -> Unit,
     private val performActionHaptic: () -> Unit,
     private val setWebHistoryActive: (Boolean) -> Unit,
     private val reportSendResult: (String, Boolean) -> Unit,
@@ -301,6 +338,11 @@ private class MobileWebBridge(
 
     @JavascriptInterface
     fun selectSession(sessionId: String) = dispatch { it.onSelectSession(sessionId) }
+
+    @JavascriptInterface
+    fun removeUnavailableSession(sessionId: String) = dispatch {
+        it.onRemoveUnavailableSession(sessionId)
+    }
 
     @JavascriptInterface
     fun createSession() = dispatch { it.onNewSession() }
@@ -325,6 +367,11 @@ private class MobileWebBridge(
 
     @JavascriptInterface
     fun retryFailedMessage(messageId: String) = dispatch { it.onRetryFailedMessage(messageId) }
+
+    @JavascriptInterface
+    fun saveComposerDraft(sessionId: String, text: String, replyToMessageId: String) = dispatch {
+        it.onSaveComposerDraft(sessionId, text, replyToMessageId.ifBlank { null })
+    }
 
     @JavascriptInterface
     fun saveReadingPosition(sessionId: String, messageId: String, offsetPx: Int) = dispatch {
@@ -398,6 +445,9 @@ private class MobileWebBridge(
     fun copyText(text: String) = copyText.invoke(text)
 
     @JavascriptInterface
+    fun shareText(requestId: String, text: String) = shareText.invoke(requestId, text)
+
+    @JavascriptInterface
     fun performActionHaptic() = performActionHaptic.invoke()
 
     @JavascriptInterface
@@ -447,7 +497,7 @@ private class MobileWebClient(
 
     override fun onPageFinished(view: WebView, url: String) {
         Log.i(MOBILE_WEB_LOG_TAG, "page finished: $url")
-        if (url != MOBILE_WEB_URL) return
+        if (!isMobileWebUrl(url)) return
         val generation = pageGeneration
         view.postDelayed({
             if (generation != pageGeneration) return@postDelayed
@@ -527,10 +577,17 @@ internal enum class MobileNavigationAction { ALLOW_INTERNAL, OPEN_EXTERNAL, BLOC
 
 internal fun mobileWebBackHandled(javascriptResult: String?): Boolean = javascriptResult == "true"
 
+internal fun mobileWebUrl(versionCode: Int): String {
+    require(versionCode > 0) { "应用版本号必须为正数" }
+    return "$MOBILE_WEB_URL?appVersion=$versionCode"
+}
+
+private fun isMobileWebUrl(url: String): Boolean = url.substringBefore('?') == MOBILE_WEB_URL
+
 /** 只允许应用主页面留在 WebView，普通网页交给系统浏览器。 */
 internal fun mobileNavigationAction(url: String, isMainFrame: Boolean): MobileNavigationAction {
     if (!isMainFrame) return MobileNavigationAction.BLOCK
-    if (url == MOBILE_WEB_URL) return MobileNavigationAction.ALLOW_INTERNAL
+    if (isMobileWebUrl(url)) return MobileNavigationAction.ALLOW_INTERNAL
     if (url.startsWith("https://appassets.androidplatform.net/")) {
         return MobileNavigationAction.BLOCK
     }

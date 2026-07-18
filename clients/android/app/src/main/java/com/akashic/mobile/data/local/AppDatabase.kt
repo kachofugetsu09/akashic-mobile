@@ -19,8 +19,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MediaAttachmentEntity::class,
         MessageAttachmentEntity::class,
         ConversationReadStateEntity::class,
+        ComposerDraftEntity::class,
+        PendingMessageNotificationEntity::class,
     ],
-    version = 5,
+    version = 8,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -29,6 +31,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun conversations(): ConversationDao
 
     abstract fun conversationReadStates(): ConversationReadStateDao
+
+    abstract fun composerDrafts(): ComposerDraftDao
 
     abstract fun messages(): MessageDao
 
@@ -40,12 +44,22 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun mediaAttachments(): MediaAttachmentDao
 
+    abstract fun pendingMessageNotifications(): PendingMessageNotificationDao
+
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
             context.applicationContext,
             AppDatabase::class.java,
             "akashic-mobile.db",
-        ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build()
+        ).addMigrations(
+            MIGRATION_1_2,
+            MIGRATION_2_3,
+            MIGRATION_3_4,
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+            MIGRATION_6_7,
+            MIGRATION_7_8,
+        ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -118,6 +132,84 @@ abstract class AppDatabase : RoomDatabase() {
                         FOREIGN KEY(`sessionId`) REFERENCES `conversations`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE
                     )
                     """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "ALTER TABLE `conversations` ADD COLUMN `remoteKnown` INTEGER NOT NULL DEFAULT 0",
+                )
+                db.execSQL(
+                    """
+                    UPDATE conversations
+                    SET remoteKnown = 1
+                    WHERE EXISTS (
+                        SELECT 1 FROM messages
+                        WHERE messages.sessionId = conversations.sessionId
+                          AND (
+                              messages.serverSeq IS NOT NULL
+                              OR (
+                                  messages.role = 'assistant'
+                                  AND messages.deliveryState IN ('streaming', 'complete', 'interrupted')
+                              )
+                              OR (
+                                  messages.role = 'user'
+                                  AND messages.deliveryState = 'sent'
+                              )
+                          )
+                    )
+                    """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `composer_drafts` (
+                        `sessionId` TEXT NOT NULL,
+                        `serverId` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `replyToMessageId` TEXT,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`sessionId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`sessionId`) REFERENCES `conversations`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_composer_drafts_serverId` ON `composer_drafts` (`serverId`)",
+                )
+            }
+        }
+
+        val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `pending_message_notifications` (
+                        `messageId` TEXT NOT NULL,
+                        `serverId` TEXT NOT NULL,
+                        `sessionId` TEXT NOT NULL,
+                        `content` TEXT NOT NULL,
+                        `hasAttachments` INTEGER NOT NULL,
+                        `attention` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`messageId`) REFERENCES `messages`(`messageId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_serverId` ON `pending_message_notifications` (`serverId`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_createdAt` ON `pending_message_notifications` (`createdAt`)",
                 )
             }
         }

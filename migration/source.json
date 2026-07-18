@@ -1,8 +1,8 @@
 {
-  "layer": "09-media-and-plugin-runtime-v0.7.11",
+  "layer": "10-durable-im-state-v0.8.0",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "76be828fc041a1f41383dd52e3cdc1c991eed835",
+  "source_commit": "794b5a9a9334d0231da9aa3c94bf927c4054d620",
   "source_paths": [
     "clients/android",
     "frontend/chat",

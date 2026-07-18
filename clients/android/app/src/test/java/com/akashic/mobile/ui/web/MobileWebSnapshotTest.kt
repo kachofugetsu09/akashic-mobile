@@ -4,6 +4,7 @@ import com.akashic.mobile.ui.conversation.ConnectionStatusUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.CommandUi
+import com.akashic.mobile.ui.conversation.ComposerDraftUi
 import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
@@ -41,6 +42,7 @@ class MobileWebSnapshotTest {
                     lastMessageAtMillis = 1_752_681_601_000,
                     unreadCount = 1,
                     isRunning = true,
+                    isAvailable = false,
                 ),
             ),
             selectedSessionId = "mobile:test",
@@ -85,6 +87,7 @@ class MobileWebSnapshotTest {
                 ),
             ),
             attachments = emptyList(),
+            composerDraft = ComposerDraftUi("继续检查草稿", "message-1"),
             pendingMessages = listOf(PendingMessageUi("message-1", "你好", 1_752_681_600_000)),
             transferStatus = TransferStatusUi(
                 title = "大文件上传已暂停",
@@ -103,10 +106,11 @@ class MobileWebSnapshotTest {
 
         val encoded = Json.encodeToString(snapshot)
 
-        assertEquals(3, snapshot.protocolVersion)
+        assertEquals(5, snapshot.protocolVersion)
         assertEquals(7, snapshot.projectionGeneration)
         assertEquals(MobileWebConnectionStatus.RECONNECTING, snapshot.connection.status)
         assertTrue(snapshot.sessions.single().isRunning)
+        assertTrue(!snapshot.sessions.single().isAvailable)
         assertEquals(listOf("message-1", "message-2"), snapshot.messages.map { it.id })
         assertEquals(
             listOf(1_752_681_600_100, 1_752_681_601_200),
@@ -129,7 +133,9 @@ class MobileWebSnapshotTest {
         assertEquals(-18, snapshot.readingPosition?.offsetPx)
         assertEquals("message-2", snapshot.navigationTarget?.messageId)
         assertEquals("message-1", snapshot.composer.pendingMessages.single().messageId)
-        assertEquals(3, Json.parseToJsonElement(encoded).jsonObject
+        assertEquals("继续检查草稿", snapshot.composer.draft.text)
+        assertEquals("message-1", snapshot.composer.draft.replyToMessageId)
+        assertEquals(5, Json.parseToJsonElement(encoded).jsonObject
             .getValue("protocolVersion").jsonPrimitive.content.toInt())
         assertTrue(encoded.contains("\"status\":\"reconnecting\""))
         assertTrue(encoded.contains("\"deliveryAction\":\"retry\""))

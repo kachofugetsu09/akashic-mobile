@@ -10,7 +10,8 @@ import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
 import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
-import com.akashic.mobile.data.realtime.finalMessageAttention
+import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
+import com.akashic.mobile.data.realtime.FinalMessageEvent
 import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -23,9 +24,18 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+
+enum class RemoveUnavailableConversationResult {
+    REMOVED,
+    HAS_LOCAL_WORK,
+    NOT_REMOTE,
+}
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
 private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
+private const val MAX_CANONICAL_MESSAGE_ALIASES = 256
 
 @Serializable
 internal data class StoredToolBlock(
@@ -50,6 +60,103 @@ class LocalDeliveryStore(
     private val database: AppDatabase,
     private val mediaCache: MediaCacheStore,
 ) {
+    private val projectionStateMutex = Mutex()
+    private val canonicalMessageAliases = linkedMapOf<String, String>()
+
+    /** 串行校验并保存当前电脑的一份会话草稿。 */
+    suspend fun saveComposerDraft(
+        sessionId: String,
+        text: String,
+        replyToMessageId: String?,
+        expectedServerId: String?,
+        updatedAt: Long,
+    ) = projectionStateMutex.withLock {
+        // 1. 在 WebView 边界限制消息大小并确认会话归属
+        require(text.length <= 65_536) { "会话草稿超过消息长度上限" }
+        val conversation = requireNotNull(database.conversations().get(sessionId)) {
+            "会话草稿对应的会话不存在: $sessionId"
+        }
+        require(conversation.serverId == expectedServerId) { "会话草稿不属于当前电脑" }
+
+        // 2. 引用目标消失属于可恢复状态；跨会话目标仍然是协议错误
+        val resolvedReplyId = replyToMessageId?.let { messageId ->
+            require(messageId.length in 1..512) { "会话草稿引用 ID 无效" }
+            val resolvedMessageId = canonicalMessageAliases[messageId] ?: messageId
+            val target = database.messages().get(resolvedMessageId) ?: return@let null
+            require(target.sessionId == sessionId) { "会话草稿引用不属于当前会话" }
+            resolvedMessageId
+        }
+
+        // 3. 空草稿删除实体，其余状态原样保存供进程重启恢复
+        if (text.isEmpty() && resolvedReplyId == null) {
+            database.composerDrafts().delete(conversation.serverId, sessionId)
+        } else {
+            database.composerDrafts().upsert(
+                ComposerDraftEntity(
+                    sessionId = sessionId,
+                    serverId = conversation.serverId,
+                    text = text,
+                    replyToMessageId = resolvedReplyId,
+                    updatedAt = updatedAt,
+                ),
+            )
+        }
+    }
+
+    /** 串行校验并保存 WebView 当前可见消息锚点。 */
+    suspend fun saveReadingPosition(
+        sessionId: String,
+        messageId: String,
+        offsetPx: Int,
+        expectedServerId: String?,
+        updatedAt: Long,
+    ): Boolean = projectionStateMutex.withLock {
+        // 1. 校验当前投影边界；canonical 迁移后的旧 UI 写入已失效
+        require(offsetPx in -10_000..10_000) { "阅读锚点偏移超出范围" }
+        val conversation = requireNotNull(database.conversations().get(sessionId)) {
+            "阅读位置会话不存在: $sessionId"
+        }
+        require(conversation.serverId == expectedServerId) { "阅读位置会话不属于当前电脑" }
+        val resolvedMessageId = canonicalMessageAliases[messageId] ?: messageId
+        val message = database.messages().get(resolvedMessageId) ?: return@withLock false
+        require(message.sessionId == sessionId) { "阅读锚点不属于当前会话" }
+
+        // 2. 在 canonical 迁移共用的锁内持久化，避免写回已删除身份
+        database.conversationReadStates().savePosition(sessionId, resolvedMessageId, offsetPx, updatedAt)
+        true
+    }
+
+    /** 用户主动进入会话时清除旧锚点，但不提前推进已读水位。 */
+    suspend fun clearReadingPosition(
+        sessionId: String,
+        expectedServerId: String?,
+        updatedAt: Long,
+    ) = projectionStateMutex.withLock {
+        val conversation = requireNotNull(database.conversations().get(sessionId)) {
+            "阅读位置会话不存在: $sessionId"
+        }
+        require(conversation.serverId == expectedServerId) { "阅读位置会话不属于当前电脑" }
+        database.conversationReadStates().clearPosition(sessionId, updatedAt)
+    }
+
+    /** 串行推进已读水位并清除旧阅读锚点。 */
+    suspend fun markSessionReadThrough(
+        sessionId: String,
+        readAt: Long,
+        expectedServerId: String?,
+        updatedAt: Long,
+    ) = projectionStateMutex.withLock {
+        // 1. 校验 WebView 边界输入与当前电脑身份
+        require(readAt >= 0) { "已读水位不能为负数" }
+        val conversation = requireNotNull(database.conversations().get(sessionId)) {
+            "已读水位会话不存在: $sessionId"
+        }
+        require(conversation.serverId == expectedServerId) { "已读水位会话不属于当前电脑" }
+
+        // 2. 与保存及 canonical 迁移共用同一写序
+        database.conversationReadStates().markReadThrough(sessionId, readAt, updatedAt)
+    }
+
     suspend fun savePairedProfile(profile: ServerProfileEntity, cursor: RealtimeCursorEntity) {
         database.withTransaction {
             database.serverProfiles().upsert(profile)
@@ -85,13 +192,48 @@ class LocalDeliveryStore(
     /** 清除可从服务端恢复的投影与附件缓存，同时保留配对和未发送工作。 */
     suspend fun clearReloadableCache(serverId: String, preservedSessionId: String?) {
         // 1. 原子移除已提交消息，保留待发送消息、草稿和连接身份
-        database.withTransaction {
-            database.messages().deleteReloadableServerCache(serverId)
-            database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
+        projectionStateMutex.withLock {
+            database.withTransaction {
+                database.messages().deleteReloadableServerCache(serverId)
+                database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
+            }
         }
 
         // 2. 删除失去消息引用的附件文件和描述符
         mediaCache.reconcile()
+    }
+
+    /** 删除服务端已不存在、且没有未发送工作的本机会话副本。 */
+    suspend fun removeUnavailableConversation(
+        serverId: String,
+        sessionId: String,
+    ): RemoveUnavailableConversationResult = projectionStateMutex.withLock {
+        // 1. 在持久化边界重新确认会话归属和可删除状态
+        val result = database.withTransaction {
+            val conversation = requireNotNull(database.conversations().get(sessionId)) {
+                "Unknown conversation: $sessionId"
+            }
+            require(conversation.serverId == serverId) { "Conversation belongs to another server" }
+            if (!conversation.remoteKnown) {
+                return@withTransaction RemoveUnavailableConversationResult.NOT_REMOTE
+            }
+            if (
+                database.messages().countLocalWorkForSession(sessionId) > 0 ||
+                database.attachmentTransfers().drafts(serverId, sessionId).isNotEmpty() ||
+                database.composerDrafts().get(serverId, sessionId) != null
+            ) {
+                return@withTransaction RemoveUnavailableConversationResult.HAS_LOCAL_WORK
+            }
+
+            // 2. 删除本地投影，依靠外键清理消息、已读锚点和媒体描述符
+            database.attachmentTransfers().deleteSentForSession(serverId, sessionId)
+            check(database.conversations().delete(serverId, sessionId) == 1)
+            RemoveUnavailableConversationResult.REMOVED
+        }
+
+        // 3. 删除失去数据库引用的缓存文件
+        if (result == RemoveUnavailableConversationResult.REMOVED) mediaCache.reconcile()
+        result
     }
 
     /** 在同一事务应用有序事件并推进持久化 cursor。 */
@@ -101,11 +243,11 @@ class LocalDeliveryStore(
         envelope: WireEnvelope,
         updatedAt: Long,
         preservedSessionId: String? = null,
-    ): Long {
+    ): Long = projectionStateMutex.withLock {
         require(envelope.kind == WireKind.EVENT) { "Only event envelopes can advance the cursor" }
         val eventSeq = requireNotNull(envelope.eventSeq)
         val connectionEpoch = requireNotNull(envelope.connectionEpoch)
-        return database.withTransaction {
+        database.withTransaction {
             val cursor = requireNotNull(database.realtimeCursors().get(deviceId)) {
                 "Realtime cursor is missing for device $deviceId"
             }
@@ -124,8 +266,30 @@ class LocalDeliveryStore(
                 "Event sequence gap: expected ${cursor.lastAcknowledgedEventSeq + 1}, got $eventSeq"
             }
 
-            if (envelope.type == "message.final") finalMessageAttention(envelope.payload)
-            applyEventContent(serverId, envelope, updatedAt)
+            val delivered = if (envelope.type in DELIVERED_MESSAGE_EVENTS) {
+                deliveredFinalMessageEvent(envelope)
+            } else {
+                null
+            }
+            envelope.sessionId?.let { sessionId ->
+                if (envelope.type in REMOTE_SESSION_EVENTS) {
+                    ensureRemoteConversation(serverId, sessionId, updatedAt)
+                }
+            }
+            applyEventContent(serverId, envelope, delivered, updatedAt)
+            delivered?.let { event ->
+                database.pendingMessageNotifications().upsert(
+                    PendingMessageNotificationEntity(
+                        messageId = event.messageId,
+                        serverId = serverId,
+                        sessionId = event.sessionId,
+                        content = event.content,
+                        hasAttachments = event.hasAttachments,
+                        attention = event.attention.name,
+                        createdAt = updatedAt,
+                    ),
+                )
+            }
             val changed = database.realtimeCursors().advance(
                 deviceId = deviceId,
                 throughEventSeq = eventSeq,
@@ -152,6 +316,9 @@ class LocalDeliveryStore(
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+            check(database.conversations().markRemoteKnown(requireNotNull(envelope.sessionId)) == 1) {
+                "Outbox ACK 对应的会话投影不存在: ${envelope.sessionId}"
+            }
             val changed = database.messages().updateDelivery(payload.clientMessageId, "sent", updatedAt)
             check(changed == 1) { "Outbox message is missing: ${payload.clientMessageId}" }
             if (payload.mediaRefs.isNotEmpty()) {
@@ -179,6 +346,20 @@ class LocalDeliveryStore(
                 check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
             }
             check(database.outbox().markFailed(commandId, state) == 1)
+        }
+    }
+
+    /** 在写入 WebSocket 前保留已失效会话的待发命令。 */
+    suspend fun retainUnsentOutbox(commandId: String, updatedAt: Long) {
+        database.withTransaction {
+            val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
+            val envelope = ProtocolCodec.decode(command.envelopeJson)
+            val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+            check(database.messages().updateDelivery(payload.clientMessageId, "failed_retryable", updatedAt) == 1)
+            if (payload.mediaRefs.isNotEmpty()) {
+                check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+            }
+            check(database.outbox().markUnsentFailed(commandId) == 1)
         }
     }
 
@@ -255,7 +436,12 @@ class LocalDeliveryStore(
             true
         }
 
-    private suspend fun applyEventContent(serverId: String, envelope: WireEnvelope, updatedAt: Long) {
+    private suspend fun applyEventContent(
+        serverId: String,
+        envelope: WireEnvelope,
+        delivered: FinalMessageEvent?,
+        updatedAt: Long,
+    ) {
         when (envelope.type) {
             "session.list" -> applySessionList(serverId, envelope)
             "session.created", "session.updated" -> upsertConversation(serverId, envelope, updatedAt)
@@ -265,9 +451,9 @@ class LocalDeliveryStore(
             "react.tool.started" -> startTool(envelope, updatedAt)
             "react.tool.completed" -> completeTool(envelope, updatedAt)
             "answer.delta" -> appendAnswer(envelope, updatedAt)
-            "message.final" -> finalizeMessage(envelope, updatedAt)
+            "message.final" -> finalizeMessage(envelope, requireNotNull(delivered), updatedAt)
             "turn.interrupted" -> interruptTurn(envelope, updatedAt)
-            "message.proactive" -> insertProactive(envelope, updatedAt)
+            "message.proactive" -> insertProactive(envelope, requireNotNull(delivered), updatedAt)
             "attachment.progress" -> applyAttachmentProgress(envelope, updatedAt)
             "attachment.ready" -> applyAttachmentReady(envelope, updatedAt)
             else -> Unit
@@ -324,6 +510,7 @@ class LocalDeliveryStore(
                     serverId = serverId,
                     title = item.title,
                     updatedAt = Instant.parse(item.updatedAt).toEpochMilli(),
+                    remoteKnown = true,
                 ),
             )
         }
@@ -337,8 +524,16 @@ class LocalDeliveryStore(
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
         if (database.conversations().get(sessionId) == null) {
             database.conversations().upsert(
-                ConversationEntity(sessionId, serverId, "新对话", System.currentTimeMillis()),
+                ConversationEntity(
+                    sessionId,
+                    serverId,
+                    "新对话",
+                    System.currentTimeMillis(),
+                    remoteKnown = true,
+                ),
             )
+        } else {
+            check(database.conversations().markRemoteKnown(sessionId) == 1)
         }
         payload.items.forEach { remote ->
             require(remote.sessionKey == sessionId) { "History item session mismatch" }
@@ -474,8 +669,23 @@ class LocalDeliveryStore(
                 serverId = current?.serverId ?: serverId,
                 title = payloadText(envelope, "title") ?: current?.title ?: "新对话",
                 updatedAt = updatedAt,
+                remoteKnown = true,
             ),
         )
+    }
+
+    private suspend fun ensureRemoteConversation(serverId: String, sessionId: String, updatedAt: Long) {
+        val current = database.conversations().get(sessionId)
+        if (current == null) {
+            database.conversations().upsert(
+                ConversationEntity(sessionId, serverId, "新对话", updatedAt, remoteKnown = true),
+            )
+            return
+        }
+        require(current.serverId == serverId) { "远端事件会话不属于当前电脑" }
+        if (!current.remoteKnown) {
+            check(database.conversations().markRemoteKnown(sessionId) == 1)
+        }
     }
 
     private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
@@ -623,7 +833,11 @@ class LocalDeliveryStore(
         )
     }
 
-    private suspend fun finalizeMessage(envelope: WireEnvelope, updatedAt: Long) {
+    private suspend fun finalizeMessage(
+        envelope: WireEnvelope,
+        delivered: FinalMessageEvent,
+        updatedAt: Long,
+    ) {
         canonicalizeUserMessage(envelope, updatedAt)
         val current = ensureAssistantTurn(envelope, updatedAt)
         val blocks = database.messages().getBlocks(current.messageId)
@@ -645,12 +859,11 @@ class LocalDeliveryStore(
                 ),
             )
         }
-        val canonicalId = payloadText(envelope, "message_id")
-            ?: "ephemeral:${requireNotNull(envelope.id) { "Final event has no frame id" }}"
+        val canonicalId = delivered.messageId
         require(canonicalId.isNotBlank() && canonicalId.length <= 512) { "Canonical message id is invalid" }
         val canonical = current.copy(
             messageId = canonicalId,
-            text = payloadText(envelope, "text") ?: payloadText(envelope, "content") ?: current.text,
+            text = delivered.content.ifEmpty { current.text },
             deliveryState = "complete",
             updatedAt = updatedAt,
         )
@@ -720,9 +933,17 @@ class LocalDeliveryStore(
 
         // 2. 将阅读位置与流式子项迁移后删除旧身份
         database.conversationReadStates().moveAnchor(source.sessionId, sourceId, canonical.messageId)
+        database.composerDrafts().moveReplyTarget(source.sessionId, sourceId, canonical.messageId)
         messages.moveBlocks(sourceId, canonical.messageId)
         media.moveLinks(sourceId, canonical.messageId)
         check(messages.delete(sourceId) == 1) { "Source message disappeared during canonical merge" }
+        canonicalMessageAliases.entries.forEach { alias ->
+            if (alias.value == sourceId) alias.setValue(canonical.messageId)
+        }
+        canonicalMessageAliases[sourceId] = canonical.messageId
+        if (canonicalMessageAliases.size > MAX_CANONICAL_MESSAGE_ALIASES) {
+            canonicalMessageAliases.remove(canonicalMessageAliases.keys.first())
+        }
     }
 
     private suspend fun interruptTurn(envelope: WireEnvelope, updatedAt: Long) {
@@ -731,16 +952,20 @@ class LocalDeliveryStore(
         database.messages().completeRunningBlocks(current.messageId, updatedAt)
     }
 
-    private suspend fun insertProactive(envelope: WireEnvelope, updatedAt: Long) {
-        val sessionId = requireNotNull(envelope.sessionId) { "Proactive event has no session_id" }
-        val messageId = "proactive:${requireNotNull(envelope.id)}"
+    private suspend fun insertProactive(
+        envelope: WireEnvelope,
+        delivered: FinalMessageEvent,
+        updatedAt: Long,
+    ) {
+        val sessionId = delivered.sessionId
+        val messageId = delivered.messageId
         database.messages().upsert(
             MessageEntity(
                 messageId = messageId,
                 clientMessageId = null,
                 sessionId = sessionId,
                 role = "assistant",
-                text = payloadText(envelope, "text") ?: payloadText(envelope, "content") ?: "",
+                text = delivered.content,
                 deliveryState = "complete",
                 createdAt = updatedAt,
                 updatedAt = updatedAt,
@@ -843,6 +1068,14 @@ class LocalDeliveryStore(
     private companion object {
         const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
         const val AUTO_DOWNLOAD_LIMIT_BYTES = 10L * 1024 * 1024
+        val REMOTE_SESSION_EVENTS = setOf(
+            "session.created",
+            "session.updated",
+            "history.page",
+            "turn.started",
+            "message.proactive",
+        )
+        val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val FRAME_ID = Regex(
             "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +

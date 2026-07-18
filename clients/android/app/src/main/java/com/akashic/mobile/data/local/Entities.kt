@@ -37,6 +37,7 @@ data class ConversationEntity(
     val serverId: String,
     val title: String,
     val updatedAt: Long,
+    val remoteKnown: Boolean = false,
 )
 
 @Entity(
@@ -58,6 +59,32 @@ data class ConversationReadStateEntity(
     val updatedAt: Long,
 )
 
+@Entity(
+    tableName = "composer_drafts",
+    foreignKeys = [
+        ForeignKey(
+            entity = ServerProfileEntity::class,
+            parentColumns = ["serverId"],
+            childColumns = ["serverId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = ConversationEntity::class,
+            parentColumns = ["sessionId"],
+            childColumns = ["sessionId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("serverId")],
+)
+data class ComposerDraftEntity(
+    @PrimaryKey val sessionId: String,
+    val serverId: String,
+    val text: String,
+    val replyToMessageId: String?,
+    val updatedAt: Long,
+)
+
 data class ConversationSummary(
     val sessionId: String,
     val title: String,
@@ -67,7 +94,17 @@ data class ConversationSummary(
     val isRunning: Boolean,
     val anchorMessageId: String?,
     val anchorOffsetPx: Int,
+    val remoteKnown: Boolean,
+    val hasLocalWork: Boolean,
 )
+
+fun ConversationSummary.isRemoteMissingIn(remoteSessionIds: Set<String>?): Boolean =
+    remoteSessionIds != null &&
+        sessionId !in remoteSessionIds &&
+        remoteKnown
+
+fun ConversationSummary.canRemoveFrom(remoteSessionIds: Set<String>?): Boolean =
+    isRemoteMissingIn(remoteSessionIds) && !hasLocalWork
 
 @Entity(
     tableName = "messages",
@@ -94,6 +131,34 @@ data class MessageEntity(
     val replyToMessageId: String? = null,
     val replyRole: String? = null,
     val replyPreview: String? = null,
+)
+
+@Entity(
+    tableName = "pending_message_notifications",
+    foreignKeys = [
+        ForeignKey(
+            entity = ServerProfileEntity::class,
+            parentColumns = ["serverId"],
+            childColumns = ["serverId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = MessageEntity::class,
+            parentColumns = ["messageId"],
+            childColumns = ["messageId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("serverId"), Index("createdAt")],
+)
+data class PendingMessageNotificationEntity(
+    @PrimaryKey val messageId: String,
+    val serverId: String,
+    val sessionId: String,
+    val content: String,
+    val hasAttachments: Boolean,
+    val attention: String,
+    val createdAt: Long,
 )
 
 @Entity(

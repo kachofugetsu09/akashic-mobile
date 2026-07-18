@@ -18,6 +18,17 @@ export interface MobileSearchIndexEntry {
   matches: boolean;
 }
 
+export interface MobileSelectableMessage {
+  id: string;
+  sessionId: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: number;
+  streaming: boolean;
+  replyable: boolean;
+  attachments: { filename: string }[];
+}
+
 export interface MobileUnreadViewportState {
   isAtBottom: boolean;
   escapedFromLock: boolean;
@@ -35,6 +46,77 @@ export interface MobileProjectionBaselineState {
   rebuilding: boolean;
 }
 
+export interface MobileReadingAnchor {
+  messageId: string;
+  offsetPx: number;
+}
+
+/** 同步原生阅读锚点，并把明确清除锚点解释为回到会话末尾。 */
+export function updateMobileReadingRestoreTarget<T extends MobileReadingAnchor>(
+  current: T | null | undefined,
+  next: T | undefined,
+) {
+  const normalized = next ?? null;
+  if (
+    current?.messageId === normalized?.messageId
+    && current?.offsetPx === normalized?.offsetPx
+  ) return current ?? null;
+  return normalized;
+}
+
+export interface MobileComposerDraft {
+  text: string;
+  replyToMessageId?: string;
+}
+
+export interface MobileComposerDraftWrite extends MobileComposerDraft {
+  sessionId: string;
+}
+
+export interface MobileComposerDraftResolution<T extends MobileSelectableMessage> {
+  text: string;
+  replyTarget: T | null;
+  cleanedDraft?: MobileComposerDraft;
+}
+
+export interface MobileComposerKeyboardEvent {
+  key: string;
+  ctrlKey: boolean;
+  metaKey: boolean;
+  isComposing: boolean;
+}
+
+export interface MobileComposerTextareaMetrics {
+  height: number;
+  overflowY: "auto" | "hidden";
+}
+
+export interface MobileReplyNavigationMessage {
+  role: "user" | "assistant";
+  createdAt: number;
+}
+
+export interface MobileSelectionActionAvailability {
+  exit: boolean;
+  reply: boolean;
+  copy: boolean;
+  share: boolean;
+}
+
+export const MOBILE_COMPOSER_DRAFT_MAX_LENGTH = 65_536;
+
+export function normalizeMobileComposerDraftText(text: string) {
+  return text.slice(0, MOBILE_COMPOSER_DRAFT_MAX_LENGTH);
+}
+
+export function flushMobileComposerBeforePairing(
+  flush: () => void,
+  restartPairing: () => void,
+) {
+  flush();
+  restartPairing();
+}
+
 export function allMobileAttachmentsReady(attachments: readonly { state: string }[]) {
   return attachments.every((attachment) => attachment.state === "ready");
 }
@@ -46,6 +128,164 @@ export function isMobileImageViewerHistoryState(state: unknown, attachmentId: st
 
 export function normalizeMobileSearchText(value: string) {
   return value.toLocaleLowerCase("zh-CN");
+}
+
+export function selectableMobileMessages<T extends MobileSelectableMessage>(
+  messages: readonly T[],
+  selectedIds: ReadonlySet<string>,
+) {
+  return messages.filter((message) => selectedIds.has(message.id) && !message.streaming);
+}
+
+export function reconcileMobileMessageSelection<T extends MobileSelectableMessage>(
+  selectedIds: ReadonlySet<string>,
+  messages: readonly T[],
+) {
+  const visibleIds = new Set(
+    messages.filter((message) => !message.streaming).map((message) => message.id),
+  );
+  return new Set([...selectedIds].filter((messageId) => visibleIds.has(messageId)));
+}
+
+export function mobileMessageHasCopyContent(message: MobileSelectableMessage) {
+  return Boolean(message.content.trim()) || message.attachments.length > 0;
+}
+
+export function mobileMessageCanReply(
+  message: MobileSelectableMessage,
+  selectedSessionId: string | null | undefined,
+) {
+  return message.replyable && message.sessionId === selectedSessionId;
+}
+
+/** 只在当前投影中解析引用目标，避免跳到别的会话或过期历史。 */
+export function resolveMobileReplyNavigationTarget<T extends { id: string }>(
+  replyMessageId: string,
+  messages: readonly T[],
+) {
+  return messages.find((message) => message.id === replyMessageId) ?? null;
+}
+
+export function formatMobileReplyNavigationAnnouncement(
+  message: MobileReplyNavigationMessage,
+  formatTime: (createdAt: number) => string,
+) {
+  return `已跳到${message.role === "assistant" ? "Akashic" : "你"} ${formatTime(message.createdAt)} 的消息`;
+}
+
+/** 把原生草稿解析为当前会话可展示的文字与引用。 */
+export function resolveMobileComposerDraft<T extends MobileSelectableMessage>(
+  draft: MobileComposerDraft,
+  messages: readonly T[],
+  selectedSessionId: string | null | undefined,
+): MobileComposerDraftResolution<T> {
+  // 1. 没有引用时直接使用原生 owner 的文字
+  if (!draft.replyToMessageId) return { text: draft.text, replyTarget: null };
+
+  // 2. 只恢复仍属于当前会话且允许引用的目标
+  const target = messages.find((message) => message.id === draft.replyToMessageId);
+  if (target && mobileMessageCanReply(target, selectedSessionId)) {
+    return { text: draft.text, replyTarget: target };
+  }
+  return {
+    text: draft.text,
+    replyTarget: null,
+    cleanedDraft: { text: draft.text },
+  };
+}
+
+/** 在调度时捕获会话身份，避免延迟写入落到后续选中的会话。 */
+export function captureMobileComposerDraftWrite(
+  sessionId: string | null | undefined,
+  text: string,
+  replyToMessageId?: string,
+): MobileComposerDraftWrite | null {
+  if (!sessionId) return null;
+  return {
+    sessionId,
+    text,
+    ...(replyToMessageId ? { replyToMessageId } : {}),
+  };
+}
+
+export function mobileComposerDraftMatches(
+  draft: MobileComposerDraft,
+  expected: MobileComposerDraft,
+) {
+  return draft.text === expected.text
+    && (draft.replyToMessageId ?? undefined) === (expected.replyToMessageId ?? undefined);
+}
+
+/** 在原生确认写入前保持乐观草稿，避免旧快照复活已发送内容。 */
+export function mobileComposerDraftHydration(
+  owner: MobileComposerDraft,
+  optimistic: MobileComposerDraftWrite | undefined,
+) {
+  const ownerAcknowledged = optimistic !== undefined
+    && mobileComposerDraftMatches(owner, optimistic);
+  return {
+    draft: optimistic !== undefined && !ownerAcknowledged ? optimistic : owner,
+    ownerAcknowledged,
+  };
+}
+
+export function shouldClearAcceptedMobileComposerDraft(
+  active: MobileComposerDraftWrite | null,
+  sent: MobileComposerDraftWrite,
+) {
+  if (active?.sessionId !== sent.sessionId) return true;
+  return mobileComposerDraftMatches(active, sent);
+}
+
+/** 只把显式桌面快捷键解释为发送，普通回车始终留给输入法换行。 */
+export function shouldSubmitMobileComposerKey(event: MobileComposerKeyboardEvent) {
+  return event.key === "Enter"
+    && !event.isComposing
+    && (event.ctrlKey || event.metaKey);
+}
+
+export function shouldClearMobileSelectionAfterShare(
+  pendingRequestId: string | null,
+  resultRequestId: string,
+  launched: boolean,
+) {
+  return pendingRequestId === resultRequestId && launched;
+}
+
+export function mobileSelectionActionAvailability(
+  sharePending: boolean,
+  capabilities: Omit<MobileSelectionActionAvailability, "exit">,
+): MobileSelectionActionAvailability {
+  if (sharePending) return { exit: false, reply: false, copy: false, share: false };
+  return { exit: true, ...capabilities };
+}
+
+/** 把输入内容高度限制在一至六行之间，超过后交给 textarea 内部滚动。 */
+export function mobileComposerTextareaMetrics(scrollHeight: number): MobileComposerTextareaMetrics {
+  const height = Math.min(164, Math.max(44, Math.ceil(scrollHeight)));
+  return {
+    height,
+    overflowY: scrollHeight > 164 ? "auto" : "hidden",
+  };
+}
+
+export function formatMobileSelectionCopyText(
+  messages: readonly MobileSelectableMessage[],
+  formatTimestamp: (createdAt: number) => string,
+) {
+  const copyable = messages.filter(mobileMessageHasCopyContent);
+  if (copyable.length === 1) return mobileMessageCopyBody(copyable[0]);
+  return copyable.map((message) => [
+    `${message.role === "assistant" ? "Akashic" : "你"} · ${formatTimestamp(message.createdAt)}`,
+    mobileMessageCopyBody(message),
+  ].join("\n")).join("\n\n");
+}
+
+function mobileMessageCopyBody(message: MobileSelectableMessage) {
+  return [
+    message.content.trim(),
+    ...message.attachments.map((attachment) => `[附件] ${attachment.filename}`),
+  ].filter(Boolean).join("\n");
 }
 
 /** 只重算查询变化或原生修订号发生变化的消息搜索项。 */

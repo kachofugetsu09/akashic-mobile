@@ -13,6 +13,7 @@ import {
 import { useStickToBottomContext } from "use-stick-to-bottom";
 import {
   AlertCircle,
+  ArchiveX,
   ArrowLeft,
   Check,
   ChevronRight,
@@ -45,7 +46,10 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
+  DialogDescription,
+  DialogFooter,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
@@ -63,10 +67,31 @@ import {
   advanceMobileProjectionBaseline,
   advanceMobileUnreadTracking,
   allMobileAttachmentsReady,
+  captureMobileComposerDraftWrite,
+  formatMobileReplyNavigationAnnouncement,
+  flushMobileComposerBeforePairing,
+  formatMobileSelectionCopyText,
   isMobileImageViewerHistoryState,
+  mobileMessageCanReply,
+  mobileMessageHasCopyContent,
+  mobileSelectionActionAvailability,
+  mobileComposerTextareaMetrics,
+  mobileComposerDraftHydration,
+  MOBILE_COMPOSER_DRAFT_MAX_LENGTH,
+  normalizeMobileComposerDraftText,
   normalizeMobileSearchText,
+  reconcileMobileMessageSelection,
+  resolveMobileComposerDraft,
+  resolveMobileReplyNavigationTarget,
+  selectableMobileMessages,
+  shouldClearAcceptedMobileComposerDraft,
+  shouldClearMobileSelectionAfterShare,
+  shouldSubmitMobileComposerKey,
+  updateMobileReadingRestoreTarget,
   updateMobileSearchIndex,
   type MobileSearchIndexEntry,
+  type MobileComposerDraft,
+  type MobileComposerDraftWrite,
 } from "./mobile-message-state";
 import type { AgentBlock, ChatMessage } from "./main";
 import {
@@ -146,6 +171,8 @@ interface MobileSession {
   lastMessageAt?: number;
   unreadCount: number;
   isRunning: boolean;
+  isAvailable: boolean;
+  canRemove: boolean;
 }
 
 interface MobileReadingPosition {
@@ -165,7 +192,7 @@ interface MobilePendingMessage {
 }
 
 export interface MobileSnapshot {
-  protocolVersion: 3;
+  protocolVersion: 5;
   connection: {
     label: string;
     status: ConnectionStatus;
@@ -180,6 +207,7 @@ export interface MobileSnapshot {
   messages: MobileMessage[];
   pluginResponses: { requestId: string; resultJson?: string; error?: string }[];
   composer: {
+    draft: MobileComposerDraft;
     attachments: MobileAttachment[];
     pendingMessages: MobilePendingMessage[];
     transferStatus?: MobileTransferStatus;
@@ -197,6 +225,7 @@ interface NativeBridge {
   reportReady(): void;
   requestSnapshot(): void;
   selectSession(sessionId: string): void;
+  removeUnavailableSession(sessionId: string): void;
   createSession(): void;
   restartPairing(): void;
   reloadFromServer(): void;
@@ -215,6 +244,8 @@ interface NativeBridge {
   saveDownloadedAttachment(attachmentId: string): void;
   setWebHistoryActive(active: boolean): void;
   dismissError(): void;
+  shareText(requestId: string, text: string): void;
+  saveComposerDraft(sessionId: string, text: string, replyToMessageId: string): void;
   sendMessage(requestId: string, text: string, replyToMessageId: string, attachmentIdsJson: string): void;
   copyText(text: string): void;
   performActionHaptic(): void;
@@ -388,7 +419,7 @@ function parseTransferStatus(value: unknown): MobileTransferStatus {
 function parseMobileSnapshot(value: unknown): MobileSnapshot {
   // 1. 校验协议版本与根对象
   const raw = requireRecord(value, "snapshot");
-  if (raw.protocolVersion !== 3) throw new Error(`不支持的移动端协议版本: ${String(raw.protocolVersion)}`);
+  if (raw.protocolVersion !== 5) throw new Error(`不支持的移动端协议版本: ${String(raw.protocolVersion)}`);
   const connection = requireRecord(raw.connection, "connection");
   const status = requireString(connection.status, "connection.status");
   if (!["connecting", "ready", "degraded", "reconnecting", "disconnected"].includes(status)) {
@@ -408,6 +439,8 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
       lastMessageAt,
       unreadCount: requireNonNegativeInteger(session.unreadCount, `sessions[${index}].unreadCount`),
       isRunning: requireBoolean(session.isRunning, `sessions[${index}].isRunning`),
+      isAvailable: requireBoolean(session.isAvailable, `sessions[${index}].isAvailable`),
+      canRemove: requireBoolean(session.canRemove, `sessions[${index}].canRemove`),
     };
   });
   const messages = requireArray(raw.messages, "messages", parseMessage);
@@ -445,7 +478,7 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
       };
     })();
   return {
-    protocolVersion: 3,
+    protocolVersion: 5,
     connection: {
       label: requireString(connection.label, "connection.label"),
       status: status as ConnectionStatus,
@@ -460,6 +493,13 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
     messages,
     pluginResponses,
     composer: {
+      draft: (() => {
+        const draft = requireRecord(composer.draft, "composer.draft");
+        return {
+          text: requireString(draft.text, "composer.draft.text"),
+          replyToMessageId: optionalString(draft.replyToMessageId, "composer.draft.replyToMessageId"),
+        };
+      })(),
       attachments: requireArray(composer.attachments, "composer.attachments", parseAttachment),
       pendingMessages: requireArray(composer.pendingMessages, "composer.pendingMessages", (item, index) => {
         const pending = requireRecord(item, `composer.pendingMessages[${index}]`);
@@ -496,6 +536,7 @@ declare global {
       receiveSnapshot(snapshot: unknown): void;
       receivePluginAssets(assets: MobilePluginAsset[]): void;
       receiveSendResult(requestId: string, accepted: boolean): void;
+      receiveShareResult(requestId: string, launched: boolean): void;
       navigateBack(): boolean;
     };
   }
@@ -517,6 +558,11 @@ function MobileNativeApp() {
   const [input, setInput] = useState("");
   const [replyTarget, setReplyTarget] = useState<MobileMessage | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [missingReplySourceId, setMissingReplySourceId] = useState<string | null>(null);
+  const [replyNavigationAnnouncement, setReplyNavigationAnnouncement] = useState("");
+  const [sharePending, setSharePending] = useState(false);
+  const [shareStatus, setShareStatus] = useState<string | null>(null);
+  const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(() => new Set());
   const [recoveringMessageIds, setRecoveringMessageIds] = useState<Set<string>>(() => new Set());
   const [stopRequested, setStopRequested] = useState(false);
   const [sendPending, setSendPending] = useState(false);
@@ -532,12 +578,80 @@ function MobileNativeApp() {
   const normalizedSearchQueryRef = useRef("");
   const messageElementsRef = useRef(new Map<string, HTMLDivElement>());
   const copiedTimerRef = useRef<number | null>(null);
+  const missingReplyTimerRef = useRef<number | null>(null);
+  const replyAnnouncementTimerRef = useRef<number | null>(null);
   const searchFocusTimerRef = useRef<number | null>(null);
   const searchHighlightTimerRef = useRef<number | null>(null);
   const previousSessionIdRef = useRef<string | undefined>(undefined);
   const handledNavigationTargetRef = useRef<string | undefined>(undefined);
-  const pendingSendRequestRef = useRef<string | null>(null);
+  const pendingSendRequestRef = useRef<{
+    requestId: string;
+    draft: MobileComposerDraftWrite;
+  } | null>(null);
+  const pendingShareRequestRef = useRef<string | null>(null);
   const surfaceRef = useRef<MobileSurface>({ kind: "chat" });
+  const selectionActiveRef = useRef(false);
+  const activeComposerDraftRef = useRef<MobileComposerDraftWrite | null>(null);
+  const pendingComposerDraftRef = useRef<MobileComposerDraftWrite | null>(null);
+  const optimisticComposerDraftsRef = useRef(new Map<string, MobileComposerDraftWrite>());
+  const composerDraftTimerRef = useRef<number | null>(null);
+
+  const saveComposerDraft = useCallback((draft: MobileComposerDraftWrite) => {
+    optimisticComposerDraftsRef.current.set(draft.sessionId, draft);
+    window.AkashicNative?.saveComposerDraft(
+      draft.sessionId,
+      draft.text,
+      draft.replyToMessageId ?? "",
+    );
+  }, []);
+
+  const flushComposerDraft = useCallback(() => {
+    if (composerDraftTimerRef.current !== null) {
+      window.clearTimeout(composerDraftTimerRef.current);
+      composerDraftTimerRef.current = null;
+    }
+    const pending = pendingComposerDraftRef.current;
+    pendingComposerDraftRef.current = null;
+    if (pending) saveComposerDraft(pending);
+  }, [saveComposerDraft]);
+
+  const scheduleComposerDraft = useCallback((draft: MobileComposerDraftWrite) => {
+    pendingComposerDraftRef.current = draft;
+    if (composerDraftTimerRef.current !== null) window.clearTimeout(composerDraftTimerRef.current);
+    composerDraftTimerRef.current = window.setTimeout(() => {
+      composerDraftTimerRef.current = null;
+      const pending = pendingComposerDraftRef.current;
+      pendingComposerDraftRef.current = null;
+      if (pending) saveComposerDraft(pending);
+    }, 250);
+  }, [saveComposerDraft]);
+
+  const updateComposerDraft = useCallback((text: string, target: MobileMessage | null) => {
+    const current = activeComposerDraftRef.current;
+    const normalizedText = normalizeMobileComposerDraftText(text);
+    const draft = captureMobileComposerDraftWrite(current?.sessionId, normalizedText, target?.id);
+    setInput(normalizedText);
+    setReplyTarget(target);
+    if (!draft) return;
+    activeComposerDraftRef.current = draft;
+    optimisticComposerDraftsRef.current.delete(draft.sessionId);
+    scheduleComposerDraft(draft);
+  }, [scheduleComposerDraft]);
+
+  const clearAcceptedComposerDraft = useCallback((sessionId: string) => {
+    const current = activeComposerDraftRef.current;
+    const cleared = { sessionId, text: "" };
+    if (current?.sessionId !== sessionId) {
+      saveComposerDraft(cleared);
+      return;
+    }
+    if (composerDraftTimerRef.current !== null) {
+      window.clearTimeout(composerDraftTimerRef.current);
+      composerDraftTimerRef.current = null;
+    }
+    pendingComposerDraftRef.current = null;
+    saveComposerDraft(cleared);
+  }, [saveComposerDraft]);
 
   useEffect(() => {
     let pending: MobileSnapshot | null = null;
@@ -549,6 +663,8 @@ function MobileNativeApp() {
       window.AkashicNative?.requestSnapshot();
       requestTimer = window.setTimeout(requestSnapshot, 250);
     };
+    const previousScrollRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = "manual";
     replaceMobileSurface(window.history, { kind: "chat" });
     const handlePopState = (event: PopStateEvent) => {
       const next = readMobileSurfaceHistoryState(event.state);
@@ -597,17 +713,43 @@ function MobileNativeApp() {
         );
       },
       receiveSendResult(requestId, accepted) {
-        if (pendingSendRequestRef.current !== requestId) return;
+        const pendingSend = pendingSendRequestRef.current;
+        if (pendingSend?.requestId !== requestId) return;
         pendingSendRequestRef.current = null;
         setSendPending(false);
         if (!accepted) return;
         setSendScrollRequest((current) => current + 1);
-        setInput("");
-        setReplyTarget(null);
+        if (shouldClearAcceptedMobileComposerDraft(activeComposerDraftRef.current, pendingSend.draft)) {
+          clearAcceptedComposerDraft(pendingSend.draft.sessionId);
+        } else {
+          flushComposerDraft();
+        }
         setCommandsOpen(false);
         textareaRef.current?.blur();
       },
+      receiveShareResult(requestId, launched) {
+        const pendingRequestId = pendingShareRequestRef.current;
+        if (pendingRequestId !== requestId) return;
+        pendingShareRequestRef.current = null;
+        setSharePending(false);
+        if (shouldClearMobileSelectionAfterShare(pendingRequestId, requestId, launched)) {
+          selectionActiveRef.current = false;
+          setSelectedMessageIds(new Set());
+          setShareStatus(null);
+          return;
+        }
+        setShareStatus("分享未打开，请重试");
+      },
       navigateBack() {
+        if (selectionActiveRef.current) {
+          if (pendingShareRequestRef.current !== null) return true;
+          pendingShareRequestRef.current = null;
+          setSharePending(false);
+          setShareStatus(null);
+          selectionActiveRef.current = false;
+          setSelectedMessageIds(new Set());
+          return true;
+        }
         const historyState = window.history.state;
         if (
           typeof historyState === "object" &&
@@ -628,9 +770,10 @@ function MobileNativeApp() {
       if (frame !== null) cancelAnimationFrame(frame);
       if (requestTimer !== null) window.clearTimeout(requestTimer);
       window.removeEventListener("popstate", handlePopState);
+      window.history.scrollRestoration = previousScrollRestoration;
       delete window.AkashicMobile;
     };
-  }, []);
+  }, [clearAcceptedComposerDraft, flushComposerDraft]);
 
   useEffect(() => {
     if (snapshot?.composer.isStopping || !snapshot?.composer.canStop || snapshot?.connection.error) {
@@ -638,11 +781,77 @@ function MobileNativeApp() {
     }
   }, [snapshot?.composer.canStop, snapshot?.composer.isStopping, snapshot?.connection.error]);
 
+  useLayoutEffect(() => {
+    const sessionId = snapshot?.selectedSessionId;
+    const previous = activeComposerDraftRef.current;
+    if (!snapshot || !sessionId) {
+      if (previous) flushComposerDraft();
+      activeComposerDraftRef.current = null;
+      setInput("");
+      setReplyTarget(null);
+      return;
+    }
+
+    // 1. 切换会话或原生确认 owner 写入时，成对恢复文字与引用
+    const sessionChanged = previous?.sessionId !== sessionId;
+    const optimistic = optimisticComposerDraftsRef.current.get(sessionId);
+    const hydration = mobileComposerDraftHydration(snapshot.composer.draft, optimistic);
+    const ownerAcknowledged = hydration.ownerAcknowledged;
+    if (sessionChanged) flushComposerDraft();
+    if (optimistic && !ownerAcknowledged && !sessionChanged) return;
+    if (sessionChanged || ownerAcknowledged) {
+      if (ownerAcknowledged) optimisticComposerDraftsRef.current.delete(sessionId);
+      const resolved = resolveMobileComposerDraft(
+        hydration.draft,
+        snapshot.messages,
+        sessionId,
+      );
+      const hydrated = captureMobileComposerDraftWrite(
+        sessionId,
+        resolved.text,
+        resolved.replyTarget?.id,
+      );
+      if (!hydrated) throw new Error("已选会话无法建立输入草稿");
+      activeComposerDraftRef.current = hydrated;
+      setInput(resolved.text);
+      setReplyTarget(resolved.replyTarget);
+      if (resolved.cleanedDraft) {
+        const cleaned = { sessionId, ...resolved.cleanedDraft };
+        activeComposerDraftRef.current = cleaned;
+        saveComposerDraft(cleaned);
+      }
+      return;
+    }
+
+    // 2. 当前引用目标消失时立即隐藏，并让原生 owner 清理悬空 ID
+    if (!previous?.replyToMessageId) return;
+    const resolved = resolveMobileComposerDraft(previous, snapshot.messages, sessionId);
+    if (!resolved.cleanedDraft) return;
+    const cleaned = { sessionId, ...resolved.cleanedDraft };
+    activeComposerDraftRef.current = cleaned;
+    setReplyTarget(null);
+    if (composerDraftTimerRef.current !== null) {
+      window.clearTimeout(composerDraftTimerRef.current);
+      composerDraftTimerRef.current = null;
+    }
+    pendingComposerDraftRef.current = null;
+    saveComposerDraft(cleaned);
+  }, [
+    flushComposerDraft,
+    saveComposerDraft,
+    snapshot,
+  ]);
+
   useEffect(() => {
-    if (!replyTarget) return;
-    const targetStillVisible = snapshot?.messages.some((message) => message.id === replyTarget.id) ?? false;
-    if (replyTarget.sessionId !== snapshot?.selectedSessionId || !targetStillVisible) setReplyTarget(null);
-  }, [replyTarget, snapshot?.messages, snapshot?.selectedSessionId]);
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flushComposerDraft();
+    };
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => {
+      document.removeEventListener("visibilitychange", flushWhenHidden);
+      flushComposerDraft();
+    };
+  }, [flushComposerDraft]);
 
   useEffect(() => {
     const actionable = new Set(
@@ -655,6 +864,16 @@ function MobileNativeApp() {
   }, [snapshot?.messages]);
 
   useEffect(() => {
+    setSelectedMessageIds((current) => {
+      if (current.size === 0) return current;
+      const next = reconcileMobileMessageSelection(current, snapshot?.messages ?? []);
+      selectionActiveRef.current = next.size > 0;
+      if (next.size === current.size && [...next].every((messageId) => current.has(messageId))) return current;
+      return next;
+    });
+  }, [snapshot?.messages]);
+
+  useEffect(() => {
     if (surface.kind !== "dashboard") return;
     if (!pluginDashboards.some((plugin) => plugin.id === surface.pluginId)) {
       setSurface({ kind: "plugins" });
@@ -663,6 +882,8 @@ function MobileNativeApp() {
 
   useEffect(() => () => {
     if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    if (missingReplyTimerRef.current !== null) window.clearTimeout(missingReplyTimerRef.current);
+    if (replyAnnouncementTimerRef.current !== null) window.clearTimeout(replyAnnouncementTimerRef.current);
     if (searchFocusTimerRef.current !== null) window.clearTimeout(searchFocusTimerRef.current);
     if (searchHighlightTimerRef.current !== null) window.clearTimeout(searchHighlightTimerRef.current);
   }, []);
@@ -760,6 +981,11 @@ function MobileNativeApp() {
     setSearchTargetId(null);
     setUnreadState({ count: 0 });
     setQueueOpen(false);
+    pendingShareRequestRef.current = null;
+    setSharePending(false);
+    setShareStatus(null);
+    selectionActiveRef.current = false;
+    setSelectedMessageIds(new Set());
   }, [snapshot?.selectedSessionId]);
 
   useEffect(() => {
@@ -786,6 +1012,8 @@ function MobileNativeApp() {
       </main>
     );
   }
+  const selectedSession = snapshot.sessions.find((session) => session.id === snapshot.selectedSessionId);
+  const selectedSessionUnavailable = selectedSession?.isAvailable === false;
 
   const send = () => {
     const text = input.trim();
@@ -793,9 +1021,12 @@ function MobileNativeApp() {
     if (sendPending || !snapshot.composer.canSend || !attachmentsReady) return;
     if (!text && snapshot.composer.attachments.length === 0) return;
     const native = window.AkashicNative;
-    if (!native) return;
+    const sessionId = snapshot.selectedSessionId;
+    if (!native || !sessionId) return;
     const requestId = `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    pendingSendRequestRef.current = requestId;
+    const sentDraft = captureMobileComposerDraftWrite(sessionId, input, replyTarget?.id);
+    if (!sentDraft) throw new Error("发送消息无法捕获当前会话草稿");
+    pendingSendRequestRef.current = { requestId, draft: sentDraft };
     setSendPending(true);
     native.sendMessage(
       requestId,
@@ -875,6 +1106,94 @@ function MobileNativeApp() {
       copiedTimerRef.current = null;
     }, 1600);
   };
+  const selectedMessages = selectableMobileMessages(snapshot.messages, selectedMessageIds);
+  const selectionActive = selectedMessages.length > 0;
+  const clearSelection = () => {
+    pendingShareRequestRef.current = null;
+    setSharePending(false);
+    setShareStatus(null);
+    selectionActiveRef.current = false;
+    setSelectedMessageIds(new Set());
+  };
+  const enterSelection = (messageId: string) => {
+    if (pendingShareRequestRef.current !== null) return;
+    setDrawerOpen(false);
+    setSearchOpen(false);
+    searchOpenRef.current = false;
+    setSearchQuery("");
+    normalizedSearchQueryRef.current = "";
+    setSearchIndex(new Map());
+    setSearchTargetId(null);
+    setHighlightedMessageId(null);
+    setCommandsOpen(false);
+    setQueueOpen(false);
+    updateComposerDraft(input, null);
+    textareaRef.current?.blur();
+    pendingShareRequestRef.current = null;
+    setSharePending(false);
+    setShareStatus(null);
+    selectionActiveRef.current = true;
+    setSelectedMessageIds(new Set([messageId]));
+  };
+  const toggleSelection = (messageId: string) => {
+    if (pendingShareRequestRef.current !== null) return;
+    setShareStatus(null);
+    setSelectedMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      selectionActiveRef.current = next.size > 0;
+      return next;
+    });
+  };
+  const copySelection = () => {
+    const text = formatMobileSelectionCopyText(
+      selectedMessages,
+      (createdAt) => `${formatMessageDate(createdAt)} ${formatMessageTime(createdAt)}`,
+    );
+    window.AkashicNative?.copyText(text);
+    window.AkashicNative?.performActionHaptic();
+    clearSelection();
+  };
+  const shareSelection = () => {
+    const text = formatMobileSelectionCopyText(
+      selectedMessages,
+      (createdAt) => `${formatMessageDate(createdAt)} ${formatMessageTime(createdAt)}`,
+    );
+    const requestId = crypto.randomUUID();
+    pendingShareRequestRef.current = requestId;
+    setSharePending(true);
+    setShareStatus("正在打开系统分享");
+    window.AkashicNative?.shareText(requestId, text);
+  };
+  const replyToSelection = () => {
+    const target = selectedMessages.length === 1 ? selectedMessages[0] : undefined;
+    if (!target || !mobileMessageCanReply(target, snapshot.selectedSessionId)) return;
+    clearSelection();
+    updateComposerDraft(input, target);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+  const navigateToReply = (sourceMessageId: string, reply: MobileReply) => {
+    const target = resolveMobileReplyNavigationTarget(reply.messageId, snapshot.messages);
+    if (target) {
+      setMissingReplySourceId(null);
+      const announcement = formatMobileReplyNavigationAnnouncement(target, formatMessageTime);
+      setReplyNavigationAnnouncement("");
+      if (replyAnnouncementTimerRef.current !== null) window.clearTimeout(replyAnnouncementTimerRef.current);
+      replyAnnouncementTimerRef.current = window.setTimeout(() => {
+        setReplyNavigationAnnouncement(announcement);
+        replyAnnouncementTimerRef.current = null;
+      }, 40);
+      jumpToMessage(target.id, true);
+      return;
+    }
+    setMissingReplySourceId(sourceMessageId);
+    if (missingReplyTimerRef.current !== null) window.clearTimeout(missingReplyTimerRef.current);
+    missingReplyTimerRef.current = window.setTimeout(() => {
+      setMissingReplySourceId((current) => current === sourceMessageId ? null : current);
+      missingReplyTimerRef.current = null;
+    }, 1800);
+  };
   const navigateToSurface = (next: Exclude<MobileSurface, { kind: "chat" }>) => {
     pushMobileSurface(window.history, next);
     surfaceRef.current = next;
@@ -895,6 +1214,12 @@ function MobileNativeApp() {
             toggleRef={drawerToggleRef}
             searchButtonRef={searchButtonRef}
             searchInputRef={searchInputRef}
+            selectionCount={selectedMessages.length}
+            canCopySelection={selectedMessages.some(mobileMessageHasCopyContent)}
+            canShareSelection={selectedMessages.some(mobileMessageHasCopyContent)}
+            sharePending={sharePending}
+            shareStatus={shareStatus}
+            canReplyToSelection={selectedMessages.length === 1 && mobileMessageCanReply(selectedMessages[0], snapshot.selectedSessionId)}
             onToggleDrawer={toggleDrawer}
             onOpenSearch={openSearch}
             onCloseSearch={closeSearch}
@@ -902,6 +1227,10 @@ function MobileNativeApp() {
             onSearchSubmit={() => {
               if (searchTargetId !== null) jumpToMessage(searchTargetId, true);
             }}
+            onCloseSelection={clearSelection}
+            onCopySelection={copySelection}
+            onShareSelection={shareSelection}
+            onReplyToSelection={replyToSelection}
           />
         ) : (
           <MobilePluginTopBar
@@ -919,8 +1248,17 @@ function MobileNativeApp() {
             navigateToSurface({ kind: "plugins" });
             closeDrawer();
           }}
+          onRestartPairing={() => {
+            flushMobileComposerBeforePairing(
+              flushComposerDraft,
+              () => window.AkashicNative?.restartPairing(),
+            );
+          }}
           onClose={closeDrawer}
         />
+        <span className="mobile-a11y-announcement" aria-live="polite" aria-atomic="true">
+          {replyNavigationAnnouncement}
+        </span>
         {(snapshot.connection.error || pluginLoadError) ? (
           <div className="mobile-surface-errors" aria-live="assertive">
             {snapshot.connection.error ? (
@@ -956,8 +1294,12 @@ function MobileNativeApp() {
             <MobilePluginDashboard pluginId={surface.pluginId} />
           </section>
         ) : (
-        <div className={`mobile-main-content ${replyTarget ? "replying" : ""} ${searchOpen ? "searching" : ""} ${queueOpen && snapshot.composer.pendingMessages.length > 1 ? "queueing" : ""}`} inert={drawerOpen ? true : undefined}>
-          <Conversation key={snapshot.selectedSessionId ?? "empty"} className="mobile-conversation">
+        <div className={`mobile-main-content ${replyTarget ? "replying" : ""} ${searchOpen ? "searching" : ""} ${selectionActive ? "selecting" : ""} ${queueOpen && snapshot.composer.pendingMessages.length > 1 ? "queueing" : ""} ${selectedSessionUnavailable ? "session-unavailable" : ""}`} inert={drawerOpen ? true : undefined}>
+          <Conversation
+            key={snapshot.selectedSessionId ?? "empty"}
+            className="mobile-conversation"
+            initial="instant"
+          >
             <ConversationContent className="mobile-conversation__content">
               {messages.length === 0 ? (
                 <ConversationEmptyState className="mobile-empty">
@@ -969,7 +1311,7 @@ function MobileNativeApp() {
                   const source = snapshot.messages[index];
                   const previous = snapshot.messages[index - 1];
                   const startsDay = !previous || !sameLocalDay(previous.createdAt, source.createdAt);
-                  const canReply = source.replyable;
+                  const canReply = mobileMessageCanReply(source, snapshot.selectedSessionId);
                   return (
                     <React.Fragment key={message.id}>
                       {startsDay ? <MessageDateDivider createdAt={source.createdAt} /> : null}
@@ -977,21 +1319,33 @@ function MobileNativeApp() {
                       {!startsDay && previous?.role === source.role ? (
                         <div className={`mobile-role-divider ${source.role}`} />
                       ) : null}
-                      <div
+                      <MessageSelectionTarget
                         ref={(element) => {
                           if (element) messageElementsRef.current.set(source.id, element);
                           else messageElementsRef.current.delete(source.id);
                         }}
-                        className={`mobile-message-anchor ${source.role} ${highlightedMessageId === source.id ? "search-target" : ""}`}
+                        className={`mobile-message-anchor ${source.role} ${highlightedMessageId === source.id ? "search-target" : ""} ${selectedMessageIds.has(source.id) ? "selected" : ""}`}
                         data-message-id={source.id}
                         tabIndex={-1}
+                        selectable={!source.streaming}
+                        selectionActive={selectionActive}
+                        selected={selectedMessageIds.has(source.id)}
+                        onEnterSelection={() => enterSelection(source.id)}
+                        onToggleSelection={() => toggleSelection(source.id)}
                       >
-                        <SwipeToReply disabled={!canReply} onReply={() => setReplyTarget(source)}>
+                        <SwipeToReply disabled={!canReply || selectionActive} onReply={() => updateComposerDraft(input, source)}>
                           <ChatMessageView
                             message={message}
-                            leadingContent={source.reply ? <MessageReplyReference reply={source.reply} /> : undefined}
+                            onCopyToolDetail={copyToolDetail}
+                            leadingContent={source.reply ? (
+                              <MessageReplyReference
+                                reply={source.reply}
+                                unavailable={missingReplySourceId === source.id}
+                                onNavigate={() => navigateToReply(source.id, source.reply!)}
+                              />
+                            ) : undefined}
                             attachmentContent={<MobileMessageAttachments attachments={source.attachments} />}
-                            processStartContent={isPluginTurnMessage(message) ? (
+                            processStartContent={!selectedSessionUnavailable && isPluginTurnMessage(message) ? (
                               <MobilePluginSlot
                                 name="turn.before_reasoning"
                                 sessionId={source.sessionId}
@@ -999,7 +1353,7 @@ function MobileNativeApp() {
                                 turnId={pluginTurnId(message)}
                               />
                             ) : undefined}
-                            beforeProcessBlock={(block) => isPluginTurnMessage(message) && block.kind === "tool" ? (
+                            beforeProcessBlock={(block) => !selectedSessionUnavailable && isPluginTurnMessage(message) && block.kind === "tool" ? (
                               <MobilePluginSlot
                                 name="turn.before_tool"
                                 sessionId={source.sessionId}
@@ -1008,7 +1362,7 @@ function MobileNativeApp() {
                                 block={block}
                               />
                             ) : null}
-                            answerEndContent={isPluginTurnMessage(message) ? (
+                            answerEndContent={!selectedSessionUnavailable && isPluginTurnMessage(message) ? (
                               <MobilePluginSlot
                                 name="turn.after_answer"
                                 sessionId={source.sessionId}
@@ -1022,7 +1376,7 @@ function MobileNativeApp() {
                             copied={copiedMessageId === source.id}
                             canReply={canReply}
                             onCopy={() => copyMessage(source)}
-                            onReply={() => setReplyTarget(source)}
+                            onReply={() => updateComposerDraft(input, source)}
                             deliveryActionBusy={recoveringMessageIds.has(source.id)}
                             onDeliveryAction={() => {
                               setRecoveringMessageIds((current) => new Set(current).add(source.id));
@@ -1031,7 +1385,7 @@ function MobileNativeApp() {
                             }}
                           />
                         </SwipeToReply>
-                      </div>
+                      </MessageSelectionTarget>
                     </React.Fragment>
                   );
                 })
@@ -1044,7 +1398,7 @@ function MobileNativeApp() {
               streaming={snapshot.composer.isStreaming}
               projectionGeneration={snapshot.projectionGeneration}
               resyncing={snapshot.composer.isResyncing}
-              suspended={searchOpen}
+              suspended={searchOpen || selectionActive}
               forceScrollToken={sendScrollRequest}
               readingPosition={snapshot.readingPosition}
               messageElementsRef={messageElementsRef}
@@ -1070,6 +1424,8 @@ function MobileNativeApp() {
               onPrevious={() => moveSearch(-1)}
               onNext={() => moveSearch(1)}
             />
+          ) : selectionActive ? null : selectedSessionUnavailable && selectedSession ? (
+            <UnavailableSessionFooter key={selectedSession.id} session={selectedSession} />
           ) : (
             <MobileComposer
               snapshot={snapshot}
@@ -1080,13 +1436,13 @@ function MobileNativeApp() {
               stopRequested={stopRequested}
               sendPending={sendPending}
               replyTarget={replyTarget}
-              onInput={setInput}
+              onInput={(value) => updateComposerDraft(value, replyTarget)}
               onToggleCommands={toggleCommands}
               onToggleQueue={() => setQueueOpen((current) => !current)}
               onCloseCommands={closeCommands}
               onSend={send}
               onStop={stop}
-              onCancelReply={() => setReplyTarget(null)}
+              onCancelReply={() => updateComposerDraft(input, null)}
             />
           )}
         </div>
@@ -1094,6 +1450,10 @@ function MobileNativeApp() {
       </main>
     </TooltipProvider>
   );
+}
+
+function copyToolDetail(text: string) {
+  window.AkashicNative?.copyText(text);
 }
 
 function MobilePluginTopBar({ title, onBack }: { title: string; onBack: () => void }) {
@@ -1151,11 +1511,21 @@ function MobileTopBar({
   toggleRef,
   searchButtonRef,
   searchInputRef,
+  selectionCount,
+  canCopySelection,
+  canShareSelection,
+  sharePending,
+  shareStatus,
+  canReplyToSelection,
   onToggleDrawer,
   onOpenSearch,
   onCloseSearch,
   onSearchQuery,
   onSearchSubmit,
+  onCloseSelection,
+  onCopySelection,
+  onShareSelection,
+  onReplyToSelection,
 }: {
   status: ConnectionStatus;
   label: string;
@@ -1166,12 +1536,52 @@ function MobileTopBar({
   toggleRef: React.RefObject<HTMLButtonElement | null>;
   searchButtonRef: React.RefObject<HTMLButtonElement | null>;
   searchInputRef: React.RefObject<HTMLInputElement | null>;
+  selectionCount: number;
+  canCopySelection: boolean;
+  canShareSelection: boolean;
+  sharePending: boolean;
+  shareStatus: string | null;
+  canReplyToSelection: boolean;
   onToggleDrawer: () => void;
   onOpenSearch: () => void;
   onCloseSearch: () => void;
   onSearchQuery: (query: string) => void;
   onSearchSubmit: () => void;
+  onCloseSelection: () => void;
+  onCopySelection: () => void;
+  onShareSelection: () => void;
+  onReplyToSelection: () => void;
 }) {
+  if (selectionCount > 0) {
+    const actions = mobileSelectionActionAvailability(sharePending, {
+      reply: canReplyToSelection,
+      copy: canCopySelection,
+      share: canShareSelection,
+    });
+    return (
+      <header className="mobile-topbar selection-mode" aria-busy={sharePending}>
+        <button className="mobile-icon-button" type="button" onClick={onCloseSelection} aria-label="退出消息选择" disabled={!actions.exit}>
+          <X size={24} />
+        </button>
+        <strong aria-live="polite">{shareStatus ?? `已选择 ${selectionCount} 条`}</strong>
+        {canReplyToSelection ? (
+          <button className="mobile-icon-button" type="button" onClick={onReplyToSelection} aria-label="引用选中的消息" disabled={!actions.reply}>
+            <Reply size={21} />
+          </button>
+        ) : null}
+        {canCopySelection ? (
+          <button className="mobile-icon-button" type="button" onClick={onCopySelection} aria-label="复制选中的消息" disabled={!actions.copy}>
+            <Copy size={21} />
+          </button>
+        ) : null}
+        {canShareSelection ? (
+          <button className="mobile-icon-button" type="button" onClick={onShareSelection} aria-label="分享选中的消息" disabled={!actions.share}>
+            <Share2 size={21} />
+          </button>
+        ) : null}
+      </header>
+    );
+  }
   if (searchOpen) {
     return (
       <header className="mobile-topbar search-mode">
@@ -1261,12 +1671,14 @@ function MobileDrawer({
   snapshot,
   pluginCount,
   onOpenPlugins,
+  onRestartPairing,
   onClose,
 }: {
   open: boolean;
   snapshot: MobileSnapshot;
   pluginCount: number;
   onOpenPlugins: () => void;
+  onRestartPairing: () => void;
   onClose: () => void;
 }) {
   const drawerRef = useRef<HTMLElement>(null);
@@ -1287,7 +1699,7 @@ function MobileDrawer({
         <nav className="mobile-session-list">
           {snapshot.sessions.map((session) => (
             <button
-              className={`mobile-session-row ${session.id === snapshot.selectedSessionId ? "active" : ""}`}
+              className={`mobile-session-row ${session.id === snapshot.selectedSessionId ? "active" : ""} ${session.isAvailable ? "" : "unavailable"}`}
               type="button"
               key={session.id}
               onClick={() => {
@@ -1300,15 +1712,19 @@ function MobileDrawer({
                   <strong>{session.title || "未命名会话"}</strong>
                   {session.lastMessageAt ? <time>{formatDrawerTime(session.lastMessageAt)}</time> : null}
                 </span>
-                <small>{session.lastMessagePreview || "还没有消息"}</small>
+                <small>{session.isAvailable
+                  ? session.lastMessagePreview || "还没有消息"
+                  : "电脑端已不存在 · 本机保留历史"}</small>
               </span>
               <span className="mobile-session-row__state">
-                {session.isRunning ? <span className="session-running" aria-label="Agent 正在处理" /> : null}
-                {session.unreadCount > 0 ? (
+                {!session.isAvailable ? (
+                  <ArchiveX size={19} aria-label="电脑端已不存在" />
+                ) : session.isRunning ? <span className="session-running" aria-label="Agent 正在处理" /> : null}
+                {session.isAvailable && session.unreadCount > 0 ? (
                   <strong className="session-unread" aria-label={`${session.unreadCount} 条未读`}>
                     {session.unreadCount > 99 ? "99+" : session.unreadCount}
                   </strong>
-                ) : session.id === snapshot.selectedSessionId ? <Check size={18} /> : null}
+                ) : session.isAvailable && session.id === snapshot.selectedSessionId ? <Check size={18} /> : null}
               </span>
             </button>
           ))}
@@ -1324,7 +1740,7 @@ function MobileDrawer({
             <RotateCcw size={18} />
             <span>{snapshot.composer.isResyncing ? "正在重新同步" : "清理缓存并同步"}</span>
           </button>
-          <button className="drawer-action" type="button" onClick={() => window.AkashicNative?.restartPairing()}>
+          <button className="drawer-action" type="button" onClick={onRestartPairing}>
             <RefreshCw size={18} />
             <span>重新扫码</span>
           </button>
@@ -1337,6 +1753,62 @@ function MobileDrawer({
           </button>
         </div>
       </aside>
+    </div>
+  );
+}
+
+function UnavailableSessionFooter({ session }: { session: MobileSession }) {
+  if (!session.canRemove) {
+    return (
+      <div className="mobile-unavailable-session" role="status">
+        <span>
+          <strong>电脑端已不存在</strong>
+          <small>未发送的消息或附件仍保留在本机；已停止发送，避免重新创建会话。</small>
+        </span>
+        <button className="new-session" type="button" onClick={() => window.AkashicNative?.createSession()}>
+          新聊天
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mobile-unavailable-session" role="status">
+      <span>
+        <strong>电脑端已不存在</strong>
+        <small>历史仍保存在这台手机上，但不能继续发送。</small>
+      </span>
+      <Dialog>
+        <DialogTrigger asChild>
+          <button type="button">从本机移除</button>
+        </DialogTrigger>
+        <DialogContent
+          className="mobile-session-remove-dialog"
+          overlayClassName="mobile-session-remove-overlay"
+          showCloseButton={false}
+        >
+          <DialogTitle>移除本机会话？</DialogTitle>
+          <DialogDescription>
+            “{session.title || "未命名会话"}”的本地历史和已缓存附件会被删除，电脑端数据不会受到影响。
+          </DialogDescription>
+          <DialogFooter className="mobile-session-remove-dialog__actions">
+            <DialogClose asChild>
+              <button type="button">取消</button>
+            </DialogClose>
+            <DialogClose asChild>
+              <button
+                className="destructive"
+                type="button"
+                onClick={() => {
+                  window.AkashicNative?.performActionHaptic();
+                  window.AkashicNative?.removeUnavailableSession(session.id);
+                }}
+              >
+                移除
+              </button>
+            </DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -1378,9 +1850,46 @@ function MobileComposer({
   const hasDraft = snapshot.composer.attachments.length > 0;
   const attachmentsReady = allMobileAttachmentsReady(snapshot.composer.attachments);
   const canSubmit = snapshot.composer.canSend && attachmentsReady && !sendPending && (!!input.trim() || hasDraft);
+  const zoneRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea) resizeMobileComposerTextarea(textarea);
+  }, [input, textareaRef]);
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    const widthOwner = textarea?.parentElement;
+    if (!textarea || !widthOwner) return;
+    let lastWidth = widthOwner.clientWidth;
+    const observer = new ResizeObserver(() => {
+      const nextWidth = widthOwner.clientWidth;
+      if (nextWidth === lastWidth) return;
+      lastWidth = nextWidth;
+      resizeMobileComposerTextarea(textarea);
+    });
+    observer.observe(widthOwner);
+    return () => observer.disconnect();
+  }, [textareaRef]);
+
+  useLayoutEffect(() => {
+    const zone = zoneRef.current;
+    const content = zone?.closest<HTMLElement>(".mobile-main-content");
+    if (!zone || !content) return;
+    const updateInset = () => {
+      content.style.setProperty("--mobile-composer-height", `${zone.offsetHeight}px`);
+    };
+    updateInset();
+    const observer = new ResizeObserver(updateInset);
+    observer.observe(zone);
+    return () => {
+      observer.disconnect();
+      content.style.removeProperty("--mobile-composer-height");
+    };
+  }, []);
 
   return (
-    <div className="mobile-composer-zone">
+    <div ref={zoneRef} className="mobile-composer-zone">
       <CommandSheet open={commandsOpen} commands={snapshot.composer.commands} onClose={onCloseCommands} />
       {snapshot.connection.notice ? <div className="connection-notice">{snapshot.connection.notice}</div> : null}
       {stopping ? <div className="stop-feedback" aria-live="polite">正在中止本轮处理…</div> : null}
@@ -1402,12 +1911,18 @@ function MobileComposer({
         <textarea
           ref={textareaRef}
           rows={1}
+          maxLength={MOBILE_COMPOSER_DRAFT_MAX_LENGTH}
           value={input}
           placeholder="输入消息"
           onChange={(event) => onInput(event.target.value)}
           onFocus={() => commandsOpen && onCloseCommands(false)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
+            if (shouldSubmitMobileComposerKey({
+              key: event.key,
+              ctrlKey: event.ctrlKey,
+              metaKey: event.metaKey,
+              isComposing: event.nativeEvent.isComposing,
+            })) {
               event.preventDefault();
               onSend();
             }
@@ -1429,6 +1944,13 @@ function MobileComposer({
       </div>
     </div>
   );
+}
+
+function resizeMobileComposerTextarea(textarea: HTMLTextAreaElement) {
+  textarea.style.height = "0px";
+  const metrics = mobileComposerTextareaMetrics(textarea.scrollHeight);
+  textarea.style.height = `${metrics.height}px`;
+  textarea.style.overflowY = metrics.overflowY;
 }
 
 function PendingQueue({
@@ -1879,12 +2401,161 @@ function MessageMeta({
   );
 }
 
+const MessageSelectionTarget = React.forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement> & {
+    selectable: boolean;
+    selectionActive: boolean;
+    selected: boolean;
+    onEnterSelection: () => void;
+    onToggleSelection: () => void;
+  }
+>(function MessageSelectionTarget({
+  selectable,
+  selectionActive,
+  selected,
+  onEnterSelection,
+  onToggleSelection,
+  children,
+  ...props
+}, ref) {
+  const timerRef = useRef<number | null>(null);
+  const suppressClickTimerRef = useRef<number | null>(null);
+  const capturedPointerRef = useRef<number | null>(null);
+  const originRef = useRef({ x: 0, y: 0 });
+  const suppressClickRef = useRef(false);
+  const cancelLongPress = () => {
+    if (timerRef.current === null) return;
+    window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+  };
+  const suppressNextClick = () => {
+    suppressClickRef.current = true;
+    if (suppressClickTimerRef.current !== null) window.clearTimeout(suppressClickTimerRef.current);
+    suppressClickTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = false;
+      suppressClickTimerRef.current = null;
+    }, 700);
+  };
+  useEffect(() => () => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    if (suppressClickTimerRef.current !== null) window.clearTimeout(suppressClickTimerRef.current);
+  }, []);
+  const startLongPress = (clientX: number, clientY: number) => {
+    suppressClickRef.current = false;
+    originRef.current = { x: clientX, y: clientY };
+    cancelLongPress();
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      suppressNextClick();
+      window.AkashicNative?.performActionHaptic();
+      onEnterSelection();
+    }, 420);
+  };
+  const cancelMovedLongPress = (clientX: number, clientY: number) => {
+    if (timerRef.current === null) return;
+    if (Math.hypot(clientX - originRef.current.x, clientY - originRef.current.y) > 9) cancelLongPress();
+  };
+
+  return (
+    <div
+      {...props}
+      ref={ref}
+      role={selectionActive && selectable ? "checkbox" : undefined}
+      aria-checked={selectionActive && selectable ? selected : undefined}
+      aria-label={selectionActive && selectable ? `${selected ? "取消选择" : "选择"}此消息` : undefined}
+      tabIndex={selectionActive && selectable ? 0 : props.tabIndex}
+      onPointerDown={(event) => {
+        if (!selectable || selectionActive || event.pointerType === "touch" || event.button !== 0 || isMessageInteractiveTarget(event.target)) return;
+        event.currentTarget.setPointerCapture(event.pointerId);
+        capturedPointerRef.current = event.pointerId;
+        startLongPress(event.clientX, event.clientY);
+      }}
+      onPointerMove={(event) => {
+        if (event.pointerType !== "touch") cancelMovedLongPress(event.clientX, event.clientY);
+      }}
+      onPointerUp={(event) => {
+        cancelLongPress();
+        if (capturedPointerRef.current === event.pointerId && event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        capturedPointerRef.current = null;
+      }}
+      onPointerCancel={(event) => {
+        cancelLongPress();
+        if (capturedPointerRef.current === event.pointerId && event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        capturedPointerRef.current = null;
+      }}
+      onTouchStart={(event) => {
+        if (!selectable || selectionActive || event.touches.length !== 1 || isMessageInteractiveTarget(event.target)) return;
+        const touch = event.touches[0];
+        startLongPress(touch.clientX, touch.clientY);
+      }}
+      onTouchMove={(event) => {
+        if (event.touches.length !== 1) {
+          cancelLongPress();
+          return;
+        }
+        const touch = event.touches[0];
+        cancelMovedLongPress(touch.clientX, touch.clientY);
+      }}
+      onTouchEnd={cancelLongPress}
+      onTouchCancel={cancelLongPress}
+      onContextMenu={(event) => {
+        if (!selectable || isMessageInteractiveTarget(event.target)) return;
+        event.preventDefault();
+        if (suppressClickRef.current) return;
+        if (!selectionActive) {
+          suppressNextClick();
+          window.AkashicNative?.performActionHaptic();
+          onEnterSelection();
+        }
+      }}
+      onClickCapture={(event) => {
+        if (suppressClickRef.current) {
+          suppressClickRef.current = false;
+          if (suppressClickTimerRef.current !== null) {
+            window.clearTimeout(suppressClickTimerRef.current);
+            suppressClickTimerRef.current = null;
+          }
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (!selectionActive || !selectable) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onToggleSelection();
+      }}
+      onKeyDown={(event) => {
+        if (!selectionActive || !selectable || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        onToggleSelection();
+      }}
+    >
+      <div className="message-selection-content" inert={selectionActive ? true : undefined}>
+        {children}
+      </div>
+    </div>
+  );
+});
+
+function isMessageInteractiveTarget(target: EventTarget | null) {
+  return target instanceof Element && target.closest("button, a, input, textarea, [role='button']") !== null;
+}
+
 function SwipeToReply({ disabled, onReply, children }: { disabled: boolean; onReply: () => void; children: ReactNode }) {
   const x = useMotionValue(0);
   const hapticFired = useRef(false);
   const reduceMotion = useReducedMotion();
+  const disabledRef = useRef(disabled);
   const iconOpacity = useTransform(x, [-80, -50, -12, 0], [1, 1, 0.12, 0]);
   const iconScale = useTransform(x, [-80, -50, 0], [1, 1, 0.72]);
+  useEffect(() => {
+    disabledRef.current = disabled;
+  }, [disabled]);
 
   useMotionValueEvent(x, "change", (value) => {
     if (value > -50) {
@@ -1913,7 +2584,7 @@ function SwipeToReply({ disabled, onReply, children }: { disabled: boolean; onRe
           hapticFired.current = false;
         }}
         onDragEnd={() => {
-          const shouldReply = x.get() <= -50;
+          const shouldReply = !disabledRef.current && x.get() <= -50;
           if (shouldReply) onReply();
           animate(x, 0, reduceMotion ? { duration: 0 } : {
             type: "spring",
@@ -1930,12 +2601,25 @@ function SwipeToReply({ disabled, onReply, children }: { disabled: boolean; onRe
   );
 }
 
-function MessageReplyReference({ reply }: { reply: MobileReply }) {
+function MessageReplyReference({
+  reply,
+  unavailable,
+  onNavigate,
+}: {
+  reply: MobileReply;
+  unavailable: boolean;
+  onNavigate: () => void;
+}) {
   return (
-    <div className="message-reply-reference">
+    <button
+      className={`message-reply-reference ${unavailable ? "unavailable" : ""}`}
+      type="button"
+      onClick={onNavigate}
+      aria-label={reply.role === "assistant" ? "查看引用的 Akashic 消息" : "查看引用的你的消息"}
+    >
       <span>{reply.role === "assistant" ? "Akashic" : "你"}</span>
-      <p>{reply.preview}</p>
-    </div>
+      <p aria-live="polite">{unavailable ? "原消息不在当前记录中" : reply.preview}</p>
+    </button>
   );
 }
 
@@ -2049,7 +2733,15 @@ function MobileConversationBehavior({
     onUnreadChange,
   );
   useMobileAutoScroll(sessionId, chatMessages, streaming, suspended, forceScrollToken);
-  useMobileReadingPosition(sessionId, sourceMessages, readingPosition, messageElementsRef, suspended);
+  useMobileReadingPosition(
+    sessionId,
+    sourceMessages,
+    projectionGeneration,
+    resyncing,
+    readingPosition,
+    messageElementsRef,
+    suspended,
+  );
   return null;
 }
 
@@ -2057,51 +2749,170 @@ function MobileConversationBehavior({
 function useMobileReadingPosition(
   sessionId: string | undefined,
   messages: MobileMessage[],
+  projectionGeneration: number,
+  resyncing: boolean,
   readingPosition: MobileReadingPosition | undefined,
   messageElementsRef: React.RefObject<Map<string, HTMLDivElement>>,
   suspended: boolean,
 ) {
-  const { isAtBottom, scrollRef, stopScroll } = useStickToBottomContext();
-  const restoredSessionRef = useRef<string | undefined>(undefined);
+  const { isAtBottom, scrollRef, scrollToBottom, stopScroll } = useStickToBottomContext();
+  const restoredProjectionRef = useRef<string | undefined>(undefined);
+  const restoringProjectionRef = useRef<string | undefined>(undefined);
+  const restoreTargetRef = useRef<MobileReadingPosition | null | undefined>(undefined);
+  const restoreTimerRef = useRef<number | null>(null);
+  const restoreFrameRef = useRef<number | null>(null);
+  const syncPhaseRef = useRef<{ projectionKey?: string; active: boolean }>({ active: false });
   const saveTimerRef = useRef<number | null>(null);
   const lastSavedRef = useRef("");
   const lastReadAtRef = useRef(0);
-
-  useLayoutEffect(() => {
-    // 1. 每次进入会话只恢复一次已持久化锚点
-    if (!sessionId || restoredSessionRef.current === sessionId || messages.length === 0) return;
-    if (!readingPosition) {
-      restoredSessionRef.current = sessionId;
-      return;
-    }
-    const element = messageElementsRef.current.get(readingPosition.messageId);
-    const scrollElement = scrollRef.current;
-    if (!element || !scrollElement) return;
-    restoredSessionRef.current = sessionId;
-    stopScroll();
-    element.scrollIntoView({ block: "start", behavior: "auto" });
-    scrollElement.scrollTop -= readingPosition.offsetPx;
-  }, [messageElementsRef, messages.length, readingPosition, scrollRef, sessionId, stopScroll]);
+  const messagesRef = useRef(messages);
 
   useEffect(() => {
-    // 2. 滚动停止后记录首个可见消息和相对偏移，避免按绝对 scrollTop 恢复后被乱序归位破坏
+    messagesRef.current = messages;
+  }, [messages]);
+  useLayoutEffect(() => {
+    // 1. 同一投影代次同步完成前持续校准，避免网络分页把视口推走
+    if (!sessionId) return;
+    const projectionKey = `${sessionId}\u001f${projectionGeneration}`;
+    const syncStarting = resyncing && (
+      syncPhaseRef.current.projectionKey !== projectionKey || !syncPhaseRef.current.active
+    );
+    syncPhaseRef.current = { projectionKey, active: resyncing };
+    if (syncStarting) {
+      if (restoreTimerRef.current !== null) window.clearTimeout(restoreTimerRef.current);
+      if (restoreFrameRef.current !== null) window.cancelAnimationFrame(restoreFrameRef.current);
+      restoreTimerRef.current = null;
+      restoreFrameRef.current = null;
+      if (restoredProjectionRef.current === projectionKey) restoredProjectionRef.current = undefined;
+    }
+    if (restoredProjectionRef.current === projectionKey) return;
+    if (restoringProjectionRef.current !== projectionKey) {
+      if (restoreTimerRef.current !== null) window.clearTimeout(restoreTimerRef.current);
+      if (restoreFrameRef.current !== null) window.cancelAnimationFrame(restoreFrameRef.current);
+      restoringProjectionRef.current = projectionKey;
+      restoreTargetRef.current = readingPosition ?? null;
+    } else {
+      restoreTargetRef.current = updateMobileReadingRestoreTarget(
+        restoreTargetRef.current,
+        readingPosition,
+      );
+    }
+    if (messages.length === 0) return;
     const scrollElement = scrollRef.current;
-    if (!sessionId || !scrollElement || suspended) return;
+    const target = restoreTargetRef.current;
+    if (!scrollElement || target === undefined) return;
+    if (target) {
+      const element = messageElementsRef.current.get(target.messageId);
+      if (element) {
+        stopScroll();
+        element.scrollIntoView({ block: "start", behavior: "auto" });
+        scrollElement.scrollTop -= target.offsetPx;
+      }
+    }
+    if (resyncing) return;
+    if (restoreTimerRef.current !== null) window.clearTimeout(restoreTimerRef.current);
+    restoreTimerRef.current = window.setTimeout(() => {
+      const settle = () => {
+        if (restoringProjectionRef.current !== projectionKey) return;
+        restoredProjectionRef.current = projectionKey;
+        restoringProjectionRef.current = undefined;
+        restoreTargetRef.current = undefined;
+        restoreTimerRef.current = null;
+        restoreFrameRef.current = null;
+        scrollElement.dispatchEvent(new Event("scroll"));
+      };
+      if (restoringProjectionRef.current !== projectionKey) return;
+      if (target) {
+        const element = messageElementsRef.current.get(target.messageId);
+        if (element) {
+          stopScroll();
+          element.scrollIntoView({ block: "start", behavior: "auto" });
+          scrollElement.scrollTop -= target.offsetPx;
+          restoreFrameRef.current = requestAnimationFrame(settle);
+          return;
+        }
+      }
+      void Promise.resolve(scrollToBottom({ animation: "instant", ignoreEscapes: true })).then(() => {
+        if (restoringProjectionRef.current === projectionKey) settle();
+      });
+    }, 320);
+  }, [
+    messageElementsRef,
+    messages.length,
+    projectionGeneration,
+    readingPosition,
+    resyncing,
+    scrollRef,
+    scrollToBottom,
+    sessionId,
+    stopScroll,
+  ]);
+
+  useEffect(() => {
+    // 2. 历史装载期间若用户主动触摸，立即把视口所有权交还给用户
+    const scrollElement = scrollRef.current;
+    if (!sessionId || !scrollElement) return;
+    const projectionKey = `${sessionId}\u001f${projectionGeneration}`;
+    const interruptRestore = () => {
+      if (restoringProjectionRef.current !== projectionKey) return;
+      if (restoreTimerRef.current !== null) window.clearTimeout(restoreTimerRef.current);
+      if (restoreFrameRef.current !== null) window.cancelAnimationFrame(restoreFrameRef.current);
+      restoredProjectionRef.current = projectionKey;
+      restoringProjectionRef.current = undefined;
+      restoreTargetRef.current = undefined;
+      restoreTimerRef.current = null;
+      restoreFrameRef.current = null;
+    };
+    scrollElement.addEventListener("touchstart", interruptRestore, { passive: true });
+    scrollElement.addEventListener("wheel", interruptRestore, { passive: true });
+    return () => {
+      scrollElement.removeEventListener("touchstart", interruptRestore);
+      scrollElement.removeEventListener("wheel", interruptRestore);
+      if (restoringProjectionRef.current === projectionKey && restoreTimerRef.current !== null) {
+        window.clearTimeout(restoreTimerRef.current);
+      }
+      if (restoringProjectionRef.current === projectionKey && restoreFrameRef.current !== null) {
+        window.cancelAnimationFrame(restoreFrameRef.current);
+      }
+    };
+  }, [projectionGeneration, scrollRef, sessionId]);
+
+  useEffect(() => {
+    // 3. 滚动停止后记录首个可见消息和相对偏移，避免按绝对 scrollTop 恢复后被乱序归位破坏
+    const scrollElement = scrollRef.current;
+    if (!sessionId || !scrollElement || resyncing || suspended) return;
     const persist = () => {
       saveTimerRef.current = null;
+      const projectionKey = `${sessionId}\u001f${projectionGeneration}`;
+      if (restoringProjectionRef.current === projectionKey) return;
+      const distanceFromBottom = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight;
+      if (distanceFromBottom <= 2) {
+        const readAt = messagesRef.current.reduce(
+          (latest, message) => message.role === "assistant" ? Math.max(latest, message.createdAt) : latest,
+          0,
+        );
+        const tailKey = `${sessionId}\u001ftail\u001f${readAt}`;
+        if (tailKey !== lastSavedRef.current) {
+          lastSavedRef.current = tailKey;
+          lastReadAtRef.current = Math.max(lastReadAtRef.current, readAt);
+          window.AkashicNative?.markSessionReadThrough(sessionId, readAt);
+        }
+        return;
+      }
       const viewportTop = scrollElement.getBoundingClientRect().top;
-      const anchor = messages.find((message) => {
-        const element = messageElementsRef.current.get(message.id);
-        return element ? element.getBoundingClientRect().bottom > viewportTop + 1 : false;
-      });
+      let anchor: { messageId: string; element: HTMLDivElement; top: number } | undefined;
+      for (const [messageId, element] of messageElementsRef.current) {
+        const rect = element.getBoundingClientRect();
+        if (rect.bottom <= viewportTop + 1 || (anchor && rect.top >= anchor.top)) continue;
+        anchor = { messageId, element, top: rect.top };
+      }
       if (!anchor) return;
-      const element = messageElementsRef.current.get(anchor.id);
-      if (!element) return;
+      const { element, messageId } = anchor;
       const offsetPx = Math.round(element.getBoundingClientRect().top - viewportTop);
-      const key = `${sessionId}\u001f${anchor.id}\u001f${offsetPx}`;
+      const key = `${sessionId}\u001f${messageId}\u001f${offsetPx}`;
       if (key === lastSavedRef.current) return;
       lastSavedRef.current = key;
-      window.AkashicNative?.saveReadingPosition(sessionId, anchor.id, offsetPx);
+      window.AkashicNative?.saveReadingPosition(sessionId, messageId, offsetPx);
     };
     const schedulePersist = () => {
       if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
@@ -2113,22 +2924,28 @@ function useMobileReadingPosition(
       scrollElement.removeEventListener("scroll", schedulePersist);
       if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
     };
-  }, [messageElementsRef, messages, scrollRef, sessionId, suspended]);
+  }, [messageElementsRef, projectionGeneration, resyncing, scrollRef, sessionId, suspended]);
 
   useEffect(() => {
-    // 3. 真正回到底部时推进该会话的持久化已读水位
+    // 4. 真正回到底部时推进该会话的持久化已读水位
     const scrollElement = scrollRef.current;
-    if (!sessionId || !isAtBottom || suspended || !scrollElement) return;
+    if (!sessionId || resyncing || suspended || !scrollElement) return;
+    const projectionKey = `${sessionId}\u001f${projectionGeneration}`;
+    if (restoringProjectionRef.current === projectionKey) return;
     const distanceFromBottom = scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight;
-    if (distanceFromBottom > 2) return;
+    if (!isAtBottom || distanceFromBottom > 2) {
+      return;
+    }
     const readAt = messages.reduce(
       (latest, message) => message.role === "assistant" ? Math.max(latest, message.createdAt) : latest,
       0,
     );
-    if (readAt <= lastReadAtRef.current) return;
-    lastReadAtRef.current = readAt;
+    const tailKey = `${sessionId}\u001ftail\u001f${readAt}`;
+    if (tailKey === lastSavedRef.current && readAt <= lastReadAtRef.current) return;
+    lastSavedRef.current = tailKey;
+    lastReadAtRef.current = Math.max(lastReadAtRef.current, readAt);
     window.AkashicNative?.markSessionReadThrough(sessionId, readAt);
-  }, [isAtBottom, messages, scrollRef, sessionId, suspended]);
+  }, [isAtBottom, messages, projectionGeneration, resyncing, scrollRef, sessionId, suspended]);
 }
 
 /** 按顶层助手消息追踪当前阅读位置之后的未读集合。 */
