@@ -1,0 +1,9 @@
+{
+  "layer": "01-secure-realtime-client",
+  "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
+  "source_branch": "feature/im-phone",
+  "source_commit": "9ac2d220ce740f7d67dab2f8eef2651a2a3add65",
+  "source_paths": [
+    "clients/android"
+  ]
+}
