@@ -11,10 +11,14 @@ npm ci
 npm run typecheck
 npm run lint
 npm run test:mobile-web-state
+python3 -m unittest discover -s runtime-gate -p 'test_*.py'
+python3 runtime-gate/verify_contract.py --mobile-root .
 cd clients/android
 ./gradlew testDebugUnitTest lintDebug assembleDebug
 ./test-device-gate.sh
 ```
+
+`protocol/source.json` 固定客户端实现对应的历史协议快照；`runtime-gate/` 另外固定实际验收的核心 revision、tree 和 24 个跨仓库语义场景。两者变化时必须重新运行 runtime contract Gate，不能用浮动分支或本机核心 checkout 代替。
 
 ## 真实设备 Gate
 
