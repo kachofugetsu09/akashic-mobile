@@ -5,6 +5,7 @@ import android.net.Uri
 import android.database.sqlite.SQLiteException
 import android.util.Log
 import com.akashic.mobile.data.local.AttachmentDraftStore
+import com.akashic.mobile.data.local.AttachmentTransferEntity
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -61,7 +63,10 @@ data class MobileSessionState(
     val pairingConfirmationCode: String? = null,
     val currentSessionId: String? = null,
     val activeTurnId: String? = null,
+    val activeSessionIds: Set<String> = emptySet(),
     val hasActiveAttachmentDownload: Boolean = false,
+    val transferNetwork: TransferNetworkState = TransferNetworkState(TransferNetworkKind.UNAVAILABLE, false),
+    val meteredLargeTransferApproved: Boolean = false,
     val isStopping: Boolean = false,
     val commands: List<RemoteCommandItem> = emptyList(),
     val pluginUiAssets: List<MobileUiAssetPayload> = emptyList(),
@@ -105,6 +110,7 @@ class RealtimeSession(
     private val mediaCache: MediaCacheStore,
     private val preferences: AppPreferences,
     private val deviceKeys: DeviceKeyStore,
+    private val transferNetwork: StateFlow<TransferNetworkState>,
     private val scope: CoroutineScope,
     allowInsecureTransport: Boolean,
 ) : RealtimeSocketListener {
@@ -123,6 +129,7 @@ class RealtimeSession(
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
     private val mutex = Mutex()
+    private val attachmentOperations = AttachmentOperationOwner()
     private val socket = RealtimeWebSocketClient(this, allowInsecureTransport)
     private val uploads = AttachmentUploadCoordinator(
         dao = database.attachmentTransfers(),
@@ -133,6 +140,7 @@ class RealtimeSession(
         onUploadFailed = { message ->
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
+        canTransfer = ::canUploadAttachment,
     )
     private val downloads = AttachmentDownloadCoordinator(
         dao = database.mediaAttachments(),
@@ -158,6 +166,7 @@ class RealtimeSession(
     val finalMessages: Flow<FinalMessageEvent> = finalMessageEvents.receiveAsFlow()
 
     private val started = AtomicBoolean(false)
+    private var meteredLargeTransferApproved = false
     private var profile: ServerProfileEntity? = null
     private var pendingPairing: PendingPairing? = null
     private val challengedCandidates = mutableSetOf<SocketCandidateId>()
@@ -177,12 +186,18 @@ class RealtimeSession(
     private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
     private var pendingCommandListId: String? = null
     private var pendingPluginUiListId: String? = null
+    private var pendingPluginUiListUsesHotUpdates = false
+    private var pluginUiHotUpdatesEnabled = true
     private val pendingPluginUiAssets = mutableMapOf<String, MobileUiCatalogItem>()
     private val stagedPluginUiAssets = mutableMapOf<String, MobileUiAssetPayload>()
+    private var pluginUiRefreshQueued = false
     private val pendingPluginUiCalls = mutableMapOf<String, String>()
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
+        scope.launch {
+            transferNetwork.collectLatest(::applyTransferNetwork)
+        }
         scope.launch {
             val cacheReady = try {
                 attachmentDrafts.reconcile()
@@ -338,12 +353,14 @@ class RealtimeSession(
                     val currentProfile = requireNotNull(profile) { "Pair a server before attaching" }
                     currentProfile.serverId to ensureCurrentSession(currentProfile)
                 }
-                attachmentDrafts.import(
-                    serverId = target.first,
-                    sessionId = target.second,
-                    uris = uris,
-                    now = System.currentTimeMillis(),
-                )
+                attachmentOperations.perform {
+                    attachmentDrafts.import(
+                        serverId = target.first,
+                        sessionId = target.second,
+                        uris = uris,
+                        now = System.currentTimeMillis(),
+                    )
+                }
                 mutex.withLock {
                     if (mutableState.value.connection.phase == ConnectionPhase.READY) {
                         uploads.resumeIfIdle(target.first)
@@ -368,7 +385,7 @@ class RealtimeSession(
     fun removeAttachment(attachmentId: String) {
         scope.launch {
             try {
-                attachmentDrafts.remove(attachmentId)
+                attachmentOperations.perform { attachmentDrafts.remove(attachmentId) }
             } catch (error: IllegalStateException) {
                 mutex.withLock {
                     mutableState.value = mutableState.value.copy(errorMessage = error.message)
@@ -379,13 +396,45 @@ class RealtimeSession(
 
     fun retryAttachment(attachmentId: String) {
         scope.launch {
-            attachmentDrafts.retry(attachmentId, System.currentTimeMillis())
+            attachmentOperations.perform {
+                attachmentDrafts.retry(attachmentId, System.currentTimeMillis())
+            }
             mutex.withLock {
                 profile?.serverId?.let { serverId ->
                     if (mutableState.value.connection.phase == ConnectionPhase.READY) {
                         uploads.resumeIfIdle(serverId)
                     }
                 }
+            }
+        }
+    }
+
+    /** 用户确认本次运行允许大附件使用计费网络，并恢复原上传队列。 */
+    fun continueLargeTransfersOnMeteredNetwork() {
+        scope.launch {
+            mutex.withLock {
+                check(transferNetwork.value.kind == TransferNetworkKind.METERED) {
+                    "当前网络不是按流量计费网络"
+                }
+                meteredLargeTransferApproved = true
+                mutableState.value = mutableState.value.copy(meteredLargeTransferApproved = true)
+                profile?.serverId?.let { serverId ->
+                    if (mutableState.value.connection.phase == ConnectionPhase.READY) {
+                        uploads.resumeIfIdle(serverId)
+                    }
+                }
+            }
+        }
+    }
+
+    /** 原位恢复一条失败用户消息。 */
+    fun retryFailedMessage(messageId: String) {
+        scope.launch {
+            mutex.withLock {
+                val now = System.currentTimeMillis()
+                deliveryStore.retryFailedMessage(messageId, Ulid.next(now), now)
+                mutableState.value = mutableState.value.copy(errorMessage = null)
+                if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
             }
         }
     }
@@ -407,17 +456,40 @@ class RealtimeSession(
     }
 
     /** 创建本地消息和 outbox 命令，并在链路可用时立即发送。 */
-    fun sendMessage(text: String, replyToMessageId: String? = null) {
+    fun sendMessage(
+        text: String,
+        replyToMessageId: String? = null,
+        expectedAttachmentIds: List<String> = emptyList(),
+        onPersisted: (Boolean) -> Unit = {},
+    ) {
         enqueueMessage(
             text,
             includeDraftAttachments = true,
             replyToMessageId = replyToMessageId,
+            targetSessionId = null,
+            expectedAttachmentIds = expectedAttachmentIds,
+            onPersisted = onPersisted,
+        )
+    }
+
+    /** 从系统通知向指定手机会话发送纯文本回复。 */
+    fun sendNotificationReply(sessionId: String, text: String) {
+        enqueueMessage(
+            text,
+            includeDraftAttachments = false,
+            replyToMessageId = null,
+            targetSessionId = sessionId,
         )
     }
 
     /** 发送不携带或消费附件草稿的纯文本命令。 */
     fun sendCommand(command: String) {
-        enqueueMessage(command, includeDraftAttachments = false, replyToMessageId = null)
+        enqueueMessage(
+            command,
+            includeDraftAttachments = false,
+            replyToMessageId = null,
+            targetSessionId = null,
+        )
     }
 
     /** 从 Web UI 发起一个绑定渲染槽位会话与轮次的插件请求。 */
@@ -485,27 +557,67 @@ class RealtimeSession(
         text: String,
         includeDraftAttachments: Boolean,
         replyToMessageId: String?,
-    ) {
+        targetSessionId: String?,
+        expectedAttachmentIds: List<String> = emptyList(),
+        onPersisted: (Boolean) -> Unit = {},
+) {
         scope.launch {
-            mutex.withLock {
+            withSendResult(onPersisted) { reportResult ->
+                attachmentOperations.perform {
+                    mutex.withLock {
                 // 1. 确定当前手机会话
-                val currentProfile = requireNotNull(profile) { "Pair a server before sending" }
+                val currentProfile = profile ?: run {
+                    mutableState.value = mutableState.value.copy(errorMessage = "请先连接电脑")
+                    reportResult(false)
+                    return@withLock
+                }
                 val body = text.trim()
-                val sessionId = ensureCurrentSession(currentProfile)
+                val sessionId = targetSessionId ?: ensureCurrentSession(currentProfile)
                 require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                if (targetSessionId != null) {
+                    val conversation = requireNotNull(database.conversations().get(sessionId)) {
+                        "Unknown notification session: $sessionId"
+                    }
+                    require(conversation.serverId == currentProfile.serverId) {
+                        "Notification session belongs to another server"
+                    }
+                }
                 val attachments = if (includeDraftAttachments) {
                     database.attachmentTransfers().drafts(currentProfile.serverId, sessionId)
                 } else {
                     emptyList()
                 }
-                require(body.isNotEmpty() || attachments.isNotEmpty()) { "消息和附件不能同时为空" }
-                require(attachments.all { it.state == "ready" }) { "请等待附件上传完成" }
+                if (includeDraftAttachments && !attachmentDraftMatchesExpected(
+                        attachments.map { it.attachmentId },
+                        expectedAttachmentIds,
+                    )
+                ) {
+                    mutableState.value = mutableState.value.copy(errorMessage = "附件草稿已变化，请确认后重试")
+                    reportResult(false)
+                    return@withLock
+                }
+                if (body.isEmpty() && attachments.isEmpty()) {
+                    mutableState.value = mutableState.value.copy(errorMessage = "消息和附件不能同时为空")
+                    reportResult(false)
+                    return@withLock
+                }
+                if (attachments.any { it.state != "ready" }) {
+                    mutableState.value = mutableState.value.copy(errorMessage = "请等待附件上传完成")
+                    reportResult(false)
+                    return@withLock
+                }
                 val replyTarget = replyToMessageId?.let { messageId ->
-                    val target = requireNotNull(database.messages().get(messageId)) {
-                        "被引用的本地消息不存在: $messageId"
+                    val target = database.messages().get(messageId)
+                    if (target == null) {
+                        mutableState.value = mutableState.value.copy(errorMessage = "被引用的消息已不可用")
+                        reportResult(false)
+                        return@withLock
                     }
-                    require(target.sessionId == sessionId) { "不能引用其他会话的消息" }
-                    require(target.role in setOf("user", "assistant")) { "被引用消息角色无效" }
+                    if (target.sessionId != sessionId || target.role !in setOf("user", "assistant")) {
+                        mutableState.value = mutableState.value.copy(errorMessage = "被引用的消息已不可用")
+                        reportResult(false)
+                        return@withLock
+                    }
                     target
                 }
 
@@ -543,18 +655,23 @@ class RealtimeSession(
                     mutableState.value = mutableState.value.copy(
                         errorMessage = "保存已发送附件失败：${error.message}",
                     )
+                    reportResult(false)
                     return@withLock
                 } catch (error: SecurityException) {
                     mutableState.value = mutableState.value.copy(errorMessage = "附件缓存路径不安全")
+                    reportResult(false)
                     return@withLock
                 } catch (error: IllegalArgumentException) {
                     mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                    reportResult(false)
                     return@withLock
                 } catch (error: IllegalStateException) {
                     mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                    reportResult(false)
                     return@withLock
                 } catch (error: ArithmeticException) {
                     mutableState.value = mutableState.value.copy(errorMessage = "附件缓存配额计算溢出")
+                    reportResult(false)
                     return@withLock
                 }
                 val envelope = WireEnvelope(
@@ -602,7 +719,10 @@ class RealtimeSession(
                     ),
                     attachments = cachedAttachments,
                 )
+                reportResult(true)
                 if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
+                    }
+                }
             }
         }
     }
@@ -966,6 +1086,7 @@ class RealtimeSession(
                     )
                     "message.proactive" ->
                         downloads.resumeIfIdle(currentProfile.serverId)
+                    "plugin.ui.changed" -> requestPluginUiList()
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),
                     )
@@ -1011,14 +1132,29 @@ class RealtimeSession(
                 }
                 if (envelope.type == "plugin.ui.list.error" && id == pendingPluginUiListId) {
                     pendingPluginUiListId = null
+                    val errorCode = envelope.payload["code"]?.jsonPrimitive?.content
+                    if (pendingPluginUiListUsesHotUpdates && errorCode == "invalid_payload") {
+                        pendingPluginUiListUsesHotUpdates = false
+                        pluginUiHotUpdatesEnabled = false
+                        pluginUiRefreshQueued = false
+                        requestPluginUiList()
+                        return
+                    }
                     mutableState.value = mutableState.value.copy(
                         errorMessage = envelope.payload["message"]?.jsonPrimitive?.content
                             ?: "加载插件界面失败",
                     )
+                    requestQueuedPluginUiRefresh()
                     return
                 }
                 if (envelope.type == "plugin.ui.asset.error" && id in pendingPluginUiAssets) {
                     val failed = requireNotNull(pendingPluginUiAssets.remove(id))
+                    if (envelope.payload["code"]?.jsonPrimitive?.content == "plugin_unavailable") {
+                        stagedPluginUiAssets.clear()
+                        pluginUiRefreshQueued = true
+                        if (pendingPluginUiAssets.isEmpty()) requestQueuedPluginUiRefresh()
+                        return
+                    }
                     mutableState.value = mutableState.value.copy(
                         errorMessage = "加载插件界面失败：${failed.id}",
                     )
@@ -1053,10 +1189,20 @@ class RealtimeSession(
                     }
                     "message.send.error" -> {
                         require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的错误: $id" }
-                        deliveryStore.failOutbox(id, System.currentTimeMillis())
+                        val code = envelope.payload["code"]?.jsonPrimitive?.content
+                            ?: error("message.send.error 缺少 code")
+                        deliveryStore.retainFailedOutbox(
+                            id,
+                            outcomeUnknown = code == "command_outcome_unknown",
+                            updatedAt = System.currentTimeMillis(),
+                        )
                         activeOutboxCommandId = null
                         mutableState.value = mutableState.value.copy(
-                            errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "消息发送失败",
+                            errorMessage = if (code == "command_outcome_unknown") {
+                                "消息结果待确认，请在原消息下方核对"
+                            } else {
+                                envelope.payload["message"]?.jsonPrimitive?.content ?: "消息发送失败"
+                            },
                         )
                         flushOutbox()
                     }
@@ -1068,6 +1214,12 @@ class RealtimeSession(
                         )
                     }
                 }
+            }
+            WireKind.CONTROL -> {
+                require(envelope.type == "plugin.ui.changed") {
+                    "Unexpected authenticated control: ${envelope.type}"
+                }
+                requestPluginUiList()
             }
             else -> error("Unexpected authenticated server frame: ${envelope.kind}")
         }
@@ -1120,10 +1272,17 @@ class RealtimeSession(
     }
 
     private fun requestPluginUiList() {
-        if (pendingPluginUiListId != null) return
+        if (pendingPluginUiListId != null || pendingPluginUiAssets.isNotEmpty()) {
+            pluginUiRefreshQueued = true
+            return
+        }
+        pluginUiRefreshQueued = false
+        pendingPluginUiListUsesHotUpdates = pluginUiHotUpdatesEnabled
         pendingPluginUiListId = sendPluginUiCommand(
             type = "plugin.ui.list",
-            payload = buildJsonObject {},
+            payload = buildJsonObject {
+                if (pluginUiHotUpdatesEnabled) put("hot_updates", true)
+            },
         )
     }
 
@@ -1137,6 +1296,7 @@ class RealtimeSession(
         stagedPluginUiAssets.clear()
         if (catalog.items.isEmpty()) {
             mutableState.value = mutableState.value.copy(pluginUiAssets = emptyList())
+            requestQueuedPluginUiRefresh()
             return
         }
         for (item in catalog.items) {
@@ -1155,18 +1315,34 @@ class RealtimeSession(
             "收到未知插件 UI 资产 reply"
         }
         val asset = ProtocolCodec.decodePayload<MobileUiAssetPayload>(envelope.payload)
-        require(asset.id == expected.id && asset.revision == expected.revision && asset.sha256 == expected.sha256) {
-            "插件 UI 资产身份与目录不一致"
+        require(asset.id == expected.id) { "插件 UI 资产 ID 与目录不一致" }
+        if (asset.revision != expected.revision || asset.sha256 != expected.sha256) {
+            stagedPluginUiAssets.clear()
+            pluginUiRefreshQueued = true
+            if (pendingPluginUiAssets.isEmpty()) requestQueuedPluginUiRefresh()
+            return
         }
         require(mobileUiDigest(asset.module, asset.stylesheet) == asset.sha256) {
             "插件 UI 资产内容摘要不一致: ${asset.id}"
         }
         stagedPluginUiAssets[asset.id] = asset
         if (pendingPluginUiAssets.isEmpty()) {
+            if (pluginUiRefreshQueued) {
+                stagedPluginUiAssets.clear()
+                requestQueuedPluginUiRefresh()
+                return
+            }
             mutableState.value = mutableState.value.copy(
                 pluginUiAssets = stagedPluginUiAssets.values.sortedBy { it.id },
             )
+            requestQueuedPluginUiRefresh()
         }
+    }
+
+    private fun requestQueuedPluginUiRefresh() {
+        if (!pluginUiRefreshQueued) return
+        pluginUiRefreshQueued = false
+        requestPluginUiList()
     }
 
     private fun applyPluginUiCallReply(envelope: WireEnvelope) {
@@ -1328,6 +1504,7 @@ class RealtimeSession(
             messageId = messageId,
             content = content,
             hasAttachments = envelope.payload["attachments"]?.jsonArray?.isNotEmpty() == true,
+            attention = finalMessageAttention(envelope.payload),
         )
         check(finalMessageEvents.trySend(event).isSuccess) {
             "Final message notification queue is full"
@@ -1559,7 +1736,7 @@ class RealtimeSession(
         val currentProfile = requireNotNull(profile)
         val commandId = activeOutboxCommandId
         if (action == TerminalProtocolAction.FAIL_ACTIVE_COMMAND && commandId != null) {
-            deliveryStore.failOutbox(commandId, System.currentTimeMillis())
+            deliveryStore.discardFailedOutbox(commandId, System.currentTimeMillis())
             activeOutboxCommandId = null
             scheduleReconnect("消息格式无效，已标记发送失败")
             return
@@ -1625,8 +1802,11 @@ class RealtimeSession(
             )
         }
         pendingPluginUiListId = null
+        pendingPluginUiListUsesHotUpdates = false
+        pluginUiHotUpdatesEnabled = true
         pendingPluginUiAssets.clear()
         stagedPluginUiAssets.clear()
+        pluginUiRefreshQueued = false
         pendingPluginUiCalls.clear()
     }
 
@@ -1634,6 +1814,7 @@ class RealtimeSession(
         val sessionId = mutableState.value.currentSessionId
         mutableState.value = mutableState.value.copy(
             activeTurnId = stops.activeTurnId(sessionId),
+            activeSessionIds = stops.activeSessionIds(),
             isStopping = stops.isStopping(sessionId),
         )
     }
@@ -1641,6 +1822,32 @@ class RealtimeSession(
     private fun publishDownloadState(active: Boolean) {
         mutableState.value = mutableState.value.copy(hasActiveAttachmentDownload = active)
     }
+
+    /** 应用网络计费变化，并在策略允许时恢复同一持久化上传队列。 */
+    private suspend fun applyTransferNetwork(next: TransferNetworkState) {
+        mutex.withLock {
+            // 1. 离开计费网络后撤销一次性授权
+            if (next.kind != TransferNetworkKind.METERED) {
+                meteredLargeTransferApproved = false
+            }
+            mutableState.value = mutableState.value.copy(
+                transferNetwork = next,
+                meteredLargeTransferApproved = meteredLargeTransferApproved,
+            )
+
+            // 2. 网络策略放行后继续既有可断点队列
+            profile?.serverId?.let { serverId ->
+                if (mutableState.value.connection.phase == ConnectionPhase.READY) {
+                    uploads.resumeIfIdle(serverId)
+                }
+            }
+        }
+    }
+
+    private fun canUploadAttachment(transfer: AttachmentTransferEntity): Boolean =
+        transfer.sizeBytes < LARGE_TRANSFER_BYTES ||
+            transferNetwork.value.kind != TransferNetworkKind.METERED ||
+            meteredLargeTransferApproved
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(
         v = WIRE_PROTOCOL_VERSION,
@@ -1667,5 +1874,6 @@ class RealtimeSession(
         const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
+        const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
     }
 }

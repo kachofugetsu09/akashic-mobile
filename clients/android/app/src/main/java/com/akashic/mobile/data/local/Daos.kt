@@ -34,6 +34,57 @@ interface ConversationDao {
     @Query("SELECT * FROM conversations WHERE serverId = :serverId ORDER BY updatedAt DESC")
     fun observeForServer(serverId: String): Flow<List<ConversationEntity>>
 
+    @Query(
+        """
+        SELECT
+          conversation.sessionId AS sessionId,
+          conversation.title AS title,
+          (
+            SELECT CASE
+              WHEN TRIM(message.text) != '' THEN REPLACE(REPLACE(TRIM(message.text), CHAR(10), ' '), CHAR(13), ' ')
+              WHEN EXISTS (
+                SELECT 1 FROM message_attachments AS relation
+                WHERE relation.messageId = message.messageId
+              ) THEN '[附件]'
+              ELSE NULL
+            END
+            FROM messages AS message
+            WHERE message.sessionId = conversation.sessionId
+            ORDER BY message.createdAt DESC, message.messageId DESC
+            LIMIT 1
+          ) AS lastMessagePreview,
+          (
+            SELECT message.createdAt
+            FROM messages AS message
+            WHERE message.sessionId = conversation.sessionId
+            ORDER BY message.createdAt DESC, message.messageId DESC
+            LIMIT 1
+          ) AS lastMessageAt,
+          CASE WHEN read_state.sessionId IS NULL THEN 0 ELSE (
+            SELECT COUNT(*)
+            FROM messages AS message
+            WHERE message.sessionId = conversation.sessionId
+              AND message.role = 'assistant'
+              AND message.deliveryState = 'complete'
+              AND message.createdAt > read_state.lastReadAt
+          ) END AS unreadCount,
+          EXISTS (
+            SELECT 1 FROM messages AS message
+            WHERE message.sessionId = conversation.sessionId
+              AND message.role = 'assistant'
+              AND message.deliveryState = 'streaming'
+          ) AS isRunning,
+          read_state.anchorMessageId AS anchorMessageId,
+          COALESCE(read_state.anchorOffsetPx, 0) AS anchorOffsetPx
+        FROM conversations AS conversation
+        LEFT JOIN conversation_read_states AS read_state
+          ON read_state.sessionId = conversation.sessionId
+        WHERE conversation.serverId = :serverId
+        ORDER BY COALESCE(lastMessageAt, conversation.updatedAt) DESC, conversation.sessionId
+        """,
+    )
+    fun observeSummaries(serverId: String): Flow<List<ConversationSummary>>
+
     @Query("SELECT * FROM conversations WHERE sessionId = :sessionId")
     suspend fun get(sessionId: String): ConversationEntity?
 
@@ -54,6 +105,52 @@ interface ConversationDao {
 }
 
 @Dao
+interface ConversationReadStateDao {
+    @Query(
+        """
+        UPDATE conversation_read_states
+        SET anchorMessageId = :targetMessageId
+        WHERE sessionId = :sessionId AND anchorMessageId = :sourceMessageId
+        """,
+    )
+    suspend fun moveAnchor(sessionId: String, sourceMessageId: String, targetMessageId: String): Int
+
+    @Query(
+        """
+        INSERT INTO conversation_read_states (
+          sessionId, lastReadAt, anchorMessageId, anchorOffsetPx, updatedAt
+        ) VALUES (
+          :sessionId,
+          COALESCE((
+            SELECT MAX(createdAt) FROM messages
+            WHERE sessionId = :sessionId AND role = 'assistant'
+          ), 0),
+          :messageId,
+          :offsetPx,
+          :updatedAt
+        )
+        ON CONFLICT(sessionId) DO UPDATE SET
+          anchorMessageId = excluded.anchorMessageId,
+          anchorOffsetPx = excluded.anchorOffsetPx,
+          updatedAt = excluded.updatedAt
+        """,
+    )
+    suspend fun savePosition(sessionId: String, messageId: String, offsetPx: Int, updatedAt: Long)
+
+    @Query(
+        """
+        INSERT INTO conversation_read_states (
+          sessionId, lastReadAt, anchorMessageId, anchorOffsetPx, updatedAt
+        ) VALUES (:sessionId, :readAt, NULL, 0, :updatedAt)
+        ON CONFLICT(sessionId) DO UPDATE SET
+          lastReadAt = MAX(lastReadAt, excluded.lastReadAt),
+          updatedAt = excluded.updatedAt
+        """,
+    )
+    suspend fun markReadThrough(sessionId: String, readAt: Long, updatedAt: Long)
+}
+
+@Dao
 interface MessageDao {
     @Upsert
     suspend fun upsert(message: MessageEntity)
@@ -62,8 +159,23 @@ interface MessageDao {
     suspend fun upsertBlocks(blocks: List<TurnBlockEntity>)
 
     @Query(
-        "SELECT * FROM messages WHERE sessionId = :sessionId " +
-            "ORDER BY CASE WHEN serverSeq IS NULL THEN 1 ELSE 0 END, serverSeq, createdAt, messageId",
+        """
+        SELECT * FROM messages AS local
+        WHERE local.sessionId = :sessionId
+        ORDER BY
+          CASE WHEN local.serverSeq IS NOT NULL THEN local.serverSeq ELSE COALESCE(
+            (
+              SELECT MIN(remote.serverSeq) FROM messages AS remote
+              WHERE remote.sessionId = local.sessionId
+                AND remote.serverSeq IS NOT NULL
+                AND remote.createdAt >= local.createdAt
+            ),
+            9223372036854775807
+          ) END,
+          CASE WHEN local.serverSeq IS NULL THEN 0 ELSE 1 END,
+          local.createdAt,
+          local.messageId
+        """,
     )
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>>
 
@@ -75,6 +187,9 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE messageId = :messageId")
     suspend fun get(messageId: String): MessageEntity?
+
+    @Query("SELECT * FROM messages WHERE clientMessageId = :clientMessageId")
+    suspend fun getByClientMessageId(clientMessageId: String): MessageEntity?
 
     @Query(
         """
@@ -139,7 +254,7 @@ interface MessageDao {
         WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)
           AND NOT (
             clientMessageId IS NOT NULL
-            AND deliveryState IN ('pending', 'sent', 'failed')
+            AND deliveryState IN ('pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown')
           )
         """,
     )
@@ -151,7 +266,7 @@ interface MessageDao {
         WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)
           AND NOT (
             clientMessageId IS NOT NULL
-            AND deliveryState IN ('pending', 'failed')
+            AND deliveryState IN ('pending', 'failed', 'failed_retryable', 'outcome_unknown')
           )
         """,
     )
@@ -159,6 +274,22 @@ interface MessageDao {
 
     @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE clientMessageId = :clientMessageId")
     suspend fun updateDelivery(clientMessageId: String, state: String, updatedAt: Long): Int
+
+    @Query(
+        """
+        UPDATE messages
+        SET clientMessageId = :newClientMessageId, deliveryState = 'pending', updatedAt = :updatedAt
+        WHERE messageId = :messageId
+          AND clientMessageId = :oldClientMessageId
+          AND deliveryState = 'failed_retryable'
+        """,
+    )
+    suspend fun replaceRetryIdentity(
+        messageId: String,
+        oldClientMessageId: String,
+        newClientMessageId: String,
+        updatedAt: Long,
+    ): Int
 
     @Query("UPDATE turn_blocks SET status = 'completed', updatedAt = :updatedAt WHERE messageId = :messageId AND status = 'running'")
     suspend fun completeRunningBlocks(messageId: String, updatedAt: Long): Int
@@ -171,8 +302,23 @@ interface MessageDao {
 
     @Transaction
     @Query(
-        "SELECT * FROM messages WHERE sessionId = :sessionId " +
-            "ORDER BY CASE WHEN serverSeq IS NULL THEN 1 ELSE 0 END, serverSeq, createdAt, messageId",
+        """
+        SELECT * FROM messages AS local
+        WHERE local.sessionId = :sessionId
+        ORDER BY
+          CASE WHEN local.serverSeq IS NOT NULL THEN local.serverSeq ELSE COALESCE(
+            (
+              SELECT MIN(remote.serverSeq) FROM messages AS remote
+              WHERE remote.sessionId = local.sessionId
+                AND remote.serverSeq IS NOT NULL
+                AND remote.createdAt >= local.createdAt
+            ),
+            9223372036854775807
+          ) END,
+          CASE WHEN local.serverSeq IS NULL THEN 0 ELSE 1 END,
+          local.createdAt,
+          local.messageId
+        """,
     )
     fun observeMessageGraph(sessionId: String): Flow<List<MessageWithBlocks>>
 }
@@ -202,6 +348,12 @@ interface OutboxDao {
 
     @Query("UPDATE outbox_commands SET state = 'retry' WHERE commandId = :commandId AND state = 'in_flight'")
     suspend fun markForRetry(commandId: String): Int
+
+    @Query("UPDATE outbox_commands SET state = :failureState WHERE commandId = :commandId AND state = 'in_flight'")
+    suspend fun markFailed(commandId: String, failureState: String): Int
+
+    @Query("UPDATE outbox_commands SET state = 'retry' WHERE commandId = :commandId AND state = 'outcome_unknown'")
+    suspend fun recheckUnknown(commandId: String): Int
 
     @Query("DELETE FROM outbox_commands WHERE commandId = :commandId")
     suspend fun deleteAcknowledged(commandId: String): Int
@@ -261,6 +413,15 @@ interface AttachmentTransferDao {
 
     @Query(
         """
+        SELECT * FROM attachment_transfers
+        WHERE serverId = :serverId AND state IN ('pending', 'uploading', 'finishing')
+        ORDER BY updatedAt ASC
+        """,
+    )
+    fun observeActiveUploads(serverId: String): Flow<List<AttachmentTransferEntity>>
+
+    @Query(
+        """
         UPDATE attachment_transfers
         SET state = 'uploading', updatedAt = :updatedAt
         WHERE attachmentId = :attachmentId AND state IN ('pending', 'uploading', 'finishing')
@@ -281,6 +442,15 @@ interface AttachmentTransferDao {
         state: String,
         updatedAt: Long,
     ): Int
+
+    @Query(
+        """
+        UPDATE attachment_transfers
+        SET state = 'pending', updatedAt = :updatedAt
+        WHERE attachmentId = :attachmentId AND state = 'failed'
+        """,
+    )
+    suspend fun retryFailed(attachmentId: String, updatedAt: Long): Int
 
     @Query("UPDATE attachment_transfers SET state = 'sent', updatedAt = :updatedAt WHERE attachmentId IN (:ids)")
     suspend fun markSent(ids: List<String>, updatedAt: Long): Int
@@ -398,7 +568,7 @@ interface MediaAttachmentDao {
         """
         UPDATE media_attachments
         SET state = 'pending', updatedAt = :updatedAt
-        WHERE attachmentId = :attachmentId AND state IN ('failed', 'evicted')
+        WHERE attachmentId = :attachmentId AND state IN ('remote', 'failed', 'evicted')
         """,
     )
     suspend fun requestDownload(attachmentId: String, updatedAt: Long): Int

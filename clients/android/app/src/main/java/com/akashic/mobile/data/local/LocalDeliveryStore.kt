@@ -10,6 +10,7 @@ import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
 import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
+import com.akashic.mobile.data.realtime.finalMessageAttention
 import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -123,6 +124,7 @@ class LocalDeliveryStore(
                 "Event sequence gap: expected ${cursor.lastAcknowledgedEventSeq + 1}, got $eventSeq"
             }
 
+            if (envelope.type == "message.final") finalMessageAttention(envelope.payload)
             applyEventContent(serverId, envelope, updatedAt)
             val changed = database.realtimeCursors().advance(
                 deviceId = deviceId,
@@ -165,7 +167,23 @@ class LocalDeliveryStore(
             payload.mediaRefs
         }
 
-    suspend fun failOutbox(commandId: String, updatedAt: Long) {
+    /** 保留失败命令，使消息可以安全重试或用原幂等键核对结果。 */
+    suspend fun retainFailedOutbox(commandId: String, outcomeUnknown: Boolean, updatedAt: Long) {
+        database.withTransaction {
+            val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
+            val envelope = ProtocolCodec.decode(command.envelopeJson)
+            val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+            val state = if (outcomeUnknown) "outcome_unknown" else "failed_retryable"
+            check(database.messages().updateDelivery(payload.clientMessageId, state, updatedAt) == 1)
+            if (payload.mediaRefs.isNotEmpty()) {
+                check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+            }
+            check(database.outbox().markFailed(commandId, state) == 1)
+        }
+    }
+
+    /** 丢弃不可重试的协议坏命令，并保留原消息作为失败记录。 */
+    suspend fun discardFailedOutbox(commandId: String, updatedAt: Long) {
         database.withTransaction {
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
@@ -177,6 +195,65 @@ class LocalDeliveryStore(
             check(database.outbox().deleteAcknowledged(commandId) == 1)
         }
     }
+
+    /** 原位重试失败消息，并按失败语义选择原幂等键或新命令 ID。 */
+    suspend fun retryFailedMessage(messageId: String, newCommandId: String, updatedAt: Long): Boolean =
+        database.withTransaction {
+            // 1. 恢复失败消息、命令和附件不变量
+            val message = requireNotNull(database.messages().get(messageId)) { "Unknown failed message: $messageId" }
+            require(message.role == "user") { "Only user messages can be retried" }
+            if (message.deliveryState in setOf("pending", "sent", "complete")) {
+                return@withTransaction false
+            }
+            val clientMessageId = requireNotNull(message.clientMessageId) { "Failed message has no client id" }
+            val command = requireNotNull(database.outbox().get(clientMessageId)) { "Failed message has no outbox command" }
+            val envelope = ProtocolCodec.decode(command.envelopeJson)
+            val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+            require(payload.clientMessageId == clientMessageId) { "Outbox client id mismatch" }
+            require(command.state == message.deliveryState) { "Outbox and message failure states diverged" }
+
+            // 2. 未知结果复用原幂等键；明确失败生成新幂等键但保留视觉消息 ID
+            if (command.state == "outcome_unknown") {
+                check(database.outbox().recheckUnknown(command.commandId) == 1)
+                check(database.messages().updateDelivery(clientMessageId, "pending", updatedAt) == 1)
+            } else {
+                require(command.state == "failed_retryable") { "Message is not retryable: ${command.state}" }
+                val retryPayload = payload.copy(clientMessageId = newCommandId)
+                val retryEnvelope = envelope.copy(
+                    id = newCommandId,
+                    payload = ProtocolCodec.json().encodeToJsonElement(
+                        com.akashic.mobile.data.realtime.MessageSendPayload.serializer(),
+                        retryPayload,
+                    ).jsonObject,
+                )
+                check(
+                    database.messages().replaceRetryIdentity(
+                        messageId,
+                        clientMessageId,
+                        newCommandId,
+                        updatedAt,
+                    ) == 1,
+                )
+                check(database.outbox().deleteAcknowledged(command.commandId) == 1)
+                database.outbox().enqueue(
+                    OutboxCommandEntity(
+                        commandId = newCommandId,
+                        serverId = command.serverId,
+                        envelopeJson = ProtocolCodec.encode(retryEnvelope),
+                        state = "pending",
+                        attemptCount = 0,
+                        createdAt = command.createdAt,
+                        lastAttemptAt = null,
+                    ),
+                )
+            }
+
+            // 3. 重新占用原附件，ACK 或下一次失败负责推进最终状态
+            if (payload.mediaRefs.isNotEmpty()) {
+                check(database.attachmentTransfers().markSending(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+            }
+            true
+        }
 
     private suspend fun applyEventContent(serverId: String, envelope: WireEnvelope, updatedAt: Long) {
         when (envelope.type) {
@@ -285,7 +362,9 @@ class LocalDeliveryStore(
                 replyRole = remote.replyRole,
                 replyPreview = remote.replyPreview,
             )
-            val sourceId = remote.clientMessageId?.let { "user:$it" }
+            val sourceId = remote.clientMessageId?.let {
+                database.messages().getByClientMessageId(it)?.messageId
+            }
                 ?: legacyLocalSourceId(canonical)
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
@@ -598,10 +677,9 @@ class LocalDeliveryStore(
         require(canonicalId.isNotBlank() && canonicalId.length <= 512) {
             "Canonical user message id is invalid"
         }
-        val sourceId = "user:$clientMessageId"
-        val source = database.messages().get(sourceId) ?: return
+        val source = database.messages().getByClientMessageId(clientMessageId) ?: return
         mergeCanonicalMessage(
-            sourceId,
+            source.messageId,
             source.copy(
                 messageId = canonicalId,
                 deliveryState = "complete",
@@ -640,7 +718,8 @@ class LocalDeliveryStore(
         }
         messages.upsert(canonical)
 
-        // 2. 将流式子项迁移后删除旧身份
+        // 2. 将阅读位置与流式子项迁移后删除旧身份
+        database.conversationReadStates().moveAnchor(source.sessionId, sourceId, canonical.messageId)
         messages.moveBlocks(sourceId, canonical.messageId)
         media.moveLinks(sourceId, canonical.messageId)
         check(messages.delete(sourceId) == 1) { "Source message disappeared during canonical merge" }
@@ -727,7 +806,7 @@ class LocalDeliveryStore(
                     sizeBytes = descriptor.sizeBytes,
                     sha256 = descriptor.sha256.lowercase(),
                     transferredBytes = 0,
-                    state = "pending",
+                    state = if (descriptor.sizeBytes >= AUTO_DOWNLOAD_LIMIT_BYTES) "remote" else "pending",
                     cachePath = mediaCache.cachePath(descriptor.attachmentId),
                     lastAccessedAt = updatedAt,
                     updatedAt = updatedAt,
@@ -763,6 +842,7 @@ class LocalDeliveryStore(
 
     private companion object {
         const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
+        const val AUTO_DOWNLOAD_LIMIT_BYTES = 10L * 1024 * 1024
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val FRAME_ID = Regex(
             "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +

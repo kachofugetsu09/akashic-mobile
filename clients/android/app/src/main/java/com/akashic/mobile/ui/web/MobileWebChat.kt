@@ -16,6 +16,7 @@ import android.webkit.ConsoleMessage
 import android.util.Log
 import android.view.HapticFeedbackConstants
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.annotation.Keep
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,6 +59,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import org.json.JSONObject
 
 private const val MOBILE_WEB_URL = "https://appassets.androidplatform.net/assets/mobile.html"
 private const val MOBILE_WEB_LOG_TAG = "AkashicMobileWeb"
@@ -74,16 +76,23 @@ fun MobileWebChat(
     onAttach: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onRetryAttachment: (String) -> Unit,
+    onContinueMeteredTransfer: () -> Unit,
+    onRetryFailedMessage: (String) -> Unit,
+    onSaveReadingPosition: (String, String, Int) -> Unit,
+    onMarkSessionReadThrough: (String, Long) -> Unit,
+    onNavigationTargetHandled: (String) -> Unit,
     onRetryDownloadedAttachment: (String) -> Unit,
     onTouchDownloadedAttachment: (String) -> Unit,
     onOpenDownloadedAttachment: (String) -> Unit,
     onShareDownloadedAttachment: (String) -> Unit,
+    onSaveDownloadedAttachment: (String) -> Unit,
     onDismissError: () -> Unit,
-    onSend: (String, String?) -> Unit,
+    onSend: (String, String?, List<String>, (Boolean) -> Unit) -> Unit,
     onSendCommand: (String) -> Unit,
     onPluginUiCall: (String, String?, String?, String, String, String) -> Unit,
     onPluginUiResponsesAcknowledged: (Set<String>) -> Unit,
     onStop: () -> Unit,
+    onBackAtRoot: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val latestState by rememberUpdatedState(state)
@@ -91,6 +100,7 @@ fun MobileWebChat(
     var webView by remember { mutableStateOf<WebView?>(null) }
     var snapshotPump by remember { mutableStateOf<MobileSnapshotPump?>(null) }
     var webLoadError by remember { mutableStateOf<String?>(null) }
+    var webHistoryActive by remember { mutableStateOf(false) }
 
     val callbacks by rememberUpdatedState(
         MobileWebCallbacks(
@@ -101,10 +111,16 @@ fun MobileWebChat(
             onAttach = onAttach,
             onRemoveAttachment = onRemoveAttachment,
             onRetryAttachment = onRetryAttachment,
+            onContinueMeteredTransfer = onContinueMeteredTransfer,
+            onRetryFailedMessage = onRetryFailedMessage,
+            onSaveReadingPosition = onSaveReadingPosition,
+            onMarkSessionReadThrough = onMarkSessionReadThrough,
+            onNavigationTargetHandled = onNavigationTargetHandled,
             onRetryDownloadedAttachment = onRetryDownloadedAttachment,
             onTouchDownloadedAttachment = onTouchDownloadedAttachment,
             onOpenDownloadedAttachment = onOpenDownloadedAttachment,
             onShareDownloadedAttachment = onShareDownloadedAttachment,
+            onSaveDownloadedAttachment = onSaveDownloadedAttachment,
             onDismissError = onDismissError,
             onSend = onSend,
             onSendCommand = onSendCommand,
@@ -156,9 +172,19 @@ fun MobileWebChat(
                                 ClipData.newPlainText("Akashic message", text),
                             )
                         },
-                        performReplyHaptic = {
+                        performActionHaptic = {
                             post {
                                 performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            }
+                        },
+                        setWebHistoryActive = { active -> post { webHistoryActive = active } },
+                        reportSendResult = { requestId, accepted ->
+                            post {
+                                evaluateJavascript(
+                                    "window.AkashicMobile?.receiveSendResult(" +
+                                        "${JSONObject.quote(requestId)},$accepted)",
+                                    null,
+                                )
                             }
                         },
                     ),
@@ -202,7 +228,26 @@ fun MobileWebChat(
         }
     }
 
+    BackHandler {
+        val current = webView
+        if (current == null) {
+            onBackAtRoot()
+        } else {
+            current.evaluateJavascript(
+                "window.AkashicMobile?.navigateBack?.() ?? false",
+            ) { result ->
+                if (!mobileWebBackHandled(result)) current.post(onBackAtRoot)
+            }
+        }
+    }
+
     SideEffect { snapshotPump?.submit(state) }
+    BackHandler(enabled = webHistoryActive) {
+        val current = requireNotNull(webView) { "Web history owner is unavailable" }
+        check(current.canGoBack()) { "Web history active without a back entry" }
+        webHistoryActive = false
+        current.goBack()
+    }
     DisposableEffect(Unit) {
         onDispose {
             snapshotPump?.cancel()
@@ -220,12 +265,18 @@ private data class MobileWebCallbacks(
     val onAttach: () -> Unit,
     val onRemoveAttachment: (String) -> Unit,
     val onRetryAttachment: (String) -> Unit,
+    val onContinueMeteredTransfer: () -> Unit,
+    val onRetryFailedMessage: (String) -> Unit,
+    val onSaveReadingPosition: (String, String, Int) -> Unit,
+    val onMarkSessionReadThrough: (String, Long) -> Unit,
+    val onNavigationTargetHandled: (String) -> Unit,
     val onRetryDownloadedAttachment: (String) -> Unit,
     val onTouchDownloadedAttachment: (String) -> Unit,
     val onOpenDownloadedAttachment: (String) -> Unit,
     val onShareDownloadedAttachment: (String) -> Unit,
+    val onSaveDownloadedAttachment: (String) -> Unit,
     val onDismissError: () -> Unit,
-    val onSend: (String, String?) -> Unit,
+    val onSend: (String, String?, List<String>, (Boolean) -> Unit) -> Unit,
     val onSendCommand: (String) -> Unit,
     val onPluginUiCall: (String, String?, String?, String, String, String) -> Unit,
     val onPluginUiResponsesAcknowledged: (Set<String>) -> Unit,
@@ -238,7 +289,9 @@ private class MobileWebBridge(
     private val reportReady: () -> Unit,
     private val requestSnapshot: () -> Unit,
     private val copyText: (String) -> Unit,
-    private val performReplyHaptic: () -> Unit,
+    private val performActionHaptic: () -> Unit,
+    private val setWebHistoryActive: (Boolean) -> Unit,
+    private val reportSendResult: (String, Boolean) -> Unit,
 ) {
     @JavascriptInterface
     fun reportReady() = reportReady.invoke()
@@ -268,6 +321,27 @@ private class MobileWebBridge(
     fun retryAttachment(attachmentId: String) = dispatch { it.onRetryAttachment(attachmentId) }
 
     @JavascriptInterface
+    fun continueMeteredTransfer() = dispatch { it.onContinueMeteredTransfer() }
+
+    @JavascriptInterface
+    fun retryFailedMessage(messageId: String) = dispatch { it.onRetryFailedMessage(messageId) }
+
+    @JavascriptInterface
+    fun saveReadingPosition(sessionId: String, messageId: String, offsetPx: Int) = dispatch {
+        it.onSaveReadingPosition(sessionId, messageId, offsetPx)
+    }
+
+    @JavascriptInterface
+    fun markSessionReadThrough(sessionId: String, readAtMillis: Long) = dispatch {
+        it.onMarkSessionReadThrough(sessionId, readAtMillis)
+    }
+
+    @JavascriptInterface
+    fun navigationTargetHandled(messageId: String) = dispatch {
+        it.onNavigationTargetHandled(messageId)
+    }
+
+    @JavascriptInterface
     fun retryDownloadedAttachment(attachmentId: String) = dispatch {
         it.onRetryDownloadedAttachment(attachmentId)
     }
@@ -288,18 +362,43 @@ private class MobileWebBridge(
     }
 
     @JavascriptInterface
+    fun saveDownloadedAttachment(attachmentId: String) = dispatch {
+        it.onSaveDownloadedAttachment(attachmentId)
+    }
+
+    @JavascriptInterface
+    fun setWebHistoryActive(active: Boolean) = setWebHistoryActive.invoke(active)
+
+    @JavascriptInterface
     fun dismissError() = dispatch { it.onDismissError() }
 
     @JavascriptInterface
-    fun sendMessage(text: String, replyToMessageId: String) = dispatch {
-        it.onSend(text, replyToMessageId.ifBlank { null })
+    fun sendMessage(
+        requestId: String,
+        text: String,
+        replyToMessageId: String,
+        attachmentIdsJson: String,
+    ) = dispatch {
+        val attachmentIds = try {
+            Json.decodeFromString<List<String>>(attachmentIdsJson)
+        } catch (_: SerializationException) {
+            reportSendResult(requestId, false)
+            return@dispatch
+        }
+        if (attachmentIds.distinct().size != attachmentIds.size) {
+            reportSendResult(requestId, false)
+            return@dispatch
+        }
+        it.onSend(text, replyToMessageId.ifBlank { null }, attachmentIds) { accepted ->
+            reportSendResult(requestId, accepted)
+        }
     }
 
     @JavascriptInterface
     fun copyText(text: String) = copyText.invoke(text)
 
     @JavascriptInterface
-    fun performReplyHaptic() = performReplyHaptic.invoke()
+    fun performActionHaptic() = performActionHaptic.invoke()
 
     @JavascriptInterface
     fun sendCommand(command: String) = dispatch { it.onSendCommand(command) }
@@ -425,6 +524,8 @@ private class MobileWebClient(
 }
 
 internal enum class MobileNavigationAction { ALLOW_INTERNAL, OPEN_EXTERNAL, BLOCK }
+
+internal fun mobileWebBackHandled(javascriptResult: String?): Boolean = javascriptResult == "true"
 
 /** 只允许应用主页面留在 WebView，普通网页交给系统浏览器。 */
 internal fun mobileNavigationAction(url: String, isMainFrame: Boolean): MobileNavigationAction {

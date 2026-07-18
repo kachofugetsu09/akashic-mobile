@@ -9,9 +9,13 @@ data class ConversationUiState(
     val errorNotice: String?,
     val sessions: List<SessionUi>,
     val selectedSessionId: String?,
+    val readingPosition: ReadingPositionUi?,
+    val navigationTarget: NavigationTargetUi?,
     val projectionGeneration: Long,
     val messages: List<MessageUi>,
     val attachments: List<ComposerAttachmentUi>,
+    val pendingMessages: List<PendingMessageUi>,
+    val transferStatus: TransferStatusUi? = null,
     val commands: List<CommandUi>,
     val pluginUiAssets: List<PluginUiAssetUi> = emptyList(),
     val pluginUiResponses: List<PluginUiResponseUi> = emptyList(),
@@ -21,6 +25,13 @@ data class ConversationUiState(
     val isStopping: Boolean,
     val canStop: Boolean,
     val canSend: Boolean,
+)
+
+data class TransferStatusUi(
+    val title: String,
+    val detail: String,
+    val progressPercent: Int,
+    val requiresMeteredApproval: Boolean,
 )
 
 data class PluginUiAssetUi(
@@ -49,6 +60,7 @@ data class ComposerAttachmentUi(
 
 enum class ComposerAttachmentState {
     WAITING_FOR_CONNECTION,
+    WAITING_FOR_METERED_APPROVAL,
     UPLOADING,
     READY,
     FAILED,
@@ -57,6 +69,26 @@ enum class ComposerAttachmentState {
 data class SessionUi(
     val sessionId: String,
     val title: String,
+    val lastMessagePreview: String?,
+    val lastMessageAtMillis: Long?,
+    val unreadCount: Int,
+    val isRunning: Boolean,
+)
+
+data class ReadingPositionUi(
+    val messageId: String,
+    val offsetPx: Int,
+)
+
+data class NavigationTargetUi(
+    val sessionId: String,
+    val messageId: String,
+)
+
+data class PendingMessageUi(
+    val messageId: String,
+    val preview: String,
+    val createdAtMillis: Long,
 )
 
 data class CommandUi(
@@ -69,6 +101,11 @@ data class MessageReplyUi(
     val role: String,
     val preview: String,
 )
+
+enum class MessageDeliveryActionUi {
+    RETRY,
+    VERIFY,
+}
 
 enum class ConnectionStatusUi {
     CONNECTING,
@@ -92,6 +129,7 @@ sealed interface MessageUi {
         val text: String,
         val deliveryLabel: String,
         val replyable: Boolean,
+        val deliveryAction: MessageDeliveryActionUi? = null,
         override val createdAtMillis: Long,
         override val reply: MessageReplyUi?,
         override val attachments: List<MessageAttachmentUi> = emptyList(),
@@ -133,6 +171,7 @@ data class MessageAttachmentUi(
 )
 
 enum class MessageAttachmentState {
+    REMOTE,
     PENDING,
     DOWNLOADING,
     CACHED,
@@ -169,9 +208,12 @@ internal val EmptyConversationState = ConversationUiState(
     errorNotice = null,
     sessions = emptyList(),
     selectedSessionId = null,
+    readingPosition = null,
+    navigationTarget = null,
     projectionGeneration = 0,
     messages = emptyList(),
     attachments = emptyList(),
+    pendingMessages = emptyList(),
     commands = emptyList(),
     isStreaming = false,
     isResyncing = false,
@@ -187,11 +229,13 @@ internal val PreviewConversationState = ConversationUiState(
     connectionNotice = "网络不稳 · 消息已缓存，正在续传",
     errorNotice = "附件读取失败，请重新选择文件。",
     sessions = listOf(
-        SessionUi("mobile:preview-1", "Android 会话设计"),
-        SessionUi("mobile:preview-2", "网络抖动恢复策略"),
-        SessionUi("mobile:preview-3", "Material 3 交互细节"),
+        SessionUi("mobile:preview-1", "Android 会话设计", "正在检查实时链路", 1_752_681_601_000, 0, true),
+        SessionUi("mobile:preview-2", "网络抖动恢复策略", "恢复窗口已经确认", 1_752_681_500_000, 2, false),
+        SessionUi("mobile:preview-3", "Material 3 交互细节", null, null, 0, false),
     ),
     selectedSessionId = "mobile:preview-1",
+    readingPosition = null,
+    navigationTarget = null,
     projectionGeneration = 0,
     messages = listOf(
         MessageUi.User(
@@ -265,6 +309,7 @@ internal val PreviewConversationState = ConversationUiState(
             canRemove = false,
         ),
     ),
+    pendingMessages = emptyList(),
     commands = listOf(
         CommandUi("undo", "撤销上一轮对话"),
         CommandUi("memorystatus", "查看记忆整理状态"),

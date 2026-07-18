@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.data.local.MessageAttachmentWithMedia
 import com.akashic.mobile.data.local.decodeStoredToolBlock
+import com.akashic.mobile.data.realtime.TransferNetworkKind
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
@@ -15,35 +16,45 @@ import com.akashic.mobile.ui.conversation.ComposerAttachmentUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.MessageUi
+import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
 import com.akashic.mobile.ui.conversation.ProcessBlockKind
 import com.akashic.mobile.ui.conversation.ProcessBlockState
 import com.akashic.mobile.ui.conversation.ProcessBlockUi
+import com.akashic.mobile.ui.conversation.ReadingPositionUi
+import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.PluginUiAssetUi
 import com.akashic.mobile.ui.conversation.PluginUiResponseUi
+import com.akashic.mobile.ui.conversation.PendingMessageUi
 import com.akashic.mobile.ui.conversation.SessionUi
+import com.akashic.mobile.ui.conversation.TransferStatusUi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlin.math.ceil
+
+private const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val container = (application as App).container
     val sessionState = container.realtimeSession.state
+    private val navigationTarget = MutableStateFlow<NavigationTargetUi?>(null)
 
     private val messageGraph = sessionState.flatMapLatest { state ->
         state.currentSessionId?.let(container.database.messages()::observeMessageGraph) ?: flowOf(emptyList())
     }
 
     private val conversations = sessionState.flatMapLatest { state ->
-        state.serverId?.let(container.database.conversations()::observeForServer) ?: flowOf(emptyList())
+        state.serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
     }
 
     private val attachmentDrafts = sessionState.flatMapLatest { state ->
@@ -61,9 +72,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         messageGraph,
         conversations,
         attachmentDrafts,
-    ) { session, graph, conversations, attachments ->
-        val messages = graph.map(::toMessageUi)
+        navigationTarget,
+    ) { session, graph, conversations, attachments, target ->
+        val scopedGraph = graph.filter { it.message.sessionId == session.currentSessionId }
+        val messages = scopedGraph.map(::toMessageUi)
         val connection = connectionPresentation(session.connection, session.errorMessage)
+        val composerAttachments = attachments.map { attachment ->
+            val waitingForConnection = session.connection.phase != ConnectionPhase.READY &&
+                attachment.state in setOf("pending", "uploading", "finishing")
+            val waitingForMeteredApproval = attachment.sizeBytes >= LARGE_TRANSFER_BYTES &&
+                session.transferNetwork.kind == TransferNetworkKind.METERED &&
+                !session.meteredLargeTransferApproved &&
+                attachment.state in setOf("pending", "uploading", "finishing")
+            ComposerAttachmentUi(
+                id = attachment.attachmentId,
+                filename = attachment.filename,
+                contentType = attachment.contentType,
+                sizeBytes = attachment.sizeBytes,
+                transferredBytes = attachment.transferredBytes,
+                state = when {
+                    waitingForConnection -> ComposerAttachmentState.WAITING_FOR_CONNECTION
+                    waitingForMeteredApproval -> ComposerAttachmentState.WAITING_FOR_METERED_APPROVAL
+                    attachment.state == "ready" -> ComposerAttachmentState.READY
+                    attachment.state == "failed" -> ComposerAttachmentState.FAILED
+                    else -> ComposerAttachmentState.UPLOADING
+                },
+                canRemove = attachment.state in setOf("pending", "ready", "failed"),
+            )
+        }
+        val largeTransfer = composerAttachments.firstOrNull {
+            it.sizeBytes >= LARGE_TRANSFER_BYTES &&
+                it.state !in setOf(ComposerAttachmentState.READY, ComposerAttachmentState.FAILED)
+        }
+        val transferStatus = largeTransfer?.let { transfer ->
+            val requiresApproval = session.transferNetwork.kind == TransferNetworkKind.METERED &&
+                !session.meteredLargeTransferApproved
+            val progress = (transfer.transferredBytes * 100 / transfer.sizeBytes).toInt().coerceIn(0, 100)
+            TransferStatusUi(
+                title = if (requiresApproval) "大文件上传已暂停" else "大文件正在后台上传",
+                detail = when {
+                    requiresApproval && session.transferNetwork.cellular -> "当前为移动网络，确认后会从 $progress% 继续"
+                    requiresApproval -> "当前网络按流量计费，确认后会从 $progress% 继续"
+                    session.transferNetwork.cellular -> "移动网络 · 离开会话仍会继续"
+                    else -> "切换会话或进入后台仍会继续"
+                },
+                progressPercent = progress,
+                requiresMeteredApproval = requiresApproval,
+            )
+        }
         ConversationUiState(
             connectionLabel = connection.label,
             connectionStatus = connection.status,
@@ -71,28 +127,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             errorNotice = session.errorMessage,
             sessions = conversations
                 .filter { it.sessionId.startsWith("mobile:") }
-                .map { SessionUi(it.sessionId, it.title) },
+                .map {
+                    SessionUi(
+                        sessionId = it.sessionId,
+                        title = it.title,
+                        lastMessagePreview = it.lastMessagePreview?.take(160),
+                        lastMessageAtMillis = it.lastMessageAt,
+                        unreadCount = it.unreadCount,
+                        isRunning = it.sessionId in session.activeSessionIds,
+                    )
+                },
             selectedSessionId = session.currentSessionId,
+            readingPosition = conversations
+                .firstOrNull { it.sessionId == session.currentSessionId }
+                ?.let { summary ->
+                    summary.anchorMessageId?.let { ReadingPositionUi(it, summary.anchorOffsetPx) }
+                },
+            navigationTarget = target,
             projectionGeneration = session.projectionGeneration,
             messages = messages,
-            attachments = attachments.map { attachment ->
-                val waitingForConnection = session.connection.phase != ConnectionPhase.READY &&
-                    attachment.state in setOf("pending", "uploading", "finishing")
-                ComposerAttachmentUi(
-                    id = attachment.attachmentId,
-                    filename = attachment.filename,
-                    contentType = attachment.contentType,
-                    sizeBytes = attachment.sizeBytes,
-                    transferredBytes = attachment.transferredBytes,
-                    state = when {
-                        waitingForConnection -> ComposerAttachmentState.WAITING_FOR_CONNECTION
-                        attachment.state == "ready" -> ComposerAttachmentState.READY
-                        attachment.state == "failed" -> ComposerAttachmentState.FAILED
-                        else -> ComposerAttachmentState.UPLOADING
-                    },
-                    canRemove = attachment.state in setOf("pending", "ready", "failed"),
-                )
-            },
+            pendingMessages = messages.filterIsInstance<MessageUi.User>()
+                .filter { it.deliveryLabel == "待发送" }
+                .map {
+                    PendingMessageUi(
+                        messageId = it.id,
+                        preview = it.text.trim().replace(Regex("\\s+"), " ").take(120)
+                            .ifBlank { "[附件]" },
+                        createdAtMillis = it.createdAtMillis,
+                    )
+                },
+            attachments = composerAttachments,
+            transferStatus = transferStatus,
             commands = session.commands.map { CommandUi(it.command, it.description) },
             pluginUiAssets = session.pluginUiAssets.map {
                 PluginUiAssetUi(it.id, it.revision, it.sha256, it.module, it.stylesheet)
@@ -100,7 +165,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             pluginUiResponses = session.pluginUiResponses.map {
                 PluginUiResponseUi(it.requestId, it.result?.toString(), it.error)
             },
-            isStreaming = graph.any { it.message.deliveryState == "streaming" },
+            isStreaming = scopedGraph.any { it.message.deliveryState == "streaming" },
             isResyncing = session.connection.phase == ConnectionPhase.SYNCING,
             canResync = session.connection.phase == ConnectionPhase.READY &&
                 session.activeTurnId == null &&
@@ -109,7 +174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             canStop = session.activeTurnId != null &&
                 session.connection.phase == ConnectionPhase.READY &&
                 !session.isStopping,
-            canSend = session.hasProfile,
+            canSend = session.hasProfile && composerAttachments.all { it.state == ComposerAttachmentState.READY },
         )
     }.stateIn(
         viewModelScope,
@@ -121,9 +186,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             errorNotice = null,
             sessions = emptyList(),
             selectedSessionId = null,
+            readingPosition = null,
+            navigationTarget = null,
             projectionGeneration = 0,
             messages = emptyList(),
             attachments = emptyList(),
+            pendingMessages = emptyList(),
             commands = emptyList(),
             isStreaming = false,
             isResyncing = false,
@@ -136,8 +204,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onQrCode(value: String) = container.realtimeSession.beginPairing(value)
 
-    fun sendMessage(value: String, replyToMessageId: String?) =
-        container.realtimeSession.sendMessage(value, replyToMessageId)
+    fun sendMessage(
+        value: String,
+        replyToMessageId: String?,
+        expectedAttachmentIds: List<String>,
+        onPersisted: (Boolean) -> Unit,
+    ) = container.realtimeSession.sendMessage(
+        value,
+        replyToMessageId,
+        expectedAttachmentIds,
+        onPersisted,
+    )
 
     fun sendCommand(value: String) = container.realtimeSession.sendCommand(value)
 
@@ -170,6 +247,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun retryAttachment(attachmentId: String) = container.realtimeSession.retryAttachment(attachmentId)
 
+    fun continueLargeTransfersOnMeteredNetwork() =
+        container.realtimeSession.continueLargeTransfersOnMeteredNetwork()
+
+    fun retryFailedMessage(messageId: String) = container.realtimeSession.retryFailedMessage(messageId)
+
     fun retryDownloadedAttachment(attachmentId: String) =
         container.realtimeSession.retryDownloadedAttachment(attachmentId)
 
@@ -179,6 +261,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun createSession() = container.realtimeSession.createSession()
 
     fun selectSession(sessionId: String) = container.realtimeSession.selectSession(sessionId)
+
+    fun saveReadingPosition(sessionId: String, messageId: String, offsetPx: Int) {
+        viewModelScope.launch {
+            require(offsetPx in -10_000..10_000) { "阅读锚点偏移超出范围" }
+            val conversation = requireNotNull(container.database.conversations().get(sessionId)) {
+                "阅读位置会话不存在: $sessionId"
+            }
+            require(conversation.serverId == sessionState.value.serverId) { "阅读位置会话不属于当前电脑" }
+            val message = requireNotNull(container.database.messages().get(messageId)) {
+                "阅读锚点消息不存在: $messageId"
+            }
+            require(message.sessionId == sessionId) { "阅读锚点不属于当前会话" }
+            container.database.conversationReadStates().savePosition(
+                sessionId = sessionId,
+                messageId = messageId,
+                offsetPx = offsetPx,
+                updatedAt = System.currentTimeMillis(),
+            )
+        }
+    }
+
+    fun markSessionReadThrough(sessionId: String, readAtMillis: Long) {
+        viewModelScope.launch {
+            require(readAtMillis >= 0) { "已读水位不能为负数" }
+            val conversation = requireNotNull(container.database.conversations().get(sessionId)) {
+                "已读水位会话不存在: $sessionId"
+            }
+            require(conversation.serverId == sessionState.value.serverId) { "已读水位会话不属于当前电脑" }
+            container.database.conversationReadStates().markReadThrough(
+                sessionId = sessionId,
+                readAt = readAtMillis,
+                updatedAt = System.currentTimeMillis(),
+            )
+        }
+    }
+
+    fun openNotificationTarget(sessionId: String, messageId: String) {
+        container.realtimeSession.selectSession(sessionId)
+        navigationTarget.value = NavigationTargetUi(sessionId, messageId)
+    }
+
+    fun acknowledgeNavigationTarget(messageId: String) {
+        if (navigationTarget.value?.messageId == messageId) navigationTarget.value = null
+    }
 
     fun restartPairing() = MobileConnectionService.disconnect(getApplication())
 
@@ -195,7 +321,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     "pending" -> "待发送"
                     "sent", "complete" -> "已发送"
                     "failed" -> "发送失败"
+                    "failed_retryable" -> "发送失败"
+                    "outcome_unknown" -> "结果待确认"
                     else -> error("未知用户消息状态: ${message.deliveryState}")
+                },
+                deliveryAction = when (message.deliveryState) {
+                    "failed_retryable" -> MessageDeliveryActionUi.RETRY
+                    "outcome_unknown" -> MessageDeliveryActionUi.VERIFY
+                    else -> null
                 },
                 replyable = userMessageCanReply(message.deliveryState),
                 createdAtMillis = message.createdAt,
@@ -264,6 +397,7 @@ internal fun List<MessageAttachmentWithMedia>.toMessageAttachmentUi(): List<Mess
             sizeBytes = attachment.sizeBytes,
             transferredBytes = attachment.transferredBytes,
             state = when (attachment.state) {
+                "remote" -> MessageAttachmentState.REMOTE
                 "pending" -> MessageAttachmentState.PENDING
                 "downloading" -> MessageAttachmentState.DOWNLOADING
                 "cached" -> MessageAttachmentState.CACHED

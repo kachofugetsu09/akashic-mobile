@@ -9,13 +9,18 @@ import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
 import com.akashic.mobile.ui.conversation.MessageUi
+import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.ProcessBlockKind
 import com.akashic.mobile.ui.conversation.ProcessBlockState
 import com.akashic.mobile.ui.conversation.ProcessBlockUi
 import com.akashic.mobile.ui.conversation.PluginUiAssetUi
 import com.akashic.mobile.ui.conversation.PluginUiResponseUi
+import com.akashic.mobile.ui.conversation.PendingMessageUi
+import com.akashic.mobile.ui.conversation.ReadingPositionUi
+import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.SessionUi
+import com.akashic.mobile.ui.conversation.TransferStatusUi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -26,6 +31,8 @@ data class MobileWebSnapshot(
     val connection: MobileWebConnection,
     val sessions: List<MobileWebSession>,
     val selectedSessionId: String?,
+    val readingPosition: MobileWebReadingPosition?,
+    val navigationTarget: MobileWebNavigationTarget?,
     val projectionGeneration: Long,
     val messages: List<MobileWebMessage>,
     val pluginResponses: List<MobileWebPluginResponse>,
@@ -69,6 +76,29 @@ enum class MobileWebConnectionStatus {
 data class MobileWebSession(
     val id: String,
     val title: String,
+    val lastMessagePreview: String?,
+    val lastMessageAt: Long?,
+    val unreadCount: Int,
+    val isRunning: Boolean,
+)
+
+@Serializable
+data class MobileWebReadingPosition(
+    val messageId: String,
+    val offsetPx: Int,
+)
+
+@Serializable
+data class MobileWebNavigationTarget(
+    val sessionId: String,
+    val messageId: String,
+)
+
+@Serializable
+data class MobileWebPendingMessage(
+    val messageId: String,
+    val preview: String,
+    val createdAt: Long,
 )
 
 @Serializable
@@ -82,12 +112,19 @@ data class MobileWebMessage(
     val replyable: Boolean,
     val reply: MobileWebReply? = null,
     val deliveryLabel: String? = null,
+    val deliveryAction: MobileWebDeliveryAction? = null,
     val blocks: List<MobileWebProcessBlock> = emptyList(),
     val streaming: Boolean = false,
     val interrupted: Boolean = false,
     val durationSeconds: Int? = null,
     val attachments: List<MobileWebAttachment> = emptyList(),
 )
+
+@Serializable
+enum class MobileWebDeliveryAction {
+    @SerialName("retry") RETRY,
+    @SerialName("verify") VERIFY,
+}
 
 @Serializable
 data class MobileWebReply(
@@ -148,6 +185,8 @@ data class MobileWebCommand(
 @Serializable
 data class MobileWebComposer(
     val attachments: List<MobileWebAttachment>,
+    val pendingMessages: List<MobileWebPendingMessage>,
+    val transferStatus: MobileWebTransferStatus?,
     val commands: List<MobileWebCommand>,
     val isStreaming: Boolean,
     val isResyncing: Boolean,
@@ -157,9 +196,17 @@ data class MobileWebComposer(
     val canSend: Boolean,
 )
 
+@Serializable
+data class MobileWebTransferStatus(
+    val title: String,
+    val detail: String,
+    val progressPercent: Int,
+    val requiresMeteredApproval: Boolean,
+)
+
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 2,
+    protocolVersion = 3,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -168,11 +215,15 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     ),
     sessions = sessions.map(SessionUi::toMobileWebSession),
     selectedSessionId = selectedSessionId,
+    readingPosition = readingPosition?.toMobileWebReadingPosition(),
+    navigationTarget = navigationTarget?.toMobileWebNavigationTarget(),
     projectionGeneration = projectionGeneration,
     messages = messages.map(MessageUi::toMobileWebMessage),
     pluginResponses = pluginUiResponses.map(PluginUiResponseUi::toMobileWebPluginResponse),
     composer = MobileWebComposer(
         attachments = attachments.map(ComposerAttachmentUi::toMobileWebAttachment),
+        pendingMessages = pendingMessages.map(PendingMessageUi::toMobileWebPendingMessage),
+        transferStatus = transferStatus?.toMobileWebTransferStatus(),
         commands = commands.map(CommandUi::toMobileWebCommand),
         isStreaming = isStreaming,
         isResyncing = isResyncing,
@@ -181,6 +232,13 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
         canStop = canStop,
         canSend = canSend,
     ),
+)
+
+private fun TransferStatusUi.toMobileWebTransferStatus() = MobileWebTransferStatus(
+    title = title,
+    detail = detail,
+    progressPercent = progressPercent,
+    requiresMeteredApproval = requiresMeteredApproval,
 )
 
 private fun PluginUiAssetUi.toMobileWebPluginAsset() =
@@ -192,7 +250,23 @@ fun ConversationUiState.toMobileWebPluginAssets(): List<MobileWebPluginAsset> =
 private fun PluginUiResponseUi.toMobileWebPluginResponse() =
     MobileWebPluginResponse(requestId, resultJson, error)
 
-private fun SessionUi.toMobileWebSession() = MobileWebSession(sessionId, title)
+private fun SessionUi.toMobileWebSession() = MobileWebSession(
+    id = sessionId,
+    title = title,
+    lastMessagePreview = lastMessagePreview,
+    lastMessageAt = lastMessageAtMillis,
+    unreadCount = unreadCount,
+    isRunning = isRunning,
+)
+
+private fun ReadingPositionUi.toMobileWebReadingPosition() =
+    MobileWebReadingPosition(messageId, offsetPx)
+
+private fun NavigationTargetUi.toMobileWebNavigationTarget() =
+    MobileWebNavigationTarget(sessionId, messageId)
+
+private fun PendingMessageUi.toMobileWebPendingMessage() =
+    MobileWebPendingMessage(messageId, preview, createdAtMillis)
 
 private fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
     is MessageUi.User -> MobileWebMessage(
@@ -205,6 +279,7 @@ private fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
         replyable = replyable,
         reply = reply?.toMobileWebReply(),
         deliveryLabel = deliveryLabel,
+        deliveryAction = deliveryAction?.toMobileWebDeliveryAction(),
         attachments = attachments.map(MessageAttachmentUi::toMobileWebAttachment),
     )
     is MessageUi.AssistantTurn -> MobileWebMessage(
@@ -222,6 +297,11 @@ private fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
         durationSeconds = durationSeconds,
         attachments = attachments.map(MessageAttachmentUi::toMobileWebAttachment),
     )
+}
+
+private fun MessageDeliveryActionUi.toMobileWebDeliveryAction() = when (this) {
+    MessageDeliveryActionUi.RETRY -> MobileWebDeliveryAction.RETRY
+    MessageDeliveryActionUi.VERIFY -> MobileWebDeliveryAction.VERIFY
 }
 
 private fun ProcessBlockUi.toMobileWebProcessBlock() = MobileWebProcessBlock(
@@ -252,6 +332,7 @@ private fun ComposerAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
     transferredBytes = transferredBytes,
     state = when (state) {
         ComposerAttachmentState.WAITING_FOR_CONNECTION -> "waiting"
+        ComposerAttachmentState.WAITING_FOR_METERED_APPROVAL -> "metered_paused"
         ComposerAttachmentState.UPLOADING -> "uploading"
         ComposerAttachmentState.READY -> "ready"
         ComposerAttachmentState.FAILED -> "failed"
@@ -266,6 +347,7 @@ private fun MessageAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
     sizeBytes = sizeBytes,
     transferredBytes = transferredBytes,
     state = when (state) {
+        MessageAttachmentState.REMOTE -> "remote"
         MessageAttachmentState.PENDING -> "pending"
         MessageAttachmentState.DOWNLOADING -> "downloading"
         MessageAttachmentState.CACHED -> "cached"
