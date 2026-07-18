@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## 每个会话的固定入口
+
+- 开始任何调查、设计、实现或评审前，依次阅读 `docs/INDEX.md` 与 `docs/WORKFLOW.md`。
+- 再按 `docs/INDEX.md` 的任务路由读取 `docs/projectneed.md`、`docs/NOW.md`、相关决策和设计；不要把 README、旧 PR 或代码现状擅自提升为产品意图。
+- 长期语义冲突、能力 owner 不清或持久化增减不明确时停止核对，不带着猜测修改代码。
+
 ## 沟通与实现
 
 - 默认使用中文沟通；代码标识符保持英文。
@@ -24,5 +30,4 @@
 
 - PR 必须说明前置 PR、行为变化、验证命令和回滚方式。
 - 修改 Android 后运行相关 Gradle 测试；修改移动 Web 后运行 typecheck、lint 和 build。
-- submodule 固定确定 commit，不使用浮动分支。
-
+- 跨仓库协议与运行时兼容证据必须固定确定 commit、tree 和 digest，不使用浮动分支。
