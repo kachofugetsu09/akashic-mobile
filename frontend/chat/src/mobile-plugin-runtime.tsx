@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
+import { MobilePluginQueryQueue } from "./mobile-plugin-query-queue";
 import { MobilePluginResultCache } from "./mobile-plugin-result-cache";
 
 export type MobilePluginSlotName =
@@ -83,13 +84,10 @@ interface PendingQuery {
   send: () => void;
 }
 
-const pending = new Map<string, PendingQuery>();
+const pendingQueries = new MobilePluginQueryQueue<PendingQuery>(
+  (request) => isInteractiveSlot(request.slot),
+);
 const immutableResults = new MobilePluginResultCache();
-const queryQueue: string[] = [];
-let activeQueries = 0;
-let activeBackgroundQueries = 0;
-const MAX_ACTIVE_QUERIES = 4;
-const MAX_BACKGROUND_QUERIES = 2;
 let catalog: MobilePluginCatalog = {
   catalogRevision: "",
   updating: true,
@@ -257,10 +255,9 @@ export function MobilePluginDashboard({ pluginId }: { pluginId: string }) {
 }
 
 export function receiveMobilePluginResult(response: MobilePluginResult) {
-  const request = pending.get(response.requestId);
+  const request = pendingQueries.get(response.requestId);
   if (!request) return;
   completePending(response.requestId, request);
-  window.clearTimeout(request.timeout);
   if (response.error) {
     request.reject(new Error(response.error));
     return;
@@ -370,6 +367,10 @@ function MountedPlugin({
               reject(new Error("原生插件桥未连接"));
               return;
             }
+            if (method.length < 1 || method.length > 256) {
+              reject(new Error("插件方法名无效"));
+              return;
+            }
             let encoded: string;
             try {
               encoded = JSON.stringify(payload);
@@ -390,11 +391,12 @@ function MountedPlugin({
               return;
             }
             const timeout = window.setTimeout(() => {
-              const request = pending.get(requestId);
-              if (request) completePending(requestId, request);
-              reject(new Error("插件请求超时"));
+              const request = pendingQueries.get(requestId);
+              if (!request) return;
+              window.AkashicNative?.cancelPluginUiOwner(request.ownerId);
+              rejectOwnerPending(request.ownerId, "插件请求超时");
             }, 30_000);
-            pending.set(requestId, {
+            const request = {
               resolve,
               reject,
               ownerId,
@@ -413,8 +415,14 @@ function MountedPlugin({
                 encoded,
                 options.cache ?? "none",
               ),
-            });
-            queryQueue.push(requestId);
+            };
+            try {
+              pendingQueries.enqueue(requestId, request);
+            } catch (error) {
+              window.clearTimeout(timeout);
+              reject(error instanceof Error ? error : new Error("插件请求无法入队"));
+              return;
+            }
             drainQueryQueue();
           });
         },
@@ -449,57 +457,42 @@ function pluginQueryCacheKey(
 }
 
 function rejectOwnerPending(ownerId: string, message: string) {
-  const owned = [...pending].filter(([, request]) => request.ownerId === ownerId);
-  for (const [requestId, request] of owned) {
-    completePending(requestId, request, false);
+  const owned = pendingQueries.removeOwner(ownerId);
+  for (const [, request] of owned) {
+    window.clearTimeout(request.timeout);
     request.reject(new Error(message));
   }
   drainQueryQueue();
 }
 
 function rejectAllPending(message: string) {
-  const requests = [...pending];
-  for (const [requestId, request] of requests) {
-    completePending(requestId, request, false);
+  const requests = pendingQueries.clear();
+  for (const [, request] of requests) {
+    window.clearTimeout(request.timeout);
     request.reject(new Error(message));
   }
   drainQueryQueue();
 }
 
 function drainQueryQueue() {
-  while (activeQueries < MAX_ACTIVE_QUERIES) {
-    const interactiveIndex = queryQueue.findIndex((requestId) => {
-      const request = pending.get(requestId);
-      return request && isInteractiveSlot(request.slot);
-    });
-    const nextIndex = interactiveIndex >= 0
-      ? interactiveIndex
-      : activeBackgroundQueries < MAX_BACKGROUND_QUERIES ? 0 : -1;
-    if (nextIndex < 0 || nextIndex >= queryQueue.length) return;
-    const [requestId] = queryQueue.splice(nextIndex, 1);
-    const request = pending.get(requestId);
-    if (!request) continue;
-    request.started = true;
-    activeQueries += 1;
-    if (!isInteractiveSlot(request.slot)) activeBackgroundQueries += 1;
+  while (true) {
+    const next = pendingQueries.startNext();
+    if (!next) return;
+    const [requestId, request] = next;
     try {
       request.send();
     } catch (error) {
-      completePending(requestId, request);
+      completePending(requestId, request, false);
       request.reject(error instanceof Error ? error : new Error("原生插件桥调用失败"));
     }
   }
 }
 
 function completePending(requestId: string, request: PendingQuery, shouldDrain = true) {
-  pending.delete(requestId);
-  window.clearTimeout(request.timeout);
-  const queuedIndex = queryQueue.indexOf(requestId);
-  if (queuedIndex >= 0) queryQueue.splice(queuedIndex, 1);
-  if (request.started) {
-    activeQueries -= 1;
-    if (!isInteractiveSlot(request.slot)) activeBackgroundQueries -= 1;
+  if (pendingQueries.complete(requestId) !== request) {
+    throw new Error("插件请求完成状态失配");
   }
+  window.clearTimeout(request.timeout);
   if (shouldDrain) drainQueryQueue();
 }
 

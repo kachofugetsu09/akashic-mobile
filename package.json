@@ -9,7 +9,7 @@
     "build:chat:watch": "vite build --config frontend/chat/vite.config.ts --watch",
     "dev": "vite --config frontend/chat/vite.config.ts",
     "lint": "eslint \"frontend/chat/src/**/*.{ts,tsx}\"",
-    "test:mobile-web-state": "node --experimental-strip-types --test frontend/chat/src/mobile-message-state.test.mjs frontend/chat/src/mobile-plugin-result-cache.test.mjs frontend/chat/src/mobile-surface-history.test.mjs",
+    "test:mobile-web-state": "node --experimental-strip-types --test frontend/chat/src/mobile-message-state.test.mjs frontend/chat/src/mobile-plugin-query-queue.test.mjs frontend/chat/src/mobile-plugin-result-cache.test.mjs frontend/chat/src/mobile-surface-history.test.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
