@@ -1,0 +1,92 @@
+name: Android
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+
+      - name: Install mobile Web dependencies
+        run: npm ci
+
+      - name: Verify mobile Web
+        run: npm run typecheck && npm run lint && npm run test:mobile-web-state
+
+      - name: Verify Android client
+        working-directory: clients/android
+        run: |
+          ./gradlew testDebugUnitTest lintDebug assembleDebug
+          ./test-device-gate.sh
+
+  runtime-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout mobile consumer
+        uses: actions/checkout@v6
+
+      - name: Verify lock and fetch exact core revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s runtime-gate -p 'test_*.py'
+          python3 runtime-gate/verify_contract.py --mobile-root .
+          core_repository="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field source_repository)"
+          capability_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field capability_commit)"
+          runtime_revision="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field provider_runtime_revision)"
+          protocol_commit="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field protocol_source_commit)"
+          core_root="${RUNNER_TEMP}/akashic-agent"
+          git init "${core_root}"
+          git -C "${core_root}" remote add origin "${core_repository}"
+          git -C "${core_root}" fetch --depth=1 origin \
+            "${runtime_revision}" \
+            "${capability_commit}" \
+            "${protocol_commit}"
+          git -C "${core_root}" checkout --detach "${runtime_revision}"
+          python3 runtime-gate/verify_contract.py --mobile-root . --core-root "${core_root}"
+
+      - name: Build pinned core Gate image
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_revision="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field provider_runtime_revision)"
+          core_root="${RUNNER_TEMP}/akashic-agent"
+          docker build \
+            --file "${core_root}/docker/debug/Dockerfile" \
+            --tag "akashic-mobile-runtime-gate:${runtime_revision}" \
+            "${core_root}"
+
+      - name: Run core semantics in an isolated workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_revision="$(python3 runtime-gate/verify_contract.py --mobile-root . --print-field provider_runtime_revision)"
+          core_root="${RUNNER_TEMP}/akashic-agent"
+          python3 runtime-gate/run_core_contract.py \
+            --mobile-root . \
+            --core-root "${core_root}" \
+            --image "akashic-mobile-runtime-gate:${runtime_revision}"

@@ -13,3 +13,5 @@ dist/
 *.apk
 *.aab
 *.log
+__pycache__/
+*.py[cod]

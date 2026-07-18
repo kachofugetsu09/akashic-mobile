@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' "$*" >>"${DEVICE_GATE_FAKE_ADB_LOG:?}"
+readonly mode="${DEVICE_GATE_FAKE_MODE:?}"
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "get-state" ]]; then
+    printf 'device\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "shell" &&
+    "${4:-}" == "pm" && "${5:-}" == "list" && "${6:-}" == "packages" && "${7:-}" == "-u" ]]; then
+    if [[ "$mode" == collision_* ]]; then
+        printf 'package:%s\n' "${DEVICE_GATE_FAKE_COLLISION_ID:?}"
+    fi
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "install" ]]; then
+    readonly apk_path="${!#}"
+    if [[ "$mode" == "app_install_failure" ]]; then
+        printf 'Failure [INSTALL_FAILED_INTERNAL_ERROR]\n' >&2
+        exit 1
+    fi
+    if [[ "$mode" == "test_install_failure" && "$apk_path" == *androidTest* ]]; then
+        printf 'Failure [INSTALL_FAILED_INTERNAL_ERROR]\n' >&2
+        exit 1
+    fi
+    printf 'Success\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "uninstall" ]]; then
+    if [[ "$mode" == "cleanup_failure" ]]; then
+        printf 'Failure [DELETE_FAILED_INTERNAL_ERROR]\n' >&2
+        exit 1
+    fi
+    printf 'Success\n'
+    exit 0
+fi
+
+if [[ "${1:-}" == "-s" && "${2:-}" == "fake-device" && "${3:-}" == "shell" &&
+    "${4:-}" == "am" && "${5:-}" == "instrument" ]]; then
+    case "$mode" in
+        success|cleanup_failure)
+            printf '%s\n' \
+                'INSTRUMENTATION_STATUS: class=com.akashic.mobile.data.realtime.IsolatedGatewayDeviceTest' \
+                'INSTRUMENTATION_STATUS: numtests=1' \
+                'INSTRUMENTATION_STATUS: test=pairSendAndReceiveFixedMedia' \
+                'INSTRUMENTATION_STATUS_CODE: 1' \
+                'INSTRUMENTATION_STATUS: class=com.akashic.mobile.data.realtime.IsolatedGatewayDeviceTest' \
+                'INSTRUMENTATION_STATUS: numtests=1' \
+                'INSTRUMENTATION_STATUS: test=pairSendAndReceiveFixedMedia' \
+                'INSTRUMENTATION_STATUS_CODE: 0' \
+                'INSTRUMENTATION_RESULT: stream=' \
+                '' \
+                'OK (1 test)' \
+                '' \
+                'INSTRUMENTATION_CODE: -1'
+            ;;
+        zero)
+            printf 'INSTRUMENTATION_RESULT: stream=\n\nOK (0 tests)\n\nINSTRUMENTATION_CODE: -1\n'
+            ;;
+        failure)
+            printf '%s\n' \
+                'INSTRUMENTATION_STATUS: numtests=1' \
+                'INSTRUMENTATION_STATUS: test=pairSendAndReceiveFixedMedia' \
+                'INSTRUMENTATION_STATUS_CODE: 1' \
+                'INSTRUMENTATION_STATUS_CODE: -2' \
+                'INSTRUMENTATION_RESULT: stream=' \
+                '' \
+                'FAILURES!!!' \
+                'Tests run: 1, Failures: 1' \
+                '' \
+                'INSTRUMENTATION_CODE: -1'
+            ;;
+        crash)
+            printf '%s\n' \
+                'INSTRUMENTATION_STATUS: numtests=1' \
+                'INSTRUMENTATION_STATUS: test=pairSendAndReceiveFixedMedia' \
+                'INSTRUMENTATION_STATUS_CODE: 1' \
+                'INSTRUMENTATION_FAILED: Process crashed.' \
+                'INSTRUMENTATION_CODE: 0'
+            ;;
+        *)
+            printf 'fake adb has no instrumentation result for mode: %s\n' "$mode" >&2
+            exit 97
+            ;;
+    esac
+    exit 0
+fi
+
+printf 'fake adb rejected unexpected device mutation: %s\n' "$*" >&2
+exit 97

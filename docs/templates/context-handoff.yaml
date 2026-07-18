@@ -1,0 +1,19 @@
+repository: https://github.com/kachofugetsu09/akashic-mobile
+worktree: ""
+branch: ""
+base_commit: ""
+current_phase: ""
+last_user_approval: ""
+verified_facts: []
+unresolved_questions: []
+do_not_assume: []
+modified_files: []
+backups: []
+current_diff: ""
+validation:
+  passed: []
+  failed: []
+  not_run: []
+next_step: ""
+stop_conditions: []
+delivery_target: ""
