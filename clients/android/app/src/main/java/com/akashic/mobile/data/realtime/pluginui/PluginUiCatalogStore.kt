@@ -15,6 +15,7 @@ class PluginUiCatalogStore(private val root: File) {
     init {
         check(root.exists() || root.mkdirs()) { "无法创建插件目录缓存: $root" }
         require(root.isDirectory) { "插件目录缓存根路径不是目录: $root" }
+        cleanupTemporaryFiles()
     }
 
     fun read(scope: String): MobileUiCatalogPayload? {
@@ -39,12 +40,17 @@ class PluginUiCatalogStore(private val root: File) {
 
         // 2. 同文件系统原子替换旧快照
         val temporary = root.resolve(".${destination.name}.${System.nanoTime()}.tmp")
-        FileOutputStream(temporary).use { output ->
-            output.write(bytes)
-            output.fd.sync()
+        try {
+            FileOutputStream(temporary).use { output ->
+                output.write(bytes)
+                output.fd.sync()
+            }
+            if (destination.exists()) check(destination.delete()) { "无法替换插件目录缓存" }
+            check(temporary.renameTo(destination)) { "插件目录缓存原子提交失败" }
+        } catch (error: Throwable) {
+            check(!temporary.exists() || temporary.delete()) { "无法清理插件目录临时文件" }
+            throw error
         }
-        if (destination.exists()) check(destination.delete()) { "无法替换插件目录缓存" }
-        check(temporary.renameTo(destination)) { "插件目录缓存原子提交失败" }
     }
 
     fun discard(scope: String, error: IllegalArgumentException) {
@@ -66,6 +72,12 @@ class PluginUiCatalogStore(private val root: File) {
         Log.w(TAG, "丢弃损坏的插件目录缓存: ${file.name}", error)
         check(file.delete()) { "无法删除损坏插件目录缓存: $file" }
         return null
+    }
+
+    private fun cleanupTemporaryFiles() {
+        requireNotNull(root.listFiles()) { "无法扫描插件目录缓存" }
+            .filter { it.isFile && it.name.startsWith('.') && it.name.endsWith(".tmp") }
+            .forEach { check(it.delete()) { "无法清理插件目录临时文件: $it" } }
     }
 
     private companion object {
