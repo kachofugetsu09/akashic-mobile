@@ -38,4 +38,6 @@ jobs:
 
       - name: Verify Android client
         working-directory: clients/android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug
+        run: |
+          ./gradlew testDebugUnitTest lintDebug assembleDebug
+          ./test-device-gate.sh

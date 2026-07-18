@@ -16,6 +16,13 @@ val hasReleaseSigning = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+val debugApplicationIdSuffix = providers
+    .gradleProperty("akashicDebugApplicationIdSuffix")
+    .orElse(".debug")
+    .get()
+check(Regex("\\.[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*").matches(debugApplicationIdSuffix)) {
+    "akashicDebugApplicationIdSuffix must contain dot-prefixed application ID segments"
+}
 
 val repositoryRoot = rootProject.projectDir.parentFile.parentFile
 val generatedMobileWebAssets = layout.buildDirectory.dir("generated/mobileWebAssets")
@@ -64,7 +71,7 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = debugApplicationIdSuffix
             versionNameSuffix = "-debug"
             buildConfigField("boolean", "ALLOW_INSECURE_WS", "true")
         }
