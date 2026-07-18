@@ -311,17 +311,21 @@ interface MessageDao {
         WHERE sessionId = :sessionId
           AND role = 'assistant'
           AND text = :text
-          AND messageId LIKE 'ephemeral:%'
+          AND (
+            messageId LIKE 'ephemeral:%'
+            OR (:includeProactive = 1 AND messageId LIKE 'proactive:%')
+          )
           AND deliveryState = 'complete'
           AND updatedAt BETWEEN :earliestUpdatedAt AND :latestUpdatedAt
         ORDER BY createdAt, messageId
         """,
     )
-    suspend fun findEphemeralAssistants(
+    suspend fun findTransientAssistants(
         sessionId: String,
         text: String,
         earliestUpdatedAt: Long,
         latestUpdatedAt: Long,
+        includeProactive: Boolean,
     ): List<MessageEntity>
 
     @Query(
