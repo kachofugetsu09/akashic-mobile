@@ -1,8 +1,8 @@
 {
-  "layer": "10-durable-im-state-v0.8.0",
+  "layer": "11-system-share-and-notifications-v0.8.1",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "794b5a9a9334d0231da9aa3c94bf927c4054d620",
+  "source_commit": "6a25bee2212f5145b2367a444a0e053ca74170e9",
   "source_paths": [
     "clients/android",
     "frontend/chat",
