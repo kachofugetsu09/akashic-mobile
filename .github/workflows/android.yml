@@ -33,6 +33,9 @@ jobs:
       - name: Install mobile Web dependencies
         run: npm ci
 
+      - name: Verify mobile Web
+        run: npm run typecheck && npm run lint && npm run test:mobile-web-state
+
       - name: Verify Android client
         working-directory: clients/android
         run: ./gradlew testDebugUnitTest lintDebug assembleDebug
