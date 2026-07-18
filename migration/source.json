@@ -1,12 +1,20 @@
 {
-  "layer": "13-plugin-ui-v2-v0.8.3",
+  "layer": "14-exact-recovered-v0.8.4",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "eab4c0a80ca00179e126f3a3b051053a5d4ce5b6",
+  "source_commit": "f48608c4447e4f57174eaf6b6c29dc6492607113",
+  "provider_contract_commit": "83ca96ed70298d507a412fb3416914200acea2de",
+  "untracked_build_inputs": {
+    "package-lock.json": {
+      "sha256": "e7b16ff530a5509b70078c6bb2e290365851628f1212bc61ee05604d888d98fa",
+      "size_bytes": 353040
+    }
+  },
   "source_paths": [
     "clients/android",
     "frontend/chat",
     "package.json",
+    "package-lock.json",
     "tsconfig.json",
     "eslint.config.js"
   ]
