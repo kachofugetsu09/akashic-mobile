@@ -63,16 +63,13 @@ class ComposerDraftDaoTest {
     }
 
     @Test
-    fun conversationAndServerDeletionCascadeToDrafts() = runBlocking {
+    fun conversationDeletionCascadesOnlyToTargetDraft() = runBlocking {
         dao.upsert(ComposerDraftEntity("mobile:a", "server-a", "A", null, 2))
         dao.upsert(ComposerDraftEntity("mobile:b", "server-b", "B", null, 2))
 
         assertEquals(1, database.conversations().delete("server-a", "mobile:a"))
         assertNull(dao.get("server-a", "mobile:a"))
         assertEquals("B", dao.get("server-b", "mobile:b")?.text)
-
-        assertEquals(1, database.serverProfiles().delete("server-b"))
-        assertNull(dao.get("server-b", "mobile:b"))
     }
 
     @Test

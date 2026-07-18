@@ -1,7 +1,7 @@
 # 系统上下文
 
 - 状态：current
-- 证据基线：移动端 `68204abd8a0ad5359c222a305be295313477a7a4`
+- 证据基线：本文所在 Git tree
 
 本文记录当前代码可以证明的结构，不定义产品意图；长期约束见 `../projectneed.md`。
 
@@ -37,7 +37,7 @@
 
 ## 当前配对行为
 
-`RealtimeSession.restartPairing()` 会断开 socket、清空当前运行时 profile 和当前服务器选择，但保留 Room、设备密钥、会话和本地消息。当前生产代码没有调用 `ServerProfileDao.delete(serverId)`；DAO 仍暴露该级联删除能力，已登记在 `../NOW.md`。
+`RealtimeSession.restartPairing()` 会断开 socket、清空当前运行时 profile 和当前服务器选择，但保留 Room、设备密钥、会话和本地消息。`ServerProfileDao` 只提供查询和 upsert，不暴露整服务器物理删除能力。
 
 ## 当前跨仓库证据
 

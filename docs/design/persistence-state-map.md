@@ -1,7 +1,7 @@
 # 持久化状态地图
 
 - 状态：current
-- 证据基线：移动端 `68204abd8a0ad5359c222a305be295313477a7a4`
+- 证据基线：本文所在 Git tree
 
 本文描述当前实现怎样增加和减少数据。长期授权边界见 `../projectneed.md`。
 
@@ -64,7 +64,7 @@
 
 - 增加：pair accepted 后写入 profile，并在 Android Keystore 创建或复用设备 key alias。
 - 更新：当前选择可清空或切换；重新配对不会删除 Room profile 或密钥。
-- 物理删除：当前 DAO 有未使用的整 profile 删除能力，会经外键级联本地状态；该能力没有被产品语义授权，见 `../NOW.md`。
+- 物理删除：当前 `ServerProfileDao` 不提供整 profile 删除能力。未来若实现本地资料清除，必须先按 `MOB-DEL-001` 定义独立破坏性入口和完整影响协议。
 - 恢复：profile 信息可重新配对获得；设备私钥不可重建，丢失后需要建立新设备身份。
 
 ## 备份与恢复边界

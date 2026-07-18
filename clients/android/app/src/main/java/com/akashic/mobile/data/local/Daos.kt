@@ -21,9 +21,6 @@ interface ServerProfileDao {
 
     @Query("SELECT * FROM server_profiles ORDER BY createdAt")
     fun observeAll(): Flow<List<ServerProfileEntity>>
-
-    @Query("DELETE FROM server_profiles WHERE serverId = :serverId")
-    suspend fun delete(serverId: String): Int
 }
 
 @Dao
