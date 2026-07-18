@@ -1,8 +1,8 @@
 {
-  "layer": "03-resumable-attachment-upload",
+  "layer": "04-attachment-receive-and-cache",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "bb8e960942bfb86a21d4c73d685f800102617ba0",
+  "source_commit": "d04ce0f9db7a7fd66fdd911300621b83ff8fe73b",
   "source_paths": [
     "clients/android"
   ]
