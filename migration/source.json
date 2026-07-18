@@ -1,8 +1,8 @@
 {
-  "layer": "11-system-share-and-notifications-v0.8.1",
+  "layer": "12-notification-assets-v0.8.2",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "6a25bee2212f5145b2367a444a0e053ca74170e9",
+  "source_commit": "9d8055d1aa1753f4743b38bac30de0fd4a894e6d",
   "source_paths": [
     "clients/android",
     "frontend/chat",
