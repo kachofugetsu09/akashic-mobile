@@ -204,6 +204,7 @@ class IncomingShareTest {
         assertEquals(emptyList<Any>(), store.load())
         assertFalse(root.resolve(shareId).exists())
         source.delete()
+        Unit
     }
 
     @Test
@@ -230,6 +231,7 @@ class IncomingShareTest {
         assertEquals("必须保留的原始分享", restored.content.text)
         assertNull(restored.preparedText)
         store.discard(shareId)
+        Unit
     }
 
     @Test
