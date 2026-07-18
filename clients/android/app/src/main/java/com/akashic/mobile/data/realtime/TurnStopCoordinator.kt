@@ -11,6 +11,8 @@ internal data class TurnStopRequest(
 
 internal class TurnStopCoordinator(
     private val send: (TurnStopRequest) -> Boolean,
+    private val onPersist: suspend (TurnStopRequest) -> Unit,
+    private val onRemovePersisted: suspend (String) -> Unit,
     private val onTransportUnavailable: (String) -> Unit,
     private val onError: (String) -> Unit,
     private val onStateChanged: () -> Unit,
@@ -18,6 +20,7 @@ internal class TurnStopCoordinator(
     private data class PendingStop(
         val request: TurnStopRequest,
         var replyReceived: Boolean = false,
+        var persisted: Boolean = true,
     )
 
     private val activeTurns = mutableMapOf<String, String>()
@@ -33,12 +36,13 @@ internal class TurnStopCoordinator(
         onStateChanged()
     }
 
-    fun onTurnTerminal(sessionId: String, turnId: String) {
+    suspend fun onTurnTerminal(sessionId: String, turnId: String) {
         val existing = activeTurns[sessionId] ?: return
         require(existing == turnId) { "终态 turn 与当前活动 turn 不匹配" }
         activeTurns.remove(sessionId)
         pendingStops[sessionId]?.let { pending ->
             require(pending.request.turnId == turnId) { "终态 turn 与停止请求不匹配" }
+            removePersisted(pending)
             pendingStops.remove(sessionId)
             if (!pending.replyReceived) {
                 terminalAwaitingReplies[pending.request.commandId] = pending.request
@@ -47,13 +51,14 @@ internal class TurnStopCoordinator(
         onStateChanged()
     }
 
-    fun requestStop(sessionId: String): TurnStopRequest {
+    suspend fun requestStop(sessionId: String): TurnStopRequest {
         val turnId = requireNotNull(activeTurns[sessionId]) { "当前会话没有正在生成的内容" }
         pendingStops[sessionId]?.let { pending ->
             require(pending.request.turnId == turnId) { "停止请求属于旧 turn" }
             return pending.request
         }
         val request = TurnStopRequest(Ulid.next(), sessionId, turnId)
+        onPersist(request)
         pendingStops[sessionId] = PendingStop(request)
         onStateChanged()
         if (!send(request)) {
@@ -64,7 +69,7 @@ internal class TurnStopCoordinator(
 
     fun onConnectionReady() {
         terminalAwaitingReplies.clear()
-        pendingStops.values.forEach { pending ->
+        pendingStops.values.filter { it.persisted && !it.replyReceived }.forEach { pending ->
             if (!send(pending.request)) {
                 onTransportUnavailable("停止生成命令未进入 WebSocket 队列")
                 return
@@ -72,7 +77,7 @@ internal class TurnStopCoordinator(
         }
     }
 
-    fun onReply(envelope: WireEnvelope): Boolean {
+    suspend fun onReply(envelope: WireEnvelope): Boolean {
         val commandId = envelope.id ?: return false
         terminalAwaitingReplies.remove(commandId)?.let { request ->
             validateReply(envelope, request)
@@ -80,6 +85,7 @@ internal class TurnStopCoordinator(
         }
         val pending = pendingStops.values.firstOrNull { it.request.commandId == commandId } ?: return false
         validateReply(envelope, pending.request)
+        removePersisted(pending)
         if (envelope.type == "turn.stop.error") {
             pendingStops.remove(pending.request.sessionId)
             onStateChanged()
@@ -94,10 +100,34 @@ internal class TurnStopCoordinator(
 
     fun activeSessionIds(): Set<String> = activeTurns.keys.toSet()
 
+    fun activeTurnIds(): Set<String> = activeTurns.values.toSet()
+
     fun isStopping(sessionId: String?): Boolean {
         if (sessionId == null) return false
         val pending = pendingStops[sessionId] ?: return false
         return activeTurns[sessionId] == pending.request.turnId
+    }
+
+    /** 从持久投影和待发送 stop 命令重建进程内状态。 */
+    suspend fun restore(
+        activeTurnsBySession: Map<String, String>,
+        persistedStops: List<TurnStopRequest>,
+    ) {
+        // 1. 活动 turn 以持久消息投影为准重建
+        activeTurns.clear()
+        pendingStops.clear()
+        terminalAwaitingReplies.clear()
+        activeTurns.putAll(activeTurnsBySession)
+
+        // 2. 只重放仍指向同一活动 turn 的 stop 意图
+        persistedStops.forEach { request ->
+            if (activeTurns[request.sessionId] == request.turnId) {
+                pendingStops[request.sessionId] = PendingStop(request)
+            } else {
+                onRemovePersisted(request.commandId)
+            }
+        }
+        onStateChanged()
     }
 
     fun reset() {
@@ -105,6 +135,12 @@ internal class TurnStopCoordinator(
         pendingStops.clear()
         terminalAwaitingReplies.clear()
         onStateChanged()
+    }
+
+    private suspend fun removePersisted(pending: PendingStop) {
+        if (!pending.persisted) return
+        onRemovePersisted(pending.request.commandId)
+        pending.persisted = false
     }
 
     private fun replyMessage(payload: JsonObject): String =

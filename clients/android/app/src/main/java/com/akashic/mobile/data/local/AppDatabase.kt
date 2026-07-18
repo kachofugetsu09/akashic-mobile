@@ -21,8 +21,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ConversationReadStateEntity::class,
         ComposerDraftEntity::class,
         PendingMessageNotificationEntity::class,
+        PendingTurnStopEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -46,6 +47,8 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun pendingMessageNotifications(): PendingMessageNotificationDao
 
+    abstract fun pendingTurnStops(): PendingTurnStopDao
+
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
             context.applicationContext,
@@ -60,6 +63,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_6_7,
             MIGRATION_7_8,
             MIGRATION_8_9,
+            MIGRATION_9_10,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -253,6 +257,37 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_createdAt` ON `pending_message_notifications` (`createdAt`)",
+                )
+            }
+        }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. stop 意图只依赖服务器身份，避免投影重建时被级联删除
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `pending_turn_stops` (
+                        `commandId` TEXT NOT NULL,
+                        `serverId` TEXT NOT NULL,
+                        `sessionId` TEXT NOT NULL,
+                        `turnId` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`commandId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+
+                // 2. 每个服务器会话只允许一个待确认 stop 命令
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_turn_stops_serverId` ON `pending_turn_stops` (`serverId`)",
+                )
+                db.execSQL(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS `index_pending_turn_stops_serverId_sessionId` " +
+                        "ON `pending_turn_stops` (`serverId`, `sessionId`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_turn_stops_createdAt` ON `pending_turn_stops` (`createdAt`)",
                 )
             }
         }

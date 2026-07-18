@@ -15,6 +15,7 @@ import com.akashic.mobile.data.local.MediaAttachmentEntity
 import com.akashic.mobile.data.local.MediaCacheStore
 import com.akashic.mobile.data.local.NotificationTargetProjection
 import com.akashic.mobile.data.local.OutboxCommandEntity
+import com.akashic.mobile.data.local.PendingTurnStopEntity
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.RemoveUnavailableConversationResult
 import com.akashic.mobile.data.local.ServerProfileEntity
@@ -272,6 +273,8 @@ class RealtimeSession(
     )
     private val stops = TurnStopCoordinator(
         send = ::sendTurnStopCommand,
+        onPersist = ::persistTurnStop,
+        onRemovePersisted = ::removePersistedTurnStop,
         onTransportUnavailable = ::scheduleReconnect,
         onError = { message ->
             mutableState.value = mutableState.value.copy(errorMessage = message)
@@ -1330,6 +1333,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         requestedHistoryPages.clear()
         retryCount = 0
+        restoreTurnStops(currentProfile.serverId)
         val cursor = requireNotNull(database.realtimeCursors().get(currentProfile.deviceId))
         check(
             socket.send(
@@ -1344,7 +1348,7 @@ class RealtimeSession(
                         put(
                             "active_turns",
                             kotlinx.serialization.json.JsonArray(
-                                stops.activeSessionIds().map(::JsonPrimitive),
+                                stops.activeTurnIds().map(::JsonPrimitive),
                             ),
                         )
                     },
@@ -1799,6 +1803,45 @@ class RealtimeSession(
         )
     }
 
+    private suspend fun persistTurnStop(request: TurnStopRequest) {
+        val currentProfile = requireNotNull(profile) { "停止生成时不存在已配对服务器" }
+        database.pendingTurnStops().insert(
+            PendingTurnStopEntity(
+                commandId = request.commandId,
+                serverId = currentProfile.serverId,
+                sessionId = request.sessionId,
+                turnId = request.turnId,
+                createdAt = System.currentTimeMillis(),
+            ),
+        )
+    }
+
+    private suspend fun removePersistedTurnStop(commandId: String) {
+        check(database.pendingTurnStops().delete(commandId) == 1) {
+            "持久停止请求不存在: $commandId"
+        }
+    }
+
+    /** 从 streaming 消息和持久 stop 意图恢复当前服务器的交互状态。 */
+    private suspend fun restoreTurnStops(serverId: String) {
+        // 1. streaming assistant 消息是活动 turn 的本地持久投影
+        val activeMessages = database.messages().activeAssistantTurns(serverId)
+        require(activeMessages.distinctBy { it.sessionId }.size == activeMessages.size) {
+            "同一会话存在多个 streaming assistant turn"
+        }
+        val activeTurns = activeMessages.associate { message ->
+            val turnId = message.messageId.removePrefix(ASSISTANT_TURN_PREFIX)
+            require(turnId.isNotBlank()) { "Streaming assistant turn id is empty" }
+            message.sessionId to turnId
+        }
+
+        // 2. 仅恢复仍属于活动 turn 的 stop，终态残留由 coordinator 清理
+        val pendingStops = database.pendingTurnStops().listForServer(serverId).map { stop ->
+            TurnStopRequest(stop.commandId, stop.sessionId, stop.turnId)
+        }
+        stops.restore(activeTurns, pendingStops)
+    }
+
     private suspend fun flushOutbox() {
         if (activeOutboxCommandId != null) return
         val currentProfile = requireNotNull(profile)
@@ -2195,5 +2238,6 @@ class RealtimeSession(
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
+        const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }

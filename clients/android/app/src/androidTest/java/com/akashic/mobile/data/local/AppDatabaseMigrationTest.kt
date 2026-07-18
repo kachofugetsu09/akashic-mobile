@@ -29,6 +29,7 @@ class AppDatabaseMigrationTest {
             DATABASE_6_7,
             DATABASE_7_8,
             DATABASE_8_9,
+            DATABASE_9_10,
         )
             .forEach(context::deleteDatabase)
     }
@@ -339,6 +340,39 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate9To10CreatesDurableTurnStopQueueWithoutLosingHistory() {
+        helper.createDatabase(DATABASE_9_10, 9).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages VALUES('assistant:turn-1', NULL, 'mobile:test', 'assistant', '生成中', 'streaming', 3, 3, NULL, NULL, NULL, NULL)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_9_10,
+            10,
+            true,
+            AppDatabase.MIGRATION_9_10,
+        ).use { database ->
+            database.execSQL(
+                "INSERT INTO pending_turn_stops VALUES('stop-1', 'server', 'mobile:test', 'turn-1', 4)",
+            )
+            database.query("SELECT text FROM messages WHERE messageId = 'assistant:turn-1'").use { cursor ->
+                check(cursor.moveToFirst()) { "迁移后 streaming 消息丢失" }
+                assertEquals("生成中", cursor.getString(0))
+            }
+            database.query("SELECT turnId FROM pending_turn_stops WHERE commandId = 'stop-1'").use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("turn-1", cursor.getString(0))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -348,5 +382,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_6_7 = "migration-6-7"
         const val DATABASE_7_8 = "migration-7-8"
         const val DATABASE_8_9 = "migration-8-9"
+        const val DATABASE_9_10 = "migration-9-10"
     }
 }

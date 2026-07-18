@@ -156,6 +156,26 @@ data class PendingMessageNotificationEntity(
 )
 
 @Entity(
+    tableName = "pending_turn_stops",
+    foreignKeys = [
+        ForeignKey(
+            entity = ServerProfileEntity::class,
+            parentColumns = ["serverId"],
+            childColumns = ["serverId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("serverId"), Index(value = ["serverId", "sessionId"], unique = true), Index("createdAt")],
+)
+data class PendingTurnStopEntity(
+    @PrimaryKey val commandId: String,
+    val serverId: String,
+    val sessionId: String,
+    val turnId: String,
+    val createdAt: Long,
+)
+
+@Entity(
     tableName = "turn_blocks",
     foreignKeys = [
         ForeignKey(
