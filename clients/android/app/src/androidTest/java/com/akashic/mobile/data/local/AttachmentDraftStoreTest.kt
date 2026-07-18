@@ -171,6 +171,38 @@ class AttachmentDraftStoreTest {
         Unit
     }
 
+    @Test
+    fun rejectsProviderFilenamesWithBoundaryWhitespaceBeforeCopying() = runBlocking {
+        listOf(" leading.txt", "trailing.txt ").forEachIndexed { index, filename ->
+            val source = context.cacheDir.resolve("shared-text/$filename").apply {
+                parentFile!!.mkdirs()
+                writeText("payload")
+            }
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${BuildConfig.APPLICATION_ID}.files",
+                source,
+            )
+            val attachmentId = "01INVALIDFILENAME0000000$index"
+
+            val failure = runCatching {
+                store.import(
+                    serverId = "server",
+                    sessionId = "mobile:test",
+                    uris = listOf(uri),
+                    now = 10L + index,
+                    attachmentIds = listOf(attachmentId),
+                )
+            }.exceptionOrNull()
+
+            assertTrue(failure is IllegalArgumentException)
+            assertEquals("文件名必须为 1..255 字符且首尾不能是空白", failure?.message)
+            assertNull(database.attachmentTransfers().get(attachmentId))
+            assertFalse(store.fileFor(attachmentId).exists())
+            source.delete()
+        }
+    }
+
     private fun transfer(id: String, state: String) = AttachmentTransferEntity(
         attachmentId = id,
         serverId = "server",

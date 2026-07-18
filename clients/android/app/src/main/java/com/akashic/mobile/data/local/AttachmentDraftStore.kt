@@ -167,7 +167,11 @@ class AttachmentDraftStore(
     }
 
     private fun validateFilename(filename: String) {
-        require(filename.isNotBlank() && filename.length <= 255) { "文件名必须为 1..255 字符" }
+        require(
+            filename.isNotBlank() &&
+                filename == filename.trim() &&
+                filename.length <= 255
+        ) { "文件名必须为 1..255 字符且首尾不能是空白" }
         require('/' !in filename && '\\' !in filename) { "文件名不能包含路径分隔符" }
         require(filename.none { it.code < 32 || it.code == 127 }) { "文件名不能包含控制字符" }
     }
