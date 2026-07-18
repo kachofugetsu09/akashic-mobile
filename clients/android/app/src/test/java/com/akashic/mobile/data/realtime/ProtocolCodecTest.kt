@@ -2,7 +2,9 @@ package com.akashic.mobile.data.realtime
 
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
@@ -98,6 +100,55 @@ class ProtocolCodecTest {
 
         assertEquals("undo", payload.items.single().command)
         assertEquals("撤销上一轮对话", payload.items.single().description)
+    }
+
+    @Test
+    fun `decodes Unicode command description without UTF-16 truncation`() {
+        val description = "😀".repeat(256)
+        val frame = """
+            {
+              "v": 1,
+              "kind": "reply",
+              "type": "command.list.ok",
+              "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              "connection_epoch": 7,
+              "payload": {"items": [{"command": "emoji", "description": "$description"}]}
+            }
+        """.trimIndent()
+
+        val envelope = ProtocolCodec.decode(frame)
+        val payload = ProtocolCodec.decodePayload<CommandListPayload>(envelope.payload)
+        val commands = validateCommandCatalog(payload.items)
+
+        assertEquals(256, commands.single().description.codePointCount(0, description.length))
+        assertThrows(IllegalArgumentException::class.java) {
+            validateCommandCatalog(listOf(RemoteCommandItem("emoji", "😀".repeat(257))))
+        }
+    }
+
+    @Test
+    fun `round trips slash command text unchanged`() {
+        val payload = MessageSendPayload(
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            sessionId = "mobile:one",
+            text = "/undo",
+            mediaRefs = emptyList(),
+            clientCreatedAt = "2026-07-18T00:00:00Z",
+        )
+        val envelope = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "message.send",
+            id = payload.clientMessageId,
+            connectionEpoch = 7,
+            sessionId = payload.sessionId,
+            payload = ProtocolCodec.json().encodeToJsonElement(MessageSendPayload.serializer(), payload).jsonObject,
+        )
+
+        val decoded = ProtocolCodec.decode(ProtocolCodec.encode(envelope))
+        val decodedPayload = ProtocolCodec.decodePayload<MessageSendPayload>(decoded.payload)
+
+        assertEquals("/undo", decodedPayload.text)
     }
 
     @Test

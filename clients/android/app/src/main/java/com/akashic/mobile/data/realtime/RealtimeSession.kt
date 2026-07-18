@@ -1587,15 +1587,7 @@ class RealtimeSession(
         val commandId = requireNotNull(envelope.id)
         require(commandId == pendingCommandListId) { "收到未知快捷命令 reply: $commandId" }
         val payload = ProtocolCodec.decodePayload<CommandListPayload>(envelope.payload)
-        val commands = payload.items.map { item ->
-            require(COMMAND_NAME.matches(item.command)) { "快捷命令名称无效: ${item.command}" }
-            require(item.description.isNotBlank() && item.description.length <= 256) {
-                "快捷命令说明无效: ${item.command}"
-            }
-            require(item.command != "stop") { "stop 由生成中止控件拥有" }
-            item
-        }
-        require(commands.map { it.command }.distinct().size == commands.size) { "快捷命令名称重复" }
+        val commands = validateCommandCatalog(payload.items)
         pendingCommandListId = null
         mutableState.value = mutableState.value.copy(commands = commands)
     }
@@ -2233,11 +2225,31 @@ class RealtimeSession(
         const val STALE_NOTIFICATION_MESSAGE = "通知对应的会话或消息已不可用"
         val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive", "attachments-v1")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-        val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
         const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
         const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
+}
+
+private val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
+
+/** 校验服务端命令目录的跨语言边界并返回原目录。 */
+internal fun validateCommandCatalog(items: List<RemoteCommandItem>): List<RemoteCommandItem> {
+    // 1. 校验每个命令的名称、说明和所有权
+    items.forEach { item ->
+        require(COMMAND_NAME.matches(item.command)) { "快捷命令名称无效: ${item.command}" }
+        require(
+            item.description.isNotBlank() &&
+                item.description.codePointCount(0, item.description.length) <= 256,
+        ) {
+            "快捷命令说明无效: ${item.command}"
+        }
+        require(item.command != "stop") { "stop 由生成中止控件拥有" }
+    }
+
+    // 2. 校验目录内名称唯一
+    require(items.map { it.command }.distinct().size == items.size) { "快捷命令名称重复" }
+    return items
 }
