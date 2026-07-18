@@ -9,9 +9,11 @@ import com.akashic.mobile.data.local.decodeStoredToolBlock
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
+import com.akashic.mobile.ui.conversation.CommandUi
 import com.akashic.mobile.ui.conversation.ComposerAttachmentState
 import com.akashic.mobile.ui.conversation.ComposerAttachmentUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
+import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
@@ -87,7 +89,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     canRemove = attachment.state in setOf("pending", "ready", "failed"),
                 )
             },
+            commands = session.commands.map { CommandUi(it.command, it.description) },
             isStreaming = graph.any { it.message.deliveryState == "streaming" },
+            isResyncing = session.connection.phase == ConnectionPhase.SYNCING,
+            canResync = session.connection.phase == ConnectionPhase.READY && session.activeTurnId == null,
             isStopping = session.isStopping,
             canStop = session.activeTurnId != null &&
                 session.connection.phase == ConnectionPhase.READY &&
@@ -106,7 +111,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             selectedSessionId = null,
             messages = emptyList(),
             attachments = emptyList(),
+            commands = emptyList(),
             isStreaming = false,
+            isResyncing = false,
+            canResync = false,
             isStopping = false,
             canStop = false,
             canSend = false,
@@ -116,6 +124,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onQrCode(value: String) = container.realtimeSession.beginPairing(value)
 
     fun sendMessage(value: String) = container.realtimeSession.sendMessage(value)
+
+    fun sendCommand(value: String) = container.realtimeSession.sendCommand(value)
 
     fun stopCurrentTurn() = container.realtimeSession.stopCurrentTurn()
 
@@ -139,6 +149,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun restartPairing() = MobileConnectionService.disconnect(getApplication())
 
+    fun reloadFromServer() = container.realtimeSession.reloadFromServer()
+
     private fun toMessageUi(graph: MessageWithBlocks): MessageUi {
         val message = graph.message
         if (message.role == "user") {
@@ -147,9 +159,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 text = message.text,
                 deliveryLabel = when (message.deliveryState) {
                     "pending" -> "待发送"
-                    "sent" -> "已发送"
+                    "sent", "complete" -> "已发送"
                     "failed" -> "发送失败"
-                    else -> message.deliveryState
+                    else -> error("未知用户消息状态: ${message.deliveryState}")
                 },
                 attachments = graph.attachmentLinks.toMessageAttachmentUi(),
             )
@@ -172,11 +184,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
             },
             answer = message.text,
-            isStreaming = message.deliveryState == "streaming",
+            status = when (message.deliveryState) {
+                "streaming" -> AssistantTurnStatus.STREAMING
+                "complete" -> AssistantTurnStatus.COMPLETE
+                "interrupted" -> AssistantTurnStatus.INTERRUPTED
+                else -> error("未知助手消息状态: ${message.deliveryState}")
+            },
             durationSeconds = turnDurationSeconds(
                 startedAt = message.createdAt,
                 updatedAt = message.updatedAt,
-                isComplete = message.deliveryState == "complete",
+                isTerminal = message.deliveryState in setOf("complete", "interrupted"),
             ),
             attachments = graph.attachmentLinks.toMessageAttachmentUi(),
         )
@@ -226,6 +243,11 @@ internal fun connectionPresentation(
     }
     return when (connection.phase) {
         ConnectionPhase.READY -> ConnectionPresentation("连接正常", ConnectionStatusUi.READY, null)
+        ConnectionPhase.SYNCING -> ConnectionPresentation(
+            "正在同步消息",
+            ConnectionStatusUi.CONNECTING,
+            "正在从电脑更新本地消息",
+        )
         ConnectionPhase.DEGRADED -> ConnectionPresentation(
             "网络不稳 · 正在续传",
             ConnectionStatusUi.DEGRADED,
@@ -245,7 +267,7 @@ internal fun connectionPresentation(
     }
 }
 
-internal fun turnDurationSeconds(startedAt: Long, updatedAt: Long, isComplete: Boolean): Int? {
-    if (!isComplete) return null
+internal fun turnDurationSeconds(startedAt: Long, updatedAt: Long, isTerminal: Boolean): Int? {
+    if (!isTerminal) return null
     return ceil((updatedAt - startedAt).coerceAtLeast(1) / 1_000.0).toInt()
 }

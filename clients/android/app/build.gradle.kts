@@ -28,8 +28,8 @@ android {
         applicationId = "com.akashic.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 8
+        versionName = "0.6.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -73,6 +73,10 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
+
+    sourceSets {
+        getByName("androidTest").assets.srcDir("$projectDir/schemas")
+    }
 }
 
 kotlin {
@@ -113,6 +117,9 @@ dependencies {
     implementation(libs.androidx.camera.view)
     implementation(libs.zxing.core)
     implementation(libs.markdown.renderer.m3)
+    implementation(libs.latex.base)
+    implementation(libs.latex.parser)
+    implementation(libs.latex.renderer)
     implementation(libs.coil.compose)
     implementation(libs.coil.gif)
 

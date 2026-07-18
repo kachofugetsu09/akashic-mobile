@@ -1,8 +1,8 @@
 {
-  "layer": "05-passive-delivery-lifecycle",
+  "layer": "06-native-interactions-v0.6.2",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "c2a9f88db506fd4762addd434625410944335ae1",
+  "source_commit": "4c956006a31a998a0fc72a433cfa66ae944ae587",
   "source_paths": [
     "clients/android"
   ]

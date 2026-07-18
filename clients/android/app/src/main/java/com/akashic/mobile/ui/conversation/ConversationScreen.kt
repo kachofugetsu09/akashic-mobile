@@ -1,6 +1,7 @@
 package com.akashic.mobile.ui.conversation
 
 import android.animation.ValueAnimator
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.expandVertically
@@ -45,6 +46,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
@@ -57,6 +60,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Phonelink
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material.icons.rounded.Wifi
@@ -65,6 +69,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonColors
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -93,9 +98,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.paneTitle
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.semantics.semantics
@@ -106,9 +116,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.akashic.mobile.ui.design.AkashicTheme
 import com.akashic.mobile.ui.design.pressScale
+import com.hrm.latex.renderer.LatexAutoWrap
+import com.hrm.latex.renderer.model.LatexConfig
+import com.hrm.latex.renderer.model.LatexTheme
 import com.mikepenz.markdown.m3.Markdown
+import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.rememberMarkdownState
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
@@ -122,12 +137,17 @@ fun ConversationScreen(
     onRemoveAttachment: (String) -> Unit,
     onRetryAttachment: (String) -> Unit,
     onSend: (String) -> Unit,
+    onSendCommand: (String) -> Unit,
     onStop: () -> Unit,
     onRetryDownloadedAttachment: (String) -> Unit,
     onOpenDownloadedAttachment: (String) -> Unit,
     onDismissError: () -> Unit,
 ) {
     var composerText by rememberSaveable { mutableStateOf("") }
+    var commandPanelOpen by rememberSaveable { mutableStateOf(false) }
+    var composerFocused by remember { mutableStateOf(false) }
+    var restoreComposerAfterPanel by remember { mutableStateOf(false) }
+    val composerFocusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
@@ -140,28 +160,86 @@ fun ConversationScreen(
             )
         },
         bottomBar = {
-            ConversationBottomBar(
-                text = composerText,
-                onTextChange = { composerText = it },
-                connectionNotice = state.connectionNotice,
-                errorNotice = state.errorNotice,
-                isStreaming = state.isStreaming,
-                isStopping = state.isStopping,
-                canStop = state.canStop,
-                enabled = state.canSend,
-                attachments = state.attachments,
-                onAttach = onAttach,
-                onRemoveAttachment = onRemoveAttachment,
-                onRetryAttachment = onRetryAttachment,
-                onSend = {
-                    onSend(composerText)
-                    composerText = ""
-                    focusManager.clearFocus(force = true)
-                    keyboardController?.hide()
-                },
-                onStop = onStop,
-                onDismissError = onDismissError,
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface)
+                    .testTag("command-composer-stack"),
+            ) {
+                AnimatedVisibility(
+                    visible = commandPanelOpen,
+                    enter = expandVertically(
+                        animationSpec = tween(220),
+                        expandFrom = Alignment.Bottom,
+                    ) + fadeIn(tween(160)),
+                    exit = shrinkVertically(
+                        animationSpec = tween(180),
+                        shrinkTowards = Alignment.Bottom,
+                    ) + fadeOut(tween(120)),
+                ) {
+                    CommandPanel(
+                        commands = state.commands,
+                        onSelect = { command ->
+                            if (commandPanelOpen) {
+                                commandPanelOpen = false
+                                restoreComposerAfterPanel = false
+                                onSendCommand("/${command.command}")
+                            }
+                        },
+                    )
+                }
+                ConversationBottomBar(
+                    text = composerText,
+                    onTextChange = { composerText = it },
+                    connectionNotice = state.connectionNotice,
+                    errorNotice = state.errorNotice,
+                    isStreaming = state.isStreaming,
+                    isStopping = state.isStopping,
+                    canStop = state.canStop,
+                    enabled = state.canSend,
+                    attachments = state.attachments,
+                    hasCommands = state.commands.isNotEmpty(),
+                    commandPanelOpen = commandPanelOpen,
+                    composerFocusRequester = composerFocusRequester,
+                    onComposerFocusChanged = { focused ->
+                        composerFocused = focused
+                        if (focused && commandPanelOpen) {
+                            commandPanelOpen = false
+                            restoreComposerAfterPanel = false
+                        }
+                    },
+                    onToggleCommands = {
+                        if (commandPanelOpen) {
+                            commandPanelOpen = false
+                            if (restoreComposerAfterPanel) {
+                                composerFocusRequester.requestFocus()
+                                keyboardController?.show()
+                            }
+                        } else {
+                            restoreComposerAfterPanel = composerFocused
+                            commandPanelOpen = true
+                            focusManager.clearFocus(force = true)
+                            keyboardController?.hide()
+                        }
+                    },
+                    onAttach = {
+                        commandPanelOpen = false
+                        restoreComposerAfterPanel = false
+                        onAttach()
+                    },
+                    onRemoveAttachment = onRemoveAttachment,
+                    onRetryAttachment = onRetryAttachment,
+                    onSend = {
+                        commandPanelOpen = false
+                        onSend(composerText)
+                        composerText = ""
+                        focusManager.clearFocus(force = true)
+                        keyboardController?.hide()
+                    },
+                    onStop = onStop,
+                    onDismissError = onDismissError,
+                )
+            }
         },
     ) { contentPadding ->
         if (state.messages.isEmpty()) {
@@ -173,6 +251,78 @@ fun ConversationScreen(
                 onOpenDownloadedAttachment = onOpenDownloadedAttachment,
                 modifier = Modifier.padding(contentPadding),
             )
+        }
+    }
+
+    BackHandler(enabled = commandPanelOpen) {
+        commandPanelOpen = false
+        if (restoreComposerAfterPanel) {
+            composerFocusRequester.requestFocus()
+            keyboardController?.show()
+        }
+    }
+    LaunchedEffect(state.canSend, state.commands.isEmpty()) {
+        if (!state.canSend || state.commands.isEmpty()) commandPanelOpen = false
+    }
+}
+
+@Composable
+private fun CommandPanel(
+    commands: List<CommandUi>,
+    onSelect: (CommandUi) -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        tonalElevation = 1.dp,
+        shadowElevation = 2.dp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 240.dp, max = 304.dp)
+            .padding(horizontal = 12.dp, vertical = 4.dp)
+            .semantics { paneTitle = "快捷命令" }
+            .testTag("command-panel"),
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag("command-panel-list"),
+            contentPadding = PaddingValues(vertical = 8.dp),
+        ) {
+            items(commands, key = { it.command }) { command ->
+                Surface(
+                    onClick = { onSelect(command) },
+                    color = Color.Transparent,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .testTag("command-${command.command}"),
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        Text(
+                            text = command.description,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        Text(
+                            text = "/${command.command}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -428,13 +578,84 @@ private fun AssistantTurn(
                 modifier = Modifier.padding(top = 10.dp),
             )
         }
+        if (message.status == AssistantTurnStatus.INTERRUPTED) {
+            Row(
+                modifier = Modifier
+                    .padding(top = 12.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite }
+                    .testTag("turn-interrupted-${message.id}"),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.StopCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text(
+                    text = "生成已中止，可继续补充",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
 @Composable
 private fun MarkdownMessage(content: String, modifier: Modifier = Modifier) {
-    val markdownState = rememberMarkdownState(content, retainState = true)
-    Markdown(markdownState = markdownState, modifier = modifier)
+    val segments = remember(content) { richMessageSegments(content) }
+    val typography = markdownTypography(
+        h1 = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+        h2 = MaterialTheme.typography.titleLarge.copy(
+            fontSize = 20.sp,
+            lineHeight = 26.sp,
+            fontWeight = FontWeight.SemiBold,
+        ),
+        h3 = MaterialTheme.typography.titleMedium.copy(
+            fontSize = 18.sp,
+            lineHeight = 24.sp,
+            fontWeight = FontWeight.SemiBold,
+        ),
+        h4 = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold),
+        h5 = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+        h6 = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+        text = MaterialTheme.typography.bodyLarge,
+        paragraph = MaterialTheme.typography.bodyLarge,
+        ordered = MaterialTheme.typography.bodyLarge,
+        bullet = MaterialTheme.typography.bodyLarge,
+        list = MaterialTheme.typography.bodyLarge,
+        table = MaterialTheme.typography.bodyMedium,
+    )
+    SelectionContainer(modifier = modifier) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            segments.forEachIndexed { index, segment ->
+                when (segment) {
+                    is RichMessageSegment.Markdown -> {
+                        val markdownState = rememberMarkdownState(segment.content, retainState = true)
+                        Markdown(
+                            markdownState = markdownState,
+                            typography = typography,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                    is RichMessageSegment.BlockMath -> LatexAutoWrap(
+                        latex = segment.content,
+                        config = LatexConfig(
+                            fontSize = 18.sp,
+                            theme = LatexTheme.material3(),
+                            accessibilityEnabled = true,
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .testTag("message-math-$index"),
+                    )
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -475,10 +696,14 @@ private fun ProcessDisclosure(message: MessageUi.AssistantTurn) {
             horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
-                text = if (message.isStreaming) {
-                    "正在思考"
-                } else {
-                    "已思考${message.durationSeconds?.let { " ${it}s" } ?: ""}"
+                text = when (message.status) {
+                    AssistantTurnStatus.STREAMING -> "正在思考"
+                    AssistantTurnStatus.COMPLETE -> {
+                        "已思考${message.durationSeconds?.let { " ${it}s" } ?: ""}"
+                    }
+                    AssistantTurnStatus.INTERRUPTED -> {
+                        "已中止${message.durationSeconds?.let { " · ${it}s" } ?: ""}"
+                    }
                 },
                 style = MaterialTheme.typography.labelLarge,
                 modifier = Modifier.weight(1f),
@@ -627,6 +852,11 @@ private fun ConversationBottomBar(
     canStop: Boolean,
     enabled: Boolean,
     attachments: List<ComposerAttachmentUi>,
+    hasCommands: Boolean,
+    commandPanelOpen: Boolean,
+    composerFocusRequester: FocusRequester,
+    onComposerFocusChanged: (Boolean) -> Unit,
+    onToggleCommands: () -> Unit,
     onAttach: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onRetryAttachment: (String) -> Unit,
@@ -658,6 +888,21 @@ private fun ConversationBottomBar(
             )
         }
         AnimatedVisibility(
+            visible = isStopping,
+            enter = fadeIn(tween(120)),
+            exit = fadeOut(tween(120)),
+        ) {
+            Text(
+                text = "正在中止本轮…",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.tertiary,
+                modifier = Modifier
+                    .padding(start = 12.dp, bottom = 8.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite }
+                    .testTag("turn-stop-pending"),
+            )
+        }
+        AnimatedVisibility(
             visible = attachments.isNotEmpty(),
             enter = expandVertically(animationSpec = tween(220)) + fadeIn(animationSpec = tween(180)),
             exit = shrinkVertically(animationSpec = tween(180)) + fadeOut(animationSpec = tween(140)),
@@ -682,8 +927,23 @@ private fun ConversationBottomBar(
                 .padding(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            TactileIconButton(onClick = onAttach, enabled = enabled) {
-                Icon(Icons.Rounded.AttachFile, contentDescription = "添加附件")
+            TactileIconButton(
+                onClick = onToggleCommands,
+                enabled = enabled && hasCommands,
+                colors = if (commandPanelOpen) {
+                    IconButtonDefaults.filledIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                    )
+                } else {
+                    IconButtonDefaults.iconButtonColors()
+                },
+            ) {
+                Icon(
+                    imageVector = if (commandPanelOpen) Icons.Rounded.Close else Icons.Rounded.Menu,
+                    contentDescription = if (commandPanelOpen) "关闭快捷命令" else "打开快捷命令",
+                    modifier = Modifier.testTag("composer-command-menu"),
+                )
             }
             BasicTextField(
                 value = text,
@@ -695,6 +955,9 @@ private fun ConversationBottomBar(
                 cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier
                     .weight(1f)
+                    .focusRequester(composerFocusRequester)
+                    .onFocusChanged { onComposerFocusChanged(it.isFocused) }
+                    .testTag("composer-input")
                     .padding(horizontal = 8.dp, vertical = 10.dp),
                 decorationBox = { innerTextField ->
                     Box(contentAlignment = Alignment.CenterStart) {
@@ -709,6 +972,13 @@ private fun ConversationBottomBar(
                     }
                 },
             )
+            TactileIconButton(onClick = onAttach, enabled = enabled) {
+                Icon(
+                    Icons.Rounded.AttachFile,
+                    contentDescription = "添加附件",
+                    modifier = Modifier.testTag("composer-attachment"),
+                )
+            }
             SendStopButton(
                 showStop = isStreaming,
                 isStopping = isStopping,
@@ -911,6 +1181,7 @@ private fun formatFileSize(bytes: Long): String = when {
 private fun TactileIconButton(
     onClick: () -> Unit,
     enabled: Boolean = true,
+    colors: IconButtonColors = IconButtonDefaults.iconButtonColors(),
     content: @Composable () -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -918,6 +1189,7 @@ private fun TactileIconButton(
         onClick = onClick,
         enabled = enabled,
         interactionSource = interactionSource,
+        colors = colors,
         modifier = Modifier
             .size(48.dp)
             .pressScale(interactionSource, enabled),
@@ -944,6 +1216,13 @@ private fun SendStopButton(
         modifier = Modifier
             .size(48.dp)
             .testTag("composer-send-stop")
+            .semantics {
+                contentDescription = when {
+                    isStopping -> "正在停止生成"
+                    showStop -> "停止生成"
+                    else -> "发送消息"
+                }
+            }
             .pressScale(interactionSource, enabled),
     ) {
         if (isStopping) {
@@ -1021,7 +1300,7 @@ private fun ContextualSendStopIcon(showStop: Boolean) {
     Box(contentAlignment = Alignment.Center) {
         Icon(
             imageVector = Icons.Rounded.Stop,
-            contentDescription = "停止生成",
+            contentDescription = null,
             modifier = Modifier
                 .graphicsLayer {
                     alpha = stopProgress
@@ -1032,7 +1311,7 @@ private fun ContextualSendStopIcon(showStop: Boolean) {
         )
         Icon(
             imageVector = Icons.AutoMirrored.Rounded.Send,
-            contentDescription = "发送消息",
+            contentDescription = null,
             modifier = Modifier
                 .graphicsLayer {
                     alpha = sendProgress
@@ -1059,6 +1338,7 @@ private fun ConversationLightPreview() {
             onOpenDownloadedAttachment = {},
             onDismissError = {},
             onSend = {},
+            onSendCommand = {},
             onStop = {},
         )
     }
@@ -1079,6 +1359,7 @@ private fun ConversationDarkPreview() {
             onOpenDownloadedAttachment = {},
             onDismissError = {},
             onSend = {},
+            onSendCommand = {},
             onStop = {},
         )
     }
