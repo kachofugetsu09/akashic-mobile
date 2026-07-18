@@ -1,8 +1,8 @@
 {
-  "layer": "01-secure-realtime-client",
+  "layer": "02-session-recovery-and-release",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "9ac2d220ce740f7d67dab2f8eef2651a2a3add65",
+  "source_commit": "ef3a771b0f1796eb68f12707487c3ecdf710b212",
   "source_paths": [
     "clients/android"
   ]
