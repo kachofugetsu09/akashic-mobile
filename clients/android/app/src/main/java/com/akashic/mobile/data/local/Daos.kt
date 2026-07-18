@@ -35,6 +35,11 @@ interface ConversationDao {
     fun observeForServer(serverId: String): Flow<List<ConversationEntity>>
 
     @Query(
+        "SELECT * FROM conversations WHERE serverId = :serverId AND sessionId LIKE 'mobile:%' ORDER BY updatedAt DESC LIMIT 1",
+    )
+    suspend fun latestMobileForServer(serverId: String): ConversationEntity?
+
+    @Query(
         """
         SELECT
           conversation.sessionId AS sessionId,
@@ -226,6 +231,20 @@ interface ComposerDraftDao {
         "DELETE FROM composer_drafts WHERE serverId = :serverId AND sessionId = :sessionId",
     )
     suspend fun delete(serverId: String, sessionId: String): Int
+
+    @Query(
+        """
+        DELETE FROM composer_drafts
+        WHERE serverId = :serverId
+          AND sessionId = :sessionId
+          AND updatedAt = :expectedRevision
+        """,
+    )
+    suspend fun deleteRevision(
+        serverId: String,
+        sessionId: String,
+        expectedRevision: Long,
+    ): Int
 }
 
 @Dao
@@ -594,6 +613,12 @@ interface RealtimeCursorDao {
 
     @Query("SELECT * FROM realtime_cursors WHERE deviceId = :deviceId")
     suspend fun get(deviceId: String): RealtimeCursorEntity?
+
+    @Query("SELECT * FROM realtime_cursors WHERE serverId = :serverId")
+    suspend fun getForServer(serverId: String): RealtimeCursorEntity?
+
+    @Query("DELETE FROM realtime_cursors WHERE serverId = :serverId")
+    suspend fun deleteForServer(serverId: String): Int
 
     @Upsert
     suspend fun upsert(cursor: RealtimeCursorEntity)

@@ -184,6 +184,7 @@ data class MobileWebComposer(
 data class MobileWebComposerDraft(
     val text: String,
     val replyToMessageId: String?,
+    val updatedAt: Long?,
 )
 
 @Serializable
@@ -196,7 +197,7 @@ data class MobileWebTransferStatus(
 
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 5,
+    protocolVersion = 6,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -213,6 +214,7 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
         draft = MobileWebComposerDraft(
             text = composerDraft.text,
             replyToMessageId = composerDraft.replyToMessageId,
+            updatedAt = composerDraft.updatedAt,
         ),
         attachments = attachments.map(ComposerAttachmentUi::toMobileWebAttachment),
         pendingMessages = pendingMessages.map(PendingMessageUi::toMobileWebPendingMessage),

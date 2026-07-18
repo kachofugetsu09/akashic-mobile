@@ -69,6 +69,18 @@ class LocalDeliveryStore(
     private val projectionStateMutex = Mutex()
     private val canonicalMessageAliases = linkedMapOf<String, String>()
 
+    /** 恢复当前电脑拥有的会话选择，拒绝把另一台电脑的会话带入当前投影。 */
+    suspend fun restoreSelectedSession(serverId: String, selectedSessionId: String?): String? {
+        // 1. 优先保留仍属于当前电脑的显式选择
+        selectedSessionId?.let { sessionId ->
+            val selected = database.conversations().get(sessionId)
+            if (selected?.serverId == serverId) return sessionId
+        }
+
+        // 2. 否则只从当前电脑的持久会话中选择最近一项
+        return database.conversations().latestMobileForServer(serverId)?.sessionId
+    }
+
     /** 串行校验并保存当前电脑的一份会话草稿。 */
     suspend fun saveComposerDraft(
         sessionId: String,
@@ -79,6 +91,7 @@ class LocalDeliveryStore(
     ) = projectionStateMutex.withLock {
         // 1. 在 WebView 边界限制消息大小并确认会话归属
         require(text.length <= 65_536) { "会话草稿超过消息长度上限" }
+        require(updatedAt in 1..9_007_199_254_740_991) { "会话草稿 revision 无效" }
         val conversation = requireNotNull(database.conversations().get(sessionId)) {
             "会话草稿对应的会话不存在: $sessionId"
         }
@@ -217,9 +230,17 @@ class LocalDeliveryStore(
     }
 
     suspend fun savePairedProfile(profile: ServerProfileEntity, cursor: RealtimeCursorEntity) {
+        require(profile.serverId == cursor.serverId) { "Realtime cursor belongs to another server" }
         database.withTransaction {
+            // 1. server profile 是长期状态；重复配对只更新当前凭据
             database.serverProfiles().upsert(profile)
-            if (database.realtimeCursors().get(cursor.deviceId) == null) {
+
+            // 2. cursor 是 device 派生状态；新 device 必须原子替换旧 checkpoint
+            val existing = database.realtimeCursors().getForServer(profile.serverId)
+            if (existing == null) {
+                database.realtimeCursors().insert(cursor)
+            } else if (existing.deviceId != cursor.deviceId) {
+                check(database.realtimeCursors().deleteForServer(profile.serverId) == 1)
                 database.realtimeCursors().insert(cursor)
             }
         }
@@ -230,11 +251,27 @@ class LocalDeliveryStore(
         message: MessageEntity,
         command: OutboxCommandEntity,
         attachments: List<MediaAttachmentEntity>,
-    ) {
+        sentDraftRevision: Long? = null,
+    ) = projectionStateMutex.withLock {
         database.withTransaction {
+            // 1. 持久化用户消息与可重放 outbox
             database.conversations().upsert(conversation)
             database.messages().upsert(message)
             database.outbox().enqueue(command)
+
+            // 2. 只消费发送时捕获的草稿 revision，保留随后产生的新输入
+            if (sentDraftRevision != null) {
+                require(sentDraftRevision in 1..9_007_199_254_740_991) {
+                    "会话草稿 revision 无效"
+                }
+                database.composerDrafts().deleteRevision(
+                    conversation.serverId,
+                    conversation.sessionId,
+                    sentDraftRevision,
+                )
+            }
+
+            // 3. 附件状态与消息提交保持原子
             if (attachments.isNotEmpty()) {
                 val attachmentIds = attachments.map { it.attachmentId }
                 database.mediaAttachments().upsertAll(attachments)

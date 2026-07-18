@@ -142,12 +142,6 @@ data class MessageEntity(
             childColumns = ["serverId"],
             onDelete = ForeignKey.CASCADE,
         ),
-        ForeignKey(
-            entity = MessageEntity::class,
-            parentColumns = ["messageId"],
-            childColumns = ["messageId"],
-            onDelete = ForeignKey.CASCADE,
-        ),
     ],
     indices = [Index("serverId"), Index("createdAt")],
 )

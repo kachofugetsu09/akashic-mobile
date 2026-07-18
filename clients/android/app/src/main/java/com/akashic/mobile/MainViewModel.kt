@@ -243,6 +243,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             composerDraft = ComposerDraftUi(
                 text = draft?.text.orEmpty(),
                 replyToMessageId = draft?.replyToMessageId,
+                updatedAt = draft?.updatedAt,
             ),
             pendingMessages = messages.filterIsInstance<MessageUi.User>()
                 .filter { it.deliveryLabel == "待发送" }
@@ -267,6 +268,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 session.connection.phase == ConnectionPhase.READY &&
                 !session.isStopping,
             canSend = session.hasProfile &&
+                session.currentSessionId != null &&
                 !selectedRemoteMissing &&
                 composerAttachments.all { it.state == ComposerAttachmentState.READY },
         )
@@ -300,15 +302,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun onQrCode(value: String) = container.realtimeSession.beginPairing(value)
 
     fun sendMessage(
+        sessionId: String,
         value: String,
         replyToMessageId: String?,
         expectedAttachmentIds: List<String>,
+        sentDraftRevision: Long,
         onPersisted: (Boolean) -> Unit,
     ) = container.realtimeSession.sendMessage(
-        value,
-        replyToMessageId,
-        expectedAttachmentIds,
-        onPersisted,
+        text = value,
+        replyToMessageId = replyToMessageId,
+        expectedAttachmentIds = expectedAttachmentIds,
+        onPersisted = onPersisted,
+        targetSessionId = sessionId,
+        sentDraftRevision = sentDraftRevision,
     )
 
     fun sendCommand(value: String) = container.realtimeSession.sendCommand(value)
@@ -575,14 +581,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun retryFailedMessage(messageId: String) = container.realtimeSession.retryFailedMessage(messageId)
 
     /** 按桥接调用顺序保存当前电脑的一份会话草稿。 */
-    fun saveComposerDraft(sessionId: String, text: String, replyToMessageId: String?) {
+    fun saveComposerDraft(
+        sessionId: String,
+        text: String,
+        replyToMessageId: String?,
+        updatedAt: Long,
+    ) {
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             container.deliveryStore.saveComposerDraft(
                 sessionId = sessionId,
                 text = text,
                 replyToMessageId = replyToMessageId,
                 expectedServerId = sessionState.value.serverId,
-                updatedAt = System.currentTimeMillis(),
+                updatedAt = updatedAt,
             )
         }
     }

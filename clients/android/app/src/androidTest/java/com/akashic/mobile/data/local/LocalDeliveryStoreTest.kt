@@ -321,7 +321,7 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
-    fun notificationConsumptionToleratesMessageCascadeCleanup() = runBlocking {
+    fun pendingNotificationSurvivesMessageProjectionCleanup() = runBlocking {
         store.applyEvent(
             serverId = "server",
             deviceId = "device",
@@ -340,8 +340,83 @@ class LocalDeliveryStoreTest {
         val messageId = "proactive:proactive-cascade"
         assertEquals(1, database.messages().delete(messageId))
 
-        assertEquals(0, database.pendingMessageNotifications().delete(messageId))
+        assertEquals(1, database.pendingMessageNotifications().observeForServer("server").first().size)
+        assertEquals(1, database.pendingMessageNotifications().delete(messageId))
         assertTrue(database.pendingMessageNotifications().observeForServer("server").first().isEmpty())
+    }
+
+    @Test
+    fun restoresOnlyASelectionOwnedByTheCurrentServer() = runBlocking {
+        store.savePairedProfile(
+            ServerProfileEntity("other", "other", "other-device", "alias", "pin", "[]", "[]", "[]", 1),
+            RealtimeCursorEntity("other-device", "other", 0, 0, 1),
+        )
+        database.conversations().upsert(ConversationEntity("mobile:other", "other", "other", 3))
+
+        assertEquals(
+            "mobile:test",
+            store.restoreSelectedSession("server", "mobile:other"),
+        )
+        assertEquals(
+            "mobile:other",
+            store.restoreSelectedSession("other", "mobile:other"),
+        )
+    }
+
+    @Test
+    fun messageCommitAtomicallyConsumesOnlyItsCapturedDraftRevision() = runBlocking {
+        store.saveComposerDraft("mobile:test", "准备发送", null, "server", 10)
+
+        store.enqueueMessage(
+            conversation = ConversationEntity("mobile:test", "server", "准备发送", 11),
+            message = pendingUserMessage("user:atomic", "atomic", "准备发送", 11),
+            command = pendingOutbox("atomic", 11),
+            attachments = emptyList(),
+            sentDraftRevision = 10,
+        )
+
+        assertEquals(null, database.composerDrafts().get("server", "mobile:test"))
+        assertNotNull(database.messages().get("user:atomic"))
+        assertNotNull(database.outbox().get("atomic"))
+    }
+
+    @Test
+    fun newerComposerRevisionSurvivesAnOlderMessageCommit() = runBlocking {
+        store.saveComposerDraft("mobile:test", "准备发送", null, "server", 10)
+        store.saveComposerDraft("mobile:test", "发送后继续输入", null, "server", 11)
+
+        store.enqueueMessage(
+            conversation = ConversationEntity("mobile:test", "server", "准备发送", 12),
+            message = pendingUserMessage("user:older", "older", "准备发送", 12),
+            command = pendingOutbox("older", 12),
+            attachments = emptyList(),
+            sentDraftRevision = 10,
+        )
+
+        assertEquals(
+            "发送后继续输入",
+            database.composerDrafts().get("server", "mobile:test")?.text,
+        )
+    }
+
+    @Test
+    fun failedMessageTransactionKeepsDraftAndRollsBackMessage() = runBlocking {
+        store.saveComposerDraft("mobile:test", "仍需保留", null, "server", 10)
+        database.outbox().enqueue(pendingOutbox("duplicate", 10))
+
+        val failure = runCatching {
+            store.enqueueMessage(
+                conversation = ConversationEntity("mobile:test", "server", "仍需保留", 11),
+                message = pendingUserMessage("user:rollback", "duplicate", "仍需保留", 11),
+                command = pendingOutbox("duplicate", 11),
+                attachments = emptyList(),
+                sentDraftRevision = 10,
+            )
+        }.exceptionOrNull()
+
+        assertNotNull(failure)
+        assertEquals(null, database.messages().get("user:rollback"))
+        assertEquals("仍需保留", database.composerDrafts().get("server", "mobile:test")?.text)
     }
 
     @Test
@@ -1595,6 +1670,32 @@ class LocalDeliveryStoreTest {
         transferredBytes = offset,
         state = state,
         updatedAt = 1,
+    )
+
+    private fun pendingUserMessage(
+        messageId: String,
+        clientMessageId: String,
+        text: String,
+        createdAt: Long,
+    ) = MessageEntity(
+        messageId = messageId,
+        clientMessageId = clientMessageId,
+        sessionId = "mobile:test",
+        role = "user",
+        text = text,
+        deliveryState = "pending",
+        createdAt = createdAt,
+        updatedAt = createdAt,
+    )
+
+    private fun pendingOutbox(commandId: String, createdAt: Long) = OutboxCommandEntity(
+        commandId = commandId,
+        serverId = "server",
+        envelopeJson = "{}",
+        state = "pending",
+        attemptCount = 0,
+        createdAt = createdAt,
+        lastAttemptAt = null,
     )
 
     private fun mediaAttachment(id: String) = MediaAttachmentEntity(

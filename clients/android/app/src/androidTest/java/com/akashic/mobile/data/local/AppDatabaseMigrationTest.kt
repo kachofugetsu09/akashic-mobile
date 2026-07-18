@@ -28,6 +28,7 @@ class AppDatabaseMigrationTest {
             DATABASE_5_6,
             DATABASE_6_7,
             DATABASE_7_8,
+            DATABASE_8_9,
         )
             .forEach(context::deleteDatabase)
     }
@@ -306,6 +307,38 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate8To9KeepsNotificationsAfterProjectionCleanup() {
+        helper.createDatabase(DATABASE_8_9, 8).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages VALUES('message-1', NULL, 'mobile:test', 'assistant', '完成', 'complete', 3, 3, NULL, NULL, NULL, NULL)",
+            )
+            execSQL(
+                "INSERT INTO pending_message_notifications VALUES('message-1', 'server', 'mobile:test', '完成', 0, 'COMPLETE', 4)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_8_9,
+            9,
+            true,
+            AppDatabase.MIGRATION_8_9,
+        ).use { database ->
+            database.execSQL("DELETE FROM messages WHERE messageId = 'message-1'")
+            database.query(
+                "SELECT content FROM pending_message_notifications WHERE messageId = 'message-1'",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("完成", cursor.getString(0))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -314,5 +347,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_5_6 = "migration-5-6"
         const val DATABASE_6_7 = "migration-6-7"
         const val DATABASE_7_8 = "migration-7-8"
+        const val DATABASE_8_9 = "migration-8-9"
     }
 }

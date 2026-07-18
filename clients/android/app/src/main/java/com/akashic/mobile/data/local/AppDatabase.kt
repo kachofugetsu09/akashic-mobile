@@ -22,7 +22,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ComposerDraftEntity::class,
         PendingMessageNotificationEntity::class,
     ],
-    version = 8,
+    version = 9,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -59,6 +59,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_5_6,
             MIGRATION_6_7,
             MIGRATION_7_8,
+            MIGRATION_8_9,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -204,6 +205,48 @@ abstract class AppDatabase : RoomDatabase() {
                         FOREIGN KEY(`messageId`) REFERENCES `messages`(`messageId`) ON UPDATE NO ACTION ON DELETE CASCADE
                     )
                     """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_serverId` ON `pending_message_notifications` (`serverId`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_createdAt` ON `pending_message_notifications` (`createdAt`)",
+                )
+            }
+        }
+
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 重建通知待办，使其不再依赖可清理的消息投影
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `pending_message_notifications_v9` (
+                        `messageId` TEXT NOT NULL,
+                        `serverId` TEXT NOT NULL,
+                        `sessionId` TEXT NOT NULL,
+                        `content` TEXT NOT NULL,
+                        `hasAttachments` INTEGER NOT NULL,
+                        `attention` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    INSERT INTO `pending_message_notifications_v9`(
+                        messageId, serverId, sessionId, content, hasAttachments, attention, createdAt
+                    )
+                    SELECT messageId, serverId, sessionId, content, hasAttachments, attention, createdAt
+                    FROM `pending_message_notifications`
+                    """.trimIndent(),
+                )
+
+                // 2. 保留全部待办后替换旧表并恢复索引
+                db.execSQL("DROP TABLE `pending_message_notifications`")
+                db.execSQL(
+                    "ALTER TABLE `pending_message_notifications_v9` RENAME TO `pending_message_notifications`",
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_pending_message_notifications_serverId` ON `pending_message_notifications` (`serverId`)",

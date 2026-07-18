@@ -46,6 +46,7 @@ data class ComposerAttachmentUi(
 data class ComposerDraftUi(
     val text: String,
     val replyToMessageId: String?,
+    val updatedAt: Long? = null,
 )
 
 enum class ComposerAttachmentState {

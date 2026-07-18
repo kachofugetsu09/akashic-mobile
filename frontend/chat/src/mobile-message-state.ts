@@ -67,15 +67,18 @@ export function updateMobileReadingRestoreTarget<T extends MobileReadingAnchor>(
 export interface MobileComposerDraft {
   text: string;
   replyToMessageId?: string;
+  updatedAt?: number;
 }
 
 export interface MobileComposerDraftWrite extends MobileComposerDraft {
   sessionId: string;
+  updatedAt: number;
 }
 
 export interface MobileComposerDraftResolution<T extends MobileSelectableMessage> {
   text: string;
   replyTarget: T | null;
+  updatedAt?: number;
   cleanedDraft?: MobileComposerDraft;
 }
 
@@ -107,6 +110,13 @@ export const MOBILE_COMPOSER_DRAFT_MAX_LENGTH = 65_536;
 
 export function normalizeMobileComposerDraftText(text: string) {
   return text.slice(0, MOBILE_COMPOSER_DRAFT_MAX_LENGTH);
+}
+
+/** 为同一会话生成严格递增且可由原生持久化的草稿 revision。 */
+export function nextMobileComposerDraftRevision(previous: number | undefined, now: number) {
+  const revision = Math.max(Math.trunc(now), (previous ?? 0) + 1);
+  if (!Number.isSafeInteger(revision) || revision <= 0) throw new Error("会话草稿 revision 无效");
+  return revision;
 }
 
 export function mergeMobileComposerDraft(current: string, incoming: string) {
@@ -186,16 +196,17 @@ export function resolveMobileComposerDraft<T extends MobileSelectableMessage>(
   selectedSessionId: string | null | undefined,
 ): MobileComposerDraftResolution<T> {
   // 1. 没有引用时直接使用原生 owner 的文字
-  if (!draft.replyToMessageId) return { text: draft.text, replyTarget: null };
+  if (!draft.replyToMessageId) return { text: draft.text, replyTarget: null, updatedAt: draft.updatedAt };
 
   // 2. 只恢复仍属于当前会话且允许引用的目标
   const target = messages.find((message) => message.id === draft.replyToMessageId);
   if (target && mobileMessageCanReply(target, selectedSessionId)) {
-    return { text: draft.text, replyTarget: target };
+    return { text: draft.text, replyTarget: target, updatedAt: draft.updatedAt };
   }
   return {
     text: draft.text,
     replyTarget: null,
+    updatedAt: draft.updatedAt,
     cleanedDraft: { text: draft.text },
   };
 }
@@ -205,11 +216,16 @@ export function captureMobileComposerDraftWrite(
   sessionId: string | null | undefined,
   text: string,
   replyToMessageId?: string,
+  updatedAt?: number,
 ): MobileComposerDraftWrite | null {
   if (!sessionId) return null;
+  if (updatedAt === undefined || !Number.isSafeInteger(updatedAt) || updatedAt <= 0) {
+    throw new Error("会话草稿缺少有效 revision");
+  }
   return {
     sessionId,
     text,
+    updatedAt,
     ...(replyToMessageId ? { replyToMessageId } : {}),
   };
 }
@@ -218,8 +234,11 @@ export function mobileComposerDraftMatches(
   draft: MobileComposerDraft,
   expected: MobileComposerDraft,
 ) {
-  return draft.text === expected.text
+  const sameContent = draft.text === expected.text
     && (draft.replyToMessageId ?? undefined) === (expected.replyToMessageId ?? undefined);
+  if (!sameContent) return false;
+  if (draft.text === "" && !draft.replyToMessageId) return true;
+  return draft.updatedAt === expected.updatedAt;
 }
 
 /** 在原生确认写入前保持乐观草稿，避免旧快照复活已发送内容。 */

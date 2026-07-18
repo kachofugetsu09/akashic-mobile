@@ -97,4 +97,42 @@ class LocalDeliveryStoreCursorTest {
             runBlocking { database.realtimeCursors().get("device-1")?.lastAcknowledgedEventSeq },
         )
     }
+
+    @Test
+    fun repairingSameServerReplacesOnlyDerivedCursor() = runBlocking {
+        database.conversations().upsert(
+            ConversationEntity("mobile:kept", "server-1", "保留会话", 2),
+        )
+        database.messages().upsert(
+            MessageEntity(
+                "message-kept",
+                null,
+                "mobile:kept",
+                "assistant",
+                "保留历史",
+                "complete",
+                2,
+                2,
+            ),
+        )
+
+        store.savePairedProfile(
+            ServerProfileEntity(
+                "server-1",
+                "Test",
+                "device-2",
+                "key",
+                "fingerprint",
+                "[]",
+                "[]",
+                "[]",
+                3,
+            ),
+            RealtimeCursorEntity("device-2", "server-1", 0, 0, 3),
+        )
+
+        assertEquals(null, database.realtimeCursors().get("device-1"))
+        assertEquals(0L, database.realtimeCursors().get("device-2")?.lastAcknowledgedEventSeq)
+        assertEquals("保留历史", database.messages().get("message-kept")?.text)
+    }
 }

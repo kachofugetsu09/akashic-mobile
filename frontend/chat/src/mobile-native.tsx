@@ -79,6 +79,7 @@ import {
   mobileComposerTextareaMetrics,
   mobileComposerDraftHydration,
   MOBILE_COMPOSER_DRAFT_MAX_LENGTH,
+  nextMobileComposerDraftRevision,
   normalizeMobileComposerDraftText,
   normalizeMobileSearchText,
   reconcileMobileMessageSelection,
@@ -193,7 +194,7 @@ interface MobilePendingMessage {
 }
 
 export interface MobileSnapshot {
-  protocolVersion: 5;
+  protocolVersion: 6;
   connection: {
     label: string;
     status: ConnectionStatus;
@@ -245,7 +246,7 @@ interface NativeBridge {
   setWebHistoryActive(active: boolean): void;
   dismissError(): void;
   shareText(requestId: string, text: string): void;
-  saveComposerDraft(sessionId: string, text: string, replyToMessageId: string): void;
+  saveComposerDraft(sessionId: string, text: string, replyToMessageId: string, updatedAt: string): void;
   commitSharedText(
     draftId: string,
     sessionId: string,
@@ -253,7 +254,14 @@ interface NativeBridge {
     replyToMessageId: string,
   ): void;
   rejectSharedText(draftId: string, message: string): void;
-  sendMessage(requestId: string, text: string, replyToMessageId: string, attachmentIdsJson: string): void;
+  sendMessage(
+    requestId: string,
+    sessionId: string,
+    text: string,
+    replyToMessageId: string,
+    attachmentIdsJson: string,
+    sentDraftRevision: string,
+  ): void;
   copyText(text: string): void;
   performActionHaptic(): void;
   sendCommand(command: string): void;
@@ -429,7 +437,7 @@ function parseTransferStatus(value: unknown): MobileTransferStatus {
 function parseMobileSnapshot(value: unknown): MobileSnapshot {
   // 1. 校验协议版本与根对象
   const raw = requireRecord(value, "snapshot");
-  if (raw.protocolVersion !== 5) throw new Error(`不支持的移动端协议版本: ${String(raw.protocolVersion)}`);
+  if (raw.protocolVersion !== 6) throw new Error(`不支持的移动端协议版本: ${String(raw.protocolVersion)}`);
   const connection = requireRecord(raw.connection, "connection");
   const status = requireString(connection.status, "connection.status");
   if (!["connecting", "ready", "degraded", "reconnecting", "disconnected"].includes(status)) {
@@ -480,7 +488,7 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
       };
     })();
   return {
-    protocolVersion: 5,
+    protocolVersion: 6,
     connection: {
       label: requireString(connection.label, "connection.label"),
       status: status as ConnectionStatus,
@@ -496,9 +504,18 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
     composer: {
       draft: (() => {
         const draft = requireRecord(composer.draft, "composer.draft");
+        const text = requireString(draft.text, "composer.draft.text");
+        const replyToMessageId = optionalString(draft.replyToMessageId, "composer.draft.replyToMessageId");
+        const updatedAt = draft.updatedAt === undefined || draft.updatedAt === null
+          ? undefined
+          : requireNonNegativeInteger(draft.updatedAt, "composer.draft.updatedAt");
+        if ((text || replyToMessageId) && !updatedAt) {
+          throw new Error("非空会话草稿缺少 revision");
+        }
         return {
-          text: requireString(draft.text, "composer.draft.text"),
-          replyToMessageId: optionalString(draft.replyToMessageId, "composer.draft.replyToMessageId"),
+          text,
+          replyToMessageId,
+          updatedAt,
         };
       })(),
       attachments: requireArray(composer.attachments, "composer.attachments", parseAttachment),
@@ -667,6 +684,7 @@ function MobileNativeApp() {
       draft.sessionId,
       draft.text,
       draft.replyToMessageId ?? "",
+      String(draft.updatedAt),
     );
   }, []);
 
@@ -694,7 +712,12 @@ function MobileNativeApp() {
   const updateComposerDraft = useCallback((text: string, target: MobileMessage | null) => {
     const current = activeComposerDraftRef.current;
     const normalizedText = normalizeMobileComposerDraftText(text);
-    const draft = captureMobileComposerDraftWrite(current?.sessionId, normalizedText, target?.id);
+    const draft = captureMobileComposerDraftWrite(
+      current?.sessionId,
+      normalizedText,
+      target?.id,
+      nextMobileComposerDraftRevision(current?.updatedAt, Date.now()),
+    );
     setInput(normalizedText);
     setReplyTarget(target);
     if (!draft) return;
@@ -705,7 +728,11 @@ function MobileNativeApp() {
 
   const clearAcceptedComposerDraft = useCallback((sessionId: string) => {
     const current = activeComposerDraftRef.current;
-    const cleared = { sessionId, text: "" };
+    const cleared = {
+      sessionId,
+      text: "",
+      updatedAt: nextMobileComposerDraftRevision(current?.updatedAt, Date.now()),
+    };
     if (current?.sessionId !== sessionId) {
       saveComposerDraft(cleared);
       return;
@@ -715,6 +742,9 @@ function MobileNativeApp() {
       composerDraftTimerRef.current = null;
     }
     pendingComposerDraftRef.current = null;
+    activeComposerDraftRef.current = cleared;
+    setInput("");
+    setReplyTarget(null);
     saveComposerDraft(cleared);
   }, [saveComposerDraft]);
 
@@ -738,7 +768,11 @@ function MobileNativeApp() {
       window.AkashicNative?.rejectSharedText(draftId, "当前输入空间不足，请精简草稿后重试");
       return true;
     }
-    const next = { ...current, text: merged };
+    const next = {
+      ...current,
+      text: merged,
+      updatedAt: nextMobileComposerDraftRevision(current.updatedAt, Date.now()),
+    };
     if (composerDraftTimerRef.current !== null) {
       window.clearTimeout(composerDraftTimerRef.current);
       composerDraftTimerRef.current = null;
@@ -953,13 +987,18 @@ function MobileNativeApp() {
         sessionId,
         resolved.text,
         resolved.replyTarget?.id,
+        resolved.updatedAt ?? nextMobileComposerDraftRevision(undefined, Date.now()),
       );
       if (!hydrated) throw new Error("已选会话无法建立输入草稿");
       activeComposerDraftRef.current = hydrated;
       setInput(resolved.text);
       setReplyTarget(resolved.replyTarget);
       if (resolved.cleanedDraft) {
-        const cleaned = { sessionId, ...resolved.cleanedDraft };
+        const cleaned = {
+          sessionId,
+          ...resolved.cleanedDraft,
+          updatedAt: nextMobileComposerDraftRevision(hydrated.updatedAt, Date.now()),
+        };
         activeComposerDraftRef.current = cleaned;
         saveComposerDraft(cleaned);
       }
@@ -970,7 +1009,11 @@ function MobileNativeApp() {
     if (!previous?.replyToMessageId) return;
     const resolved = resolveMobileComposerDraft(previous, snapshot.messages, sessionId);
     if (!resolved.cleanedDraft) return;
-    const cleaned = { sessionId, ...resolved.cleanedDraft };
+    const cleaned = {
+      sessionId,
+      ...resolved.cleanedDraft,
+      updatedAt: nextMobileComposerDraftRevision(previous.updatedAt, Date.now()),
+    };
     activeComposerDraftRef.current = cleaned;
     setReplyTarget(null);
     if (composerDraftTimerRef.current !== null) {
@@ -1172,17 +1215,26 @@ function MobileNativeApp() {
     if (!text && snapshot.composer.attachments.length === 0) return;
     const native = window.AkashicNative;
     const sessionId = snapshot.selectedSessionId;
-    if (!native || !sessionId) return;
+    if (!native) return;
+    if (!sessionId) throw new Error("发送消息缺少当前会话 owner");
     const requestId = `send-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    const sentDraft = captureMobileComposerDraftWrite(sessionId, input, replyTarget?.id);
+    const sentDraft = captureMobileComposerDraftWrite(
+      sessionId,
+      input,
+      replyTarget?.id,
+      activeComposerDraftRef.current?.updatedAt,
+    );
     if (!sentDraft) throw new Error("发送消息无法捕获当前会话草稿");
+    flushComposerDraft();
     pendingSendRequestRef.current = { requestId, draft: sentDraft };
     setSendPending(true);
     native.sendMessage(
       requestId,
-      text,
+      sessionId,
+      input,
       replyTarget?.id ?? "",
       JSON.stringify(snapshot.composer.attachments.map((attachment) => attachment.id)),
+      String(sentDraft.updatedAt),
     );
   };
   const stop = () => {
@@ -1997,9 +2049,10 @@ function MobileComposer({
   onCancelReply: () => void;
 }) {
   const stopping = stopRequested || snapshot.composer.isStopping;
+  const hasOwner = snapshot.selectedSessionId !== undefined;
   const hasDraft = snapshot.composer.attachments.length > 0;
   const attachmentsReady = allMobileAttachmentsReady(snapshot.composer.attachments);
-  const canSubmit = snapshot.composer.canSend && attachmentsReady && !sendPending && (!!input.trim() || hasDraft);
+  const canSubmit = hasOwner && snapshot.composer.canSend && attachmentsReady && !sendPending && (!!input.trim() || hasDraft);
   const zoneRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -2055,7 +2108,7 @@ function MobileComposer({
         ) : null}
         {replyTarget ? <ComposerReply target={replyTarget} onCancel={onCancelReply} /> : null}
         <div className="mobile-composer">
-        <button className={`mobile-icon-button command-toggle ${commandsOpen ? "active" : ""}`} type="button" onClick={onToggleCommands} aria-label={commandsOpen ? "关闭快捷命令" : "打开快捷命令"}>
+        <button className={`mobile-icon-button command-toggle ${commandsOpen ? "active" : ""}`} type="button" disabled={!hasOwner} onClick={onToggleCommands} aria-label={commandsOpen ? "关闭快捷命令" : "打开快捷命令"}>
           {commandsOpen ? <X size={22} /> : <Menu size={22} />}
         </button>
         <textarea
@@ -2063,6 +2116,7 @@ function MobileComposer({
           rows={1}
           maxLength={MOBILE_COMPOSER_DRAFT_MAX_LENGTH}
           value={input}
+          disabled={!hasOwner}
           placeholder="输入消息"
           onChange={(event) => onInput(event.target.value)}
           onFocus={() => commandsOpen && onCloseCommands(false)}
@@ -2078,7 +2132,7 @@ function MobileComposer({
             }
           }}
         />
-        <button className="mobile-icon-button" type="button" disabled={sendPending} onClick={() => window.AkashicNative?.chooseAttachments()} aria-label="添加附件">
+        <button className="mobile-icon-button" type="button" disabled={sendPending || !hasOwner} onClick={() => window.AkashicNative?.chooseAttachments()} aria-label="添加附件">
           <Paperclip size={22} />
         </button>
         {snapshot.composer.canStop || stopping ? (

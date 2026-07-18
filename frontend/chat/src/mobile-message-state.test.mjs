@@ -17,6 +17,7 @@ import {
   mobileComposerTextareaMetrics,
   mobileComposerDraftHydration,
   MOBILE_COMPOSER_DRAFT_MAX_LENGTH,
+  nextMobileComposerDraftRevision,
   normalizeMobileComposerDraftText,
   reconcileMobileMessageSelection,
   reconcileAssistantMessageIds,
@@ -172,7 +173,7 @@ test("missing draft reply stays hidden and asks the owner to preserve only text"
 });
 
 test("debounced draft write keeps the session captured when it was scheduled", () => {
-  const scheduled = captureMobileComposerDraftWrite("mobile-old", "旧会话草稿", "message-old");
+  const scheduled = captureMobileComposerDraftWrite("mobile-old", "旧会话草稿", "message-old", 10);
   const selectedSessionId = "mobile-new";
 
   assert.equal(selectedSessionId, "mobile-new");
@@ -180,15 +181,29 @@ test("debounced draft write keeps the session captured when it was scheduled", (
     sessionId: "mobile-old",
     text: "旧会话草稿",
     replyToMessageId: "message-old",
+    updatedAt: 10,
   });
+});
+
+test("composer revision advances even when multiple edits share one clock tick", () => {
+  assert.equal(nextMobileComposerDraftRevision(undefined, 100), 100);
+  assert.equal(nextMobileComposerDraftRevision(100, 100), 101);
+  assert.equal(nextMobileComposerDraftRevision(200, 150), 201);
 });
 
 test("snapshot owner acknowledgement compares text and reply identity", () => {
   assert.equal(mobileComposerDraftMatches({ text: "" }, { text: "" }), true);
   assert.equal(
     mobileComposerDraftMatches(
-      { text: "继续", replyToMessageId: "one" },
-      { text: "继续", replyToMessageId: "two" },
+      { text: "继续", replyToMessageId: "one", updatedAt: 1 },
+      { text: "继续", replyToMessageId: "two", updatedAt: 1 },
+    ),
+    false,
+  );
+  assert.equal(
+    mobileComposerDraftMatches(
+      { text: "相同文字", updatedAt: 1 },
+      { text: "相同文字", updatedAt: 2 },
     ),
     false,
   );
@@ -204,8 +219,8 @@ test("composer text is bounded at the native persistence boundary", () => {
 });
 
 test("optimistic clear wins until the native owner acknowledges it", () => {
-  const staleOwner = { text: "已经发送" };
-  const optimistic = { sessionId: "mobile-current", text: "" };
+  const staleOwner = { text: "已经发送", updatedAt: 1 };
+  const optimistic = { sessionId: "mobile-current", text: "", updatedAt: 2 };
 
   assert.deepEqual(mobileComposerDraftHydration(staleOwner, optimistic), {
     draft: optimistic,
@@ -231,20 +246,25 @@ test("accepted send clears its inactive session or the unchanged active draft", 
     sessionId: "mobile-current",
     text: "发送内容",
     replyToMessageId: "answer",
+    updatedAt: 10,
   };
 
   assert.equal(shouldClearAcceptedMobileComposerDraft({ ...sent }, sent), true);
   assert.equal(
-    shouldClearAcceptedMobileComposerDraft({ ...sent, text: "发送后新输入" }, sent),
+    shouldClearAcceptedMobileComposerDraft({ ...sent, text: "发送后新输入", updatedAt: 11 }, sent),
     false,
   );
   assert.equal(
-    shouldClearAcceptedMobileComposerDraft({ ...sent, replyToMessageId: undefined }, sent),
+    shouldClearAcceptedMobileComposerDraft({ ...sent, replyToMessageId: undefined, updatedAt: 11 }, sent),
     false,
   );
   assert.equal(
     shouldClearAcceptedMobileComposerDraft({ ...sent, sessionId: "mobile-other" }, sent),
     true,
+  );
+  assert.equal(
+    shouldClearAcceptedMobileComposerDraft({ ...sent, updatedAt: 11 }, sent),
+    false,
   );
   assert.equal(shouldClearAcceptedMobileComposerDraft(null, sent), true);
 });

@@ -312,7 +312,10 @@ class RealtimeSession(
                 val settings = preferences.settings.first()
                 profile = settings.currentServerId?.let { database.serverProfiles().get(it) }
                     ?: database.serverProfiles().first()
-                val selected = settings.currentSessionId
+                val selected = profile?.let {
+                    deliveryStore.restoreSelectedSession(it.serverId, settings.currentSessionId)
+                }
+                if (selected != settings.currentSessionId) preferences.selectSession(selected)
                 mutableState.value = mutableState.value.copy(
                     initialized = true,
                     hasProfile = profile != null,
@@ -639,14 +642,17 @@ class RealtimeSession(
         replyToMessageId: String? = null,
         expectedAttachmentIds: List<String> = emptyList(),
         onPersisted: (Boolean) -> Unit = {},
+        targetSessionId: String? = null,
+        sentDraftRevision: Long? = null,
     ) {
         enqueueMessage(
             text,
             includeDraftAttachments = true,
             replyToMessageId = replyToMessageId,
-            targetSessionId = null,
+            targetSessionId = targetSessionId,
             expectedAttachmentIds = expectedAttachmentIds,
             onPersisted = onPersisted,
+            sentDraftRevision = sentDraftRevision,
         )
     }
 
@@ -731,6 +737,7 @@ class RealtimeSession(
         targetSessionId: String?,
         expectedAttachmentIds: List<String> = emptyList(),
         onPersisted: (Boolean) -> Unit = {},
+        sentDraftRevision: Long? = null,
 ) {
         scope.launch {
             withSendResult(onPersisted) { reportResult ->
@@ -745,6 +752,9 @@ class RealtimeSession(
                 val body = text.trim()
                 val sessionId = targetSessionId ?: ensureCurrentSession(currentProfile)
                 require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                require(sentDraftRevision == null || sentDraftRevision in 1..9_007_199_254_740_991) {
+                    "会话草稿 revision 无效"
+                }
                 if (targetSessionId != null) {
                     val conversation = requireNotNull(database.conversations().get(sessionId)) {
                         "Unknown notification session: $sessionId"
@@ -896,6 +906,7 @@ class RealtimeSession(
                         lastAttemptAt = null,
                     ),
                     attachments = cachedAttachments,
+                    sentDraftRevision = sentDraftRevision,
                 )
                 reportResult(true)
                 if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
@@ -1225,7 +1236,13 @@ class RealtimeSession(
             saved,
             RealtimeCursorEntity(accepted.deviceId, saved.serverId, 0, 0, now),
         )
+        val previousSessionId = preferences.settings.first().currentSessionId
+        val selectedSessionId = deliveryStore.restoreSelectedSession(
+            saved.serverId,
+            previousSessionId,
+        )
         preferences.selectServer(saved.serverId)
+        preferences.selectSession(selectedSessionId)
         profile = saved
         pendingPairing = null
         pairingConfirmationGeneration = null
@@ -1234,7 +1251,7 @@ class RealtimeSession(
             connection = ConnectionState(phase = ConnectionPhase.CONNECTING),
             hasProfile = true,
             serverId = saved.serverId,
-            currentSessionId = mutableState.value.currentSessionId,
+            currentSessionId = selectedSessionId,
         )
         socket.close(reason = "pairing accepted; reconnecting with device proof")
         connectProfile(saved)
@@ -1672,6 +1689,7 @@ class RealtimeSession(
         if (mutableState.value.connection.phase == ConnectionPhase.READY) return
         if (resetRebuildGeneration == syncGeneration) resetRebuildGeneration = null
         val currentProfile = requireNotNull(profile)
+        ensureCurrentSession(currentProfile)
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
         )
@@ -1823,6 +1841,9 @@ class RealtimeSession(
         now: Long,
     ): ConversationEntity {
         val current = database.conversations().get(sessionId)
+        require(current == null || current.serverId == currentProfile.serverId) {
+            "Conversation belongs to another server"
+        }
         val title = if (current == null || current.title == "新对话") {
             body.lineSequence().first().take(32)
         } else {
@@ -1839,8 +1860,17 @@ class RealtimeSession(
 
     private suspend fun ensureCurrentSession(currentProfile: ServerProfileEntity): String {
         val existing = mutableState.value.currentSessionId
-        if (existing != null) return existing
-        val sessionId = createLocalSession(currentProfile)
+        if (existing != null) {
+            val conversation = requireNotNull(database.conversations().get(existing)) {
+                "Selected mobile session does not exist"
+            }
+            require(conversation.serverId == currentProfile.serverId) {
+                "Selected mobile session belongs to another server"
+            }
+            return existing
+        }
+        val sessionId = deliveryStore.restoreSelectedSession(currentProfile.serverId, null)
+            ?: createLocalSession(currentProfile)
         preferences.selectSession(sessionId)
         mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
         return sessionId

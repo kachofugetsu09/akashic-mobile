@@ -99,7 +99,7 @@ fun MobileWebChat(
     onRetryAttachment: (String) -> Unit,
     onContinueMeteredTransfer: () -> Unit,
     onRetryFailedMessage: (String) -> Unit,
-    onSaveComposerDraft: (String, String, String?) -> Unit,
+    onSaveComposerDraft: (String, String, String?, Long) -> Unit,
     onSaveReadingPosition: (String, String, Int) -> Unit,
     onMarkSessionReadThrough: (String, Long) -> Unit,
     onNavigationTargetHandled: (String) -> Unit,
@@ -109,7 +109,7 @@ fun MobileWebChat(
     onShareDownloadedAttachment: (String) -> Unit,
     onSaveDownloadedAttachment: (String) -> Unit,
     onDismissError: () -> Unit,
-    onSend: (String, String?, List<String>, (Boolean) -> Unit) -> Unit,
+    onSend: (String, String, String?, List<String>, Long, (Boolean) -> Unit) -> Unit,
     onSendCommand: (String) -> Unit,
     onPluginUiQuery: (String, String, String, String?, String?, String, String, String, String) -> Unit,
     onPluginUiOwnerCancelled: (String) -> Unit,
@@ -352,7 +352,7 @@ private data class MobileWebCallbacks(
     val onRetryAttachment: (String) -> Unit,
     val onContinueMeteredTransfer: () -> Unit,
     val onRetryFailedMessage: (String) -> Unit,
-    val onSaveComposerDraft: (String, String, String?) -> Unit,
+    val onSaveComposerDraft: (String, String, String?, Long) -> Unit,
     val onSaveReadingPosition: (String, String, Int) -> Unit,
     val onMarkSessionReadThrough: (String, Long) -> Unit,
     val onNavigationTargetHandled: (String) -> Unit,
@@ -362,7 +362,7 @@ private data class MobileWebCallbacks(
     val onShareDownloadedAttachment: (String) -> Unit,
     val onSaveDownloadedAttachment: (String) -> Unit,
     val onDismissError: () -> Unit,
-    val onSend: (String, String?, List<String>, (Boolean) -> Unit) -> Unit,
+    val onSend: (String, String, String?, List<String>, Long, (Boolean) -> Unit) -> Unit,
     val onSendCommand: (String) -> Unit,
     val onPluginUiQuery: (String, String, String, String?, String?, String, String, String, String) -> Unit,
     val onPluginUiOwnerCancelled: (String) -> Unit,
@@ -434,8 +434,15 @@ private class MobileWebBridge(
     fun retryFailedMessage(messageId: String) = dispatch { it.onRetryFailedMessage(messageId) }
 
     @JavascriptInterface
-    fun saveComposerDraft(sessionId: String, text: String, replyToMessageId: String) = dispatch {
-        it.onSaveComposerDraft(sessionId, text, replyToMessageId.ifBlank { null })
+    fun saveComposerDraft(
+        sessionId: String,
+        text: String,
+        replyToMessageId: String,
+        updatedAt: String,
+    ) = dispatch {
+        val revision = requireNotNull(updatedAt.toLongOrNull()) { "会话草稿 revision 无效" }
+        require(revision in 1..9_007_199_254_740_991) { "会话草稿 revision 无效" }
+        it.onSaveComposerDraft(sessionId, text, replyToMessageId.ifBlank { null }, revision)
     }
 
     @JavascriptInterface
@@ -487,9 +494,11 @@ private class MobileWebBridge(
     @JavascriptInterface
     fun sendMessage(
         requestId: String,
+        sessionId: String,
         text: String,
         replyToMessageId: String,
         attachmentIdsJson: String,
+        sentDraftRevision: String,
     ) = dispatch {
         val attachmentIds = try {
             Json.decodeFromString<List<String>>(attachmentIdsJson)
@@ -501,7 +510,22 @@ private class MobileWebBridge(
             reportSendResult(requestId, false)
             return@dispatch
         }
-        it.onSend(text, replyToMessageId.ifBlank { null }, attachmentIds) { accepted ->
+        val revision = sentDraftRevision.toLongOrNull()
+        if (
+            sessionId.isBlank() ||
+            revision == null ||
+            revision !in 1..9_007_199_254_740_991
+        ) {
+            reportSendResult(requestId, false)
+            return@dispatch
+        }
+        it.onSend(
+            sessionId,
+            text,
+            replyToMessageId.ifBlank { null },
+            attachmentIds,
+            revision,
+        ) { accepted ->
             reportSendResult(requestId, accepted)
         }
     }
