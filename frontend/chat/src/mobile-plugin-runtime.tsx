@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 
+import { MobilePluginResultCache } from "./mobile-plugin-result-cache";
+
 export type MobilePluginSlotName =
   | "turn.before_reasoning"
   | "turn.before_tool"
@@ -82,7 +84,7 @@ interface PendingQuery {
 }
 
 const pending = new Map<string, PendingQuery>();
-const immutableResults = new Map<string, Record<string, unknown>>();
+const immutableResults = new MobilePluginResultCache();
 const queryQueue: string[] = [];
 let activeQueries = 0;
 let activeBackgroundQueries = 0;
@@ -264,9 +266,10 @@ export function receiveMobilePluginResult(response: MobilePluginResult) {
     return;
   }
   try {
-    const result = JSON.parse(response.resultJson ?? "{}") as Record<string, unknown>;
+    const resultJson = response.resultJson ?? "{}";
+    const result = JSON.parse(resultJson) as Record<string, unknown>;
     if (request.cacheKey && Object.values(result).some((value) => value !== null)) {
-      immutableResults.set(request.cacheKey, result);
+      immutableResults.set(request.cacheKey, resultJson);
     }
     request.resolve(result);
   } catch (error) {
@@ -381,9 +384,9 @@ function MountedPlugin({
             const cacheKey = options.cache === "immutable"
               ? pluginQueryCacheKey(pluginId, pluginRevision, method, encoded, sessionId, turnId)
               : undefined;
-            const cached = cacheKey === undefined ? undefined : immutableResults.get(cacheKey);
-            if (cached !== undefined) {
-              resolve(cached);
+            const cachedJson = cacheKey === undefined ? undefined : immutableResults.get(cacheKey);
+            if (cachedJson !== undefined) {
+              resolve(JSON.parse(cachedJson) as Record<string, unknown>);
               return;
             }
             const timeout = window.setTimeout(() => {
