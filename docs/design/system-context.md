@@ -43,6 +43,10 @@
 
 `runtime-contract.lock.json` 分开记录 capability commit 与实际 provider runtime。CI 拉取精确 revision，在无网络、只读核心源码和临时 workspace/plugin home 中运行 provider 场景，再运行移动端消费者检查。
 
+## 主动消息投影身份
+
+核心拥有主动消息的 `delivery_id`。`message.proactive` 实时事件与 `history.page` 中发送成功后的 assistant 消息携带同一个值；Android 先保存实时投影，历史到达后把它迁移到 SessionDB message ID。旧核心没有该字段时，客户端只对明确标记为 proactive 的唯一文本与时间候选执行兼容迁移。
+
 ## 未定义而不得猜测
 
 - 产品尚未接受“忘记此服务器的本地资料”功能及其影响清单。

@@ -642,6 +642,206 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun historyCanonicalizesMatchingProactiveProjection() = runBlocking {
+        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
+        val proactiveId = "proactive:01J00000000000000000000000"
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "message.proactive", buildJsonObject {
+                put("content", "只应显示一次的主动消息")
+                put("attachments", buildJsonArray {})
+            }),
+            completedAt + 120_000,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(2, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:proactive:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "只应显示一次的主动消息")
+                        put("extra", buildJsonObject { put("proactive", true) })
+                        put("ts", "2026-07-14T16:00:05Z")
+                    })
+                })
+            }),
+            completedAt + 120_001,
+        )
+
+        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(null, database.messages().get(proactiveId))
+        assertEquals(
+            "只应显示一次的主动消息",
+            database.messages().get("mobile:test:proactive:canonical")!!.text,
+        )
+    }
+
+    @Test
+    fun historyCanonicalizesProactiveProjectionByDeliveryIdentity() = runBlocking {
+        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
+        val deliveryId = "delivery-42"
+        val proactiveId = "proactive:$deliveryId"
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "message.proactive", buildJsonObject {
+                put("content", "文本和时间不参与身份判断")
+                put("attachments", buildJsonArray {})
+                put("delivery_id", deliveryId)
+            }),
+            completedAt + 120_000,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(2, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:proactive:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "文本和时间不参与身份判断")
+                        put("extra", buildJsonObject {
+                            put("proactive", true)
+                            put("delivery_id", deliveryId)
+                        })
+                        put("ts", "2026-07-14T12:00:05Z")
+                    })
+                })
+            }),
+            completedAt + 120_001,
+        )
+
+        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(null, database.messages().get(proactiveId))
+        assertEquals(
+            "文本和时间不参与身份判断",
+            database.messages().get("mobile:test:proactive:canonical")!!.text,
+        )
+    }
+
+    @Test
+    fun identicalProactiveTextWithDifferentDeliveryIdsRemainsDistinct() = runBlocking {
+        listOf("delivery-1", "delivery-2").forEachIndexed { index, deliveryId ->
+            store.applyEvent(
+                "server",
+                "device",
+                event(index.toLong() + 1, "message.proactive", buildJsonObject {
+                    put("content", "相同提醒")
+                    put("attachments", buildJsonArray {})
+                    put("delivery_id", deliveryId)
+                }),
+                index.toLong() + 1,
+            )
+        }
+
+        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertNotNull(database.messages().get("proactive:delivery-1"))
+        assertNotNull(database.messages().get("proactive:delivery-2"))
+    }
+
+    @Test
+    fun ordinaryHistoryDoesNotConsumeMatchingProactiveProjection() = runBlocking {
+        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
+        val proactiveId = "proactive:01J00000000000000000000000"
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "message.proactive", buildJsonObject {
+                put("content", "可能重复但语义不同")
+                put("attachments", buildJsonArray {})
+            }),
+            completedAt,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(2, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:ordinary:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "可能重复但语义不同")
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-07-14T16:00:05Z")
+                    })
+                })
+            }),
+            completedAt + 1,
+        )
+
+        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertNotNull(database.messages().get(proactiveId))
+        assertNotNull(database.messages().get("mobile:test:ordinary:canonical"))
+    }
+
+    @Test
+    fun historyKeepsEquidistantProactiveCandidates() = runBlocking {
+        val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
+        repeat(2) { index ->
+            database.messages().upsert(
+                MessageEntity(
+                    messageId = "proactive:ambiguous-$index",
+                    clientMessageId = null,
+                    sessionId = "mobile:test",
+                    role = "assistant",
+                    text = "不能猜测对应关系",
+                    deliveryState = "complete",
+                    createdAt = completedAt,
+                    updatedAt = completedAt,
+                ),
+            )
+        }
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:ambiguous:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "不能猜测对应关系")
+                        put("extra", buildJsonObject { put("proactive", true) })
+                        put("ts", "2026-07-14T16:00:05Z")
+                    })
+                })
+            }),
+            completedAt + 1,
+        )
+
+        assertEquals(3, database.messages().countForSession("mobile:test"))
+        assertNotNull(database.messages().get("proactive:ambiguous-0"))
+        assertNotNull(database.messages().get("proactive:ambiguous-1"))
+        assertNotNull(database.messages().get("mobile:test:ambiguous:canonical"))
+    }
+
+    @Test
     fun historyReplacesLiveBlocksForTheSameCanonicalMessage() = runBlocking {
         store.applyEvent(
             "server",

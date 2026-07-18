@@ -12,6 +12,7 @@ import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
 import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
 import com.akashic.mobile.data.realtime.FinalMessageEvent
+import com.akashic.mobile.data.realtime.proactiveMessageId
 import java.time.Instant
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -20,6 +21,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -683,10 +685,21 @@ class LocalDeliveryStore(
                 replyRole = remote.replyRole,
                 replyPreview = remote.replyPreview,
             )
+            val proactive = remote.extra["proactive"]?.jsonPrimitive?.booleanOrNull == true
+            val deliveryId = remote.extra["delivery_id"]?.jsonPrimitive?.contentOrNull
+            if (deliveryId != null) {
+                require(remote.role == "assistant" && proactive) {
+                    "Proactive delivery id belongs to a non-proactive history message"
+                }
+            }
             val sourceId = remote.clientMessageId?.let {
                 database.messages().getByClientMessageId(it)?.messageId
             }
-                ?: legacyLocalSourceId(canonical)
+                ?: deliveryId?.let(::proactiveMessageId)
+                ?: transientLocalSourceId(
+                    canonical,
+                    proactive,
+                )
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
                 serverId = serverId,
@@ -702,14 +715,18 @@ class LocalDeliveryStore(
         }
     }
 
-    /** 仅在唯一匹配时把旧版临时消息迁移到服务端 canonical identity。 */
-    private suspend fun legacyLocalSourceId(canonical: MessageEntity): String? {
+    /** 仅在唯一匹配时把本地临时消息迁移到服务端 canonical identity。 */
+    private suspend fun transientLocalSourceId(
+        canonical: MessageEntity,
+        includeProactive: Boolean,
+    ): String? {
         if (canonical.role == "assistant") {
-            val candidates = database.messages().findEphemeralAssistants(
+            val candidates = database.messages().findTransientAssistants(
                 canonical.sessionId,
                 canonical.text,
                 canonical.updatedAt - LEGACY_IDENTITY_LOOKBACK_MS,
                 canonical.updatedAt + LEGACY_IDENTITY_LOOKBACK_MS,
+                includeProactive,
             )
             val closestDistance = candidates.minOfOrNull {
                 kotlin.math.abs(it.updatedAt - canonical.updatedAt)

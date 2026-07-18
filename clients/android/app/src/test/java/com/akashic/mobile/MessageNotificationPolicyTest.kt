@@ -94,4 +94,26 @@ class MessageNotificationPolicyTest {
         assertEquals("后台任务完成", event.content)
         assertFalse(event.hasAttachments)
     }
+
+    @Test
+    fun proactiveNotificationPrefersCoreDeliveryIdentity() {
+        val event = deliveredFinalMessageEvent(
+            WireEnvelope(
+                v = 1,
+                kind = WireKind.EVENT,
+                type = "message.proactive",
+                id = "event-42",
+                sessionId = "mobile:session-a",
+                payload = JsonObject(
+                    mapOf(
+                        "content" to JsonPrimitive("后台任务完成"),
+                        "attachments" to JsonArray(emptyList()),
+                        "delivery_id" to JsonPrimitive("delivery-42"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals("proactive:delivery-42", event.messageId)
+    }
 }

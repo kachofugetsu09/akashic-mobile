@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-v0.8.5-release-v1",
+  "profile": "mobile-v0.8.5-release-v2",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -121,6 +121,18 @@
       "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_sender_uses_mobile_event_path",
       "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
       "consumer_test": "pendingNotificationSurvivesMessageProjectionCleanup"
+    },
+    {
+      "id": "proactive-live-and-history-share-delivery-identity",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_metadata_sender_forwards_delivery_id",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "historyCanonicalizesProactiveProjectionByDeliveryIdentity"
+    },
+    {
+      "id": "proactive-distinct-deliveries-remain-distinct",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_mobile_history_projects_proactive_delivery_identity",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "identicalProactiveTextWithDifferentDeliveryIdsRemainsDistinct"
     },
     {
       "id": "turn-stop-survives-client-process-restart",
