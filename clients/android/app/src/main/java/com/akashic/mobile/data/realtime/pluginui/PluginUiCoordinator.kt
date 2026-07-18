@@ -57,6 +57,7 @@ class PluginUiCoordinator(
     private var acceptsQueries = false
     private var activeScope: String? = null
     private val pendingAssets = mutableMapOf<String, PendingAsset>()
+    private val ignoredAssetReplies = linkedSetOf<String>()
     private val pendingQueries = mutableMapOf<String, PendingQuery>()
     private val pendingByCacheKey = mutableMapOf<String, String>()
     private val ignoredQueries = linkedSetOf<String>()
@@ -121,6 +122,7 @@ class PluginUiCoordinator(
         pendingCatalogId = null
         stagedCatalog = null
         pendingAssets.clear()
+        ignoredAssetReplies.clear()
         pendingQueries.clear()
         pendingByCacheKey.clear()
         ignoredQueries.clear()
@@ -281,6 +283,7 @@ class PluginUiCoordinator(
             applyAssetReply(envelope, pendingAsset)
             return true
         }
+        if (ignoredAssetReplies.remove(id)) return true
         val pendingQuery = pendingQueries.remove(id)
         if (pendingQuery != null) {
             pendingQuery.cacheKey?.let(pendingByCacheKey::remove)
@@ -339,7 +342,7 @@ class PluginUiCoordinator(
                 if (!requestAssetIfMissing(item, "stylesheet", styleSha, item.stylesheetBytes)) return
             }
         }
-        if (pendingAssets.isEmpty()) activateStagedCatalog()
+        completeStagedCatalogIfReady()
     }
 
     private fun requestAssetIfMissing(
@@ -380,14 +383,18 @@ class PluginUiCoordinator(
             "插件资源身份不匹配"
         }
         assetStore.store(asset.sha256, asset.kind, asset.content, expected.bytes)
-        if (pendingAssets.isEmpty()) {
-            if (refreshQueued) {
-                stagedCatalog = null
-                requestCatalog()
-            } else {
-                activateStagedCatalog()
-            }
+        completeStagedCatalogIfReady()
+    }
+
+    /** 仅在当前 generation 仍有效且资源齐备时激活目录。 */
+    private fun completeStagedCatalogIfReady() {
+        if (pendingAssets.isNotEmpty()) return
+        if (refreshQueued) {
+            stagedCatalog = null
+            requestCatalog()
+            return
         }
+        activateStagedCatalog()
     }
 
     private fun activateStagedCatalog() {
@@ -458,6 +465,7 @@ class PluginUiCoordinator(
 
     private fun failCatalog(message: String) {
         stagedCatalog = null
+        rememberIgnoredAssetReplies(pendingAssets.keys)
         pendingAssets.clear()
         val hasSnapshot = mutableCatalog.value.catalogRevision.isNotBlank()
         acceptsQueries = hasSnapshot
@@ -509,7 +517,15 @@ class PluginUiCoordinator(
         }
     }
 
+    private fun rememberIgnoredAssetReplies(commandIds: Collection<String>) {
+        ignoredAssetReplies += commandIds
+        while (ignoredAssetReplies.size > MAX_IGNORED_ASSET_REPLIES) {
+            ignoredAssetReplies.remove(ignoredAssetReplies.first())
+        }
+    }
+
     private companion object {
+        const val MAX_IGNORED_ASSET_REPLIES = 128
         const val MAX_IGNORED_QUERIES = 128
         val SHA256 = Regex("^[0-9a-f]{64}$")
         val PLUGIN_ID = Regex("^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,128}$")
