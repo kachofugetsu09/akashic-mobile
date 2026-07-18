@@ -146,6 +146,15 @@ class IncomingShareStore(
         baseReplyToMessageId: String?,
         baseUpdatedAt: Long?,
     ) = locked {
+        // 1. 在持久化 owner 处拒绝 WebView 绕过编辑器约束的不可提交内容
+        require(text.isNotEmpty() && text.length <= MAX_PREPARED_TEXT_CHARS) {
+            "系统分享草稿超过消息长度上限"
+        }
+        require(replyToMessageId == null || replyToMessageId.length in 1..512) {
+            "系统分享草稿引用 ID 无效"
+        }
+
+        // 2. 冻结合并结果，供进程重启后原样提交到 Room
         updateContent(id) { record ->
             check(record.preparedText == null || record.preparedText == text) {
                 "系统分享草稿已被不同内容认领"
@@ -278,7 +287,12 @@ class IncomingShareStore(
             ?.let { ".$it" }
             .orEmpty()
         val candidate = displayName?.takeIf(String::isNotBlank) ?: "shared-$index$fallbackExtension"
-        require(candidate.length <= 255 && '/' !in candidate && '\\' !in candidate) {
+        require(
+            candidate == candidate.trim() &&
+                candidate.length <= 255 &&
+                '/' !in candidate &&
+                '\\' !in candidate
+        ) {
             "共享附件文件名无效"
         }
         require(candidate.none { it.code < 32 || it.code == 127 }) { "共享附件文件名无效" }
@@ -401,6 +415,7 @@ class IncomingShareStore(
         const val MAX_FILES = 10
         const val MAX_BYTES = 50L * 1024 * 1024
         const val COPY_BUFFER_BYTES = 64 * 1024
+        const val MAX_PREPARED_TEXT_CHARS = 65_536
         const val REPLAY_WINDOW_MS = 10_000L
     }
 }

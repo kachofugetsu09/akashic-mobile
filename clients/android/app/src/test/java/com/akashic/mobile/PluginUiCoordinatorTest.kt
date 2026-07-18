@@ -7,6 +7,7 @@ import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
 import java.nio.file.Files
 import java.security.MessageDigest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -17,6 +18,7 @@ import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Test
 
 class PluginUiCoordinatorTest {
@@ -177,6 +179,115 @@ class PluginUiCoordinatorTest {
             )
             assertEquals(listOf("plugin.ui.catalog"), restoredSent)
             assertEquals("request-3", restored.results.take(1).toList().single().requestId)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun queryRejectsOversizedBoundaryValuesBeforeSendingACommand() = runBlocking {
+        val root = Files.createTempDirectory("plugin-ui-query-boundary").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val module = "export default { slots: {} };".toByteArray()
+            assets.store(module.sha256(), "module", module.toString(Charsets.UTF_8), module.size)
+            val sent = mutableListOf<Pair<String, String>>()
+            val coordinator = coordinator(root, assets, catalogs, sent)
+            coordinator.onConnectionReady("mobile-lab")
+            coordinator.onReply(
+                catalogReply(
+                    sent.single().second,
+                    catalog(
+                        revision = "d".repeat(64),
+                        items = listOf(catalogItem("observe", module.sha256(), module.size)),
+                    ),
+                ),
+            )
+
+            coordinator.query(
+                "request-method", "owner", "turn.after_answer", "mobile:one", null,
+                "observe", "x".repeat(257), "{}", "none", "mobile-lab",
+            )
+            coordinator.query(
+                "request-payload", "owner", "turn.after_answer", "mobile:one", null,
+                "observe", "health.snapshot", "x".repeat(64 * 1024 + 1), "none", "mobile-lab",
+            )
+
+            assertEquals(listOf("plugin.ui.catalog"), sent.map { it.first })
+            assertEquals(
+                listOf("插件方法名无效", "插件参数超过 64 KiB"),
+                coordinator.results.take(2).toList().map { it.error },
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun coalescedImmutableQueriesStillShareTheGlobalPendingLimit() = runBlocking {
+        val root = Files.createTempDirectory("plugin-ui-subscriber-limit").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val module = "export default { slots: {} };".toByteArray()
+            assets.store(module.sha256(), "module", module.toString(Charsets.UTF_8), module.size)
+            val sent = mutableListOf<Pair<String, String>>()
+            val coordinator = coordinator(root, assets, catalogs, sent)
+            coordinator.onConnectionReady("mobile-lab")
+            coordinator.onReply(
+                catalogReply(
+                    sent.single().second,
+                    catalog(
+                        revision = "f".repeat(64),
+                        items = listOf(catalogItem("observe", module.sha256(), module.size)),
+                    ),
+                ),
+            )
+
+            repeat(129) { index ->
+                coordinator.query(
+                    "request-$index", "owner-$index", "turn.after_answer", "mobile:one", "turn-one",
+                    "observe", "health.snapshot", "{}", "immutable", "mobile-lab",
+                )
+            }
+
+            assertEquals(listOf("plugin.ui.catalog", "plugin.ui.query"), sent.map { it.first })
+            assertEquals(
+                "插件未完成请求已达上限（最多 128 个）",
+                coordinator.results.first().error,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun catalogRejectsAnUnboundedPluginListBeforeRequestingAssets() {
+        val root = Files.createTempDirectory("plugin-ui-catalog-limit").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val module = "export default { slots: {} };".toByteArray()
+            val sent = mutableListOf<Pair<String, String>>()
+            val coordinator = coordinator(root, assets, catalogs, sent)
+            coordinator.onConnectionReady("mobile-lab")
+            val reply = catalogReply(
+                sent.single().second,
+                catalog(
+                    revision = "e".repeat(64),
+                    items = List(129) { index ->
+                        catalogItem("plugin-$index", module.sha256(), module.size)
+                    },
+                ),
+            )
+
+            val error = assertThrows(IllegalArgumentException::class.java) {
+                coordinator.onReply(reply)
+            }
+
+            assertEquals("插件 catalog 条目不能超过 128 个", error.message)
+            assertEquals(listOf("plugin.ui.catalog"), sent.map { it.first })
         } finally {
             root.deleteRecursively()
         }

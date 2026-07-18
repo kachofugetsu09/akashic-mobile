@@ -56,12 +56,12 @@ class PluginUiCoordinator(
     private var refreshQueued = false
     private var acceptsQueries = false
     private var activeScope: String? = null
+    private var activeCatalog: MobileUiCatalogPayload? = null
     private val pendingAssets = mutableMapOf<String, PendingAsset>()
     private val ignoredAssetReplies = linkedSetOf<String>()
     private val pendingQueries = mutableMapOf<String, PendingQuery>()
     private val pendingByCacheKey = mutableMapOf<String, String>()
     private val ignoredQueries = linkedSetOf<String>()
-    private val pendingCancels = mutableSetOf<String>()
 
     /** 先激活当前服务端的最后成功快照，再增量检查远端目录。 */
     fun onConnectionReady(scope: String) {
@@ -69,6 +69,7 @@ class PluginUiCoordinator(
         // 1. 切换服务端时绝不沿用上一台电脑的目录
         if (activeScope != scope) {
             activeScope = scope
+            activeCatalog = null
             acceptsQueries = false
             mutableCatalog.value = PluginUiWebCatalog(
                 catalogRevision = "",
@@ -126,7 +127,6 @@ class PluginUiCoordinator(
         pendingQueries.clear()
         pendingByCacheKey.clear()
         ignoredQueries.clear()
-        pendingCancels.clear()
         refreshQueued = false
         acceptsQueries = false
         mutableCatalog.value = mutableCatalog.value.copy(updating = true)
@@ -164,6 +164,14 @@ class PluginUiCoordinator(
             publishResult(PluginUiWebResult(requestId, error = "插件界面尚未就绪"))
             return
         }
+        if (method.length !in 1..MAX_METHOD_CHARS) {
+            publishResult(PluginUiWebResult(requestId, error = "插件方法名无效"))
+            return
+        }
+        if (payloadJson.toByteArray(Charsets.UTF_8).size > MAX_PAYLOAD_BYTES) {
+            publishResult(PluginUiWebResult(requestId, error = "插件参数超过 64 KiB"))
+            return
+        }
         val payload = try {
             json.parseToJsonElement(payloadJson).jsonObject
         } catch (error: SerializationException) {
@@ -173,11 +181,6 @@ class PluginUiCoordinator(
             publishResult(PluginUiWebResult(requestId, error = "插件参数必须是 JSON 对象"))
             return
         }
-        if (payloadJson.toByteArray(Charsets.UTF_8).size > 64 * 1024) {
-            publishResult(PluginUiWebResult(requestId, error = "插件参数超过 64 KiB"))
-            return
-        }
-
         // 2. 不可变轮次投影优先从设备缓存读取
         val cacheKey = if (cacheMode == "immutable") {
             resultStore.identity(
@@ -206,6 +209,10 @@ class PluginUiCoordinator(
         }
         if (!acceptsQueries) {
             publishResult(PluginUiWebResult(requestId, error = "插件界面尚未就绪"))
+            return
+        }
+        if (pendingQueries.values.sumOf { it.subscribers.size } >= MAX_PENDING_SUBSCRIBERS) {
+            publishResult(PluginUiWebResult(requestId, error = "插件未完成请求已达上限（最多 128 个）"))
             return
         }
         val sharedCommandId = cacheKey?.let(pendingByCacheKey::get)
@@ -291,7 +298,7 @@ class PluginUiCoordinator(
             return true
         }
         if (ignoredQueries.remove(id)) return true
-        if (pendingCancels.remove(id)) return true
+        if (envelope.type in CANCEL_REPLY_TYPES) return true
         return false
     }
 
@@ -382,7 +389,13 @@ class PluginUiCoordinator(
         require(asset.kind == expected.kind && asset.sha256 == expected.sha256) {
             "插件资源身份不匹配"
         }
-        assetStore.store(asset.sha256, asset.kind, asset.content, expected.bytes)
+        assetStore.store(
+            asset.sha256,
+            asset.kind,
+            asset.content,
+            expected.bytes,
+            retainedAssetSha256(),
+        )
         completeStagedCatalogIfReady()
     }
 
@@ -414,6 +427,7 @@ class PluginUiCoordinator(
             )
         }
         stagedCatalog = null
+        activeCatalog = next
         acceptsQueries = true
         mutableCatalog.value = PluginUiWebCatalog(
             catalogRevision = next.catalogRevision,
@@ -422,6 +436,7 @@ class PluginUiCoordinator(
             plugins = plugins,
         )
         catalogStore.store(requireNotNull(activeScope) { "插件目录激活缺少服务端 scope" }, next)
+        assetStore.trimToBudget(retainedAssetSha256())
     }
 
     private fun cachedAssetsAvailable(catalog: MobileUiCatalogPayload): Boolean = catalog.items.all { item ->
@@ -454,19 +469,19 @@ class PluginUiCoordinator(
     }
 
     private fun sendCancel(ownerId: String) {
-        val commandId = send(
+        send(
             "plugin.ui.cancel",
             buildJsonObject { put("owner_id", ownerId) },
             null,
             null,
         )
-        if (commandId != null) pendingCancels += commandId
     }
 
     private fun failCatalog(message: String) {
         stagedCatalog = null
         rememberIgnoredAssetReplies(pendingAssets.keys)
         pendingAssets.clear()
+        assetStore.trimToBudget(retainedAssetSha256())
         val hasSnapshot = mutableCatalog.value.catalogRevision.isNotBlank()
         acceptsQueries = hasSnapshot
         mutableCatalog.value = mutableCatalog.value.copy(
@@ -477,6 +492,9 @@ class PluginUiCoordinator(
 
     private fun validateCatalog(catalog: MobileUiCatalogPayload) {
         require(SHA256.matches(catalog.catalogRevision)) { "插件 catalog revision 无效" }
+        require(catalog.items.size <= MAX_CATALOG_ITEMS) {
+            "插件 catalog 条目不能超过 $MAX_CATALOG_ITEMS 个"
+        }
         require(catalog.items.map { it.id }.distinct().size == catalog.items.size) {
             "插件 catalog ID 重复"
         }
@@ -506,6 +524,15 @@ class PluginUiCoordinator(
         }
     }
 
+    private fun retainedAssetSha256(): Set<String> = buildSet {
+        listOfNotNull(activeCatalog, stagedCatalog).forEach { catalog ->
+            catalog.items.forEach { item ->
+                add(item.moduleSha256)
+                item.stylesheetSha256?.let(::add)
+            }
+        }
+    }
+
     private fun publishResult(result: PluginUiWebResult) {
         check(resultChannel.trySend(result).isSuccess) { "插件 UI 结果队列已满" }
     }
@@ -527,6 +554,10 @@ class PluginUiCoordinator(
     private companion object {
         const val MAX_IGNORED_ASSET_REPLIES = 128
         const val MAX_IGNORED_QUERIES = 128
+        const val MAX_PENDING_SUBSCRIBERS = 128
+        const val MAX_CATALOG_ITEMS = 128
+        const val MAX_METHOD_CHARS = 256
+        const val MAX_PAYLOAD_BYTES = 64 * 1024
         val SHA256 = Regex("^[0-9a-f]{64}$")
         val PLUGIN_ID = Regex("^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,128}$")
         val SLOT_NAMES = setOf(
@@ -537,5 +568,6 @@ class PluginUiCoordinator(
             "drawer.panel",
         )
         val CACHE_MODES = setOf("none", "immutable")
+        val CANCEL_REPLY_TYPES = setOf("plugin.ui.cancel.ok", "plugin.ui.cancel.error")
     }
 }

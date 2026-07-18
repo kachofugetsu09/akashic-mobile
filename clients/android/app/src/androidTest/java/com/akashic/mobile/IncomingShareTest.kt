@@ -13,6 +13,7 @@ import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -173,6 +174,62 @@ class IncomingShareTest {
         assertEquals(emptyList<Any>(), store.load())
         source.delete()
         Unit
+    }
+
+    @Test
+    fun rejectsBoundaryWhitespaceFilenameBeforeCreatingADurableQueueItem() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val root = File(context.filesDir, "incoming-shares")
+        root.deleteRecursively()
+        context.getSharedPreferences("incoming_shares", android.content.Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        val source = File(context.filesDir, "received-attachments/ leading.txt").apply {
+            parentFile?.mkdirs()
+            writeText("boundary filename")
+        }
+        val uri = FileProvider.getUriForFile(
+            context,
+            "${BuildConfig.APPLICATION_ID}.files",
+            source,
+        )
+        val store = IncomingShareStore(context, root)
+        val shareId = "f7a6dcfe-d8c3-4ef9-8484-0f540c594035"
+
+        val error = runCatching {
+            store.enqueue(IncomingShare(shareId, null, listOf(uri)))
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalArgumentException)
+        assertEquals("共享附件文件名无效", error?.message)
+        assertEquals(emptyList<Any>(), store.load())
+        assertFalse(root.resolve(shareId).exists())
+        source.delete()
+    }
+
+    @Test
+    fun rejectsInvalidPreparedTextWithoutConsumingTheOriginalShare() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val root = File(context.filesDir, "incoming-shares")
+        root.deleteRecursively()
+        context.getSharedPreferences("incoming_shares", android.content.Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        val store = IncomingShareStore(context, root)
+        val shareId = "104af3c2-8d63-4a91-b4e2-909d140f1a20"
+        store.enqueue(IncomingShare(shareId, "必须保留的原始分享", emptyList()))
+
+        val oversized = runCatching {
+            store.prepareText(shareId, "x".repeat(65_537), null, null, null, null)
+        }.exceptionOrNull()
+        val invalidReply = runCatching {
+            store.prepareText(shareId, "合法文字", "r".repeat(513), null, null, null)
+        }.exceptionOrNull()
+
+        assertEquals("系统分享草稿超过消息长度上限", oversized?.message)
+        assertEquals("系统分享草稿引用 ID 无效", invalidReply?.message)
+        val restored = store.load().single()
+        assertEquals("必须保留的原始分享", restored.content.text)
+        assertNull(restored.preparedText)
+        store.discard(shareId)
     }
 
     @Test
