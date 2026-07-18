@@ -2,6 +2,7 @@ package com.akashic.mobile
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.data.local.PreparedComposerDraftResult
@@ -15,6 +16,7 @@ import com.akashic.mobile.data.local.MessageAttachmentWithMedia
 import com.akashic.mobile.data.local.decodeStoredToolBlock
 import com.akashic.mobile.data.realtime.TransferNetworkKind
 import com.akashic.mobile.data.realtime.MobileSessionState
+import com.akashic.mobile.data.realtime.NotificationTargetOpenResult
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
@@ -41,6 +43,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -51,6 +54,8 @@ import kotlinx.coroutines.flow.update
 import kotlin.math.ceil
 
 private const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
+private const val PENDING_NOTIFICATION_TARGET = "pending_notification_target"
+private const val COMPLETED_NOTIFICATION_TARGET = "completed_notification_target"
 
 data class IncomingShareUi(
     val id: String,
@@ -107,13 +112,20 @@ private data class ConversationProjection(
 )
 
 @OptIn(ExperimentalCoroutinesApi::class)
-class MainViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel(
+    application: Application,
+    private val savedStateHandle: SavedStateHandle,
+) : AndroidViewModel(application) {
     private val container = (application as App).container
     val sessionState = container.realtimeSession.state
     val pluginUiCatalog = container.realtimeSession.pluginUi.catalog
     val pluginUiResults = container.realtimeSession.pluginUi.results
     val pluginUiAssetStore = container.pluginUiAssetStore
     private val navigationTarget = MutableStateFlow<NavigationTargetUi?>(null)
+    private val pendingNotificationTarget = savedStateHandle.getStateFlow<NotificationTargetRequest?>(
+        PENDING_NOTIFICATION_TARGET,
+        null,
+    )
     private val incomingShareQueue = MutableStateFlow<List<QueuedIncomingShare>>(emptyList())
     val incomingShare = incomingShareQueue.map { queue ->
         queue.firstOrNull()?.let { share ->
@@ -142,6 +154,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             incomingShareQueue.update { current ->
                 restored + current.filterNot { it.content.id in restoredIds }
             }
+        }
+        viewModelScope.launch {
+            combine(pendingNotificationTarget, sessionState) { request, session -> request to session }
+                .collect { (request, session) ->
+                    if (request == null || !session.initialized || !session.hasProfile) return@collect
+                    if (
+                        request.messageId != null &&
+                        navigationTarget.value == NavigationTargetUi(
+                            request.sessionId.orEmpty(),
+                            request.messageId,
+                        )
+                    ) {
+                        return@collect
+                    }
+                    val result = container.realtimeSession.openNotificationTarget(
+                        request.sessionId,
+                        request.messageId,
+                    )
+                    if (pendingNotificationTarget.value != request) return@collect
+                    when (result) {
+                        NotificationTargetOpenResult.OPENED -> {
+                            if (request.messageId == null) {
+                                savedStateHandle[PENDING_NOTIFICATION_TARGET] = null
+                            } else {
+                                navigationTarget.value = NavigationTargetUi(
+                                    requireNotNull(request.sessionId),
+                                    request.messageId,
+                                )
+                            }
+                        }
+                        NotificationTargetOpenResult.STALE -> completeNotificationTarget()
+                        NotificationTargetOpenResult.WAITING_FOR_SYNC -> Unit
+                    }
+                }
         }
     }
 
@@ -615,7 +661,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun createSession() = container.realtimeSession.createSession()
 
-    fun selectSession(sessionId: String) = container.realtimeSession.selectSession(sessionId)
+    fun selectSession(sessionId: String) {
+        completeNotificationTarget()
+        container.realtimeSession.selectSession(sessionId)
+    }
 
     fun removeUnavailableSession(sessionId: String) =
         container.realtimeSession.removeUnavailableSession(sessionId)
@@ -645,13 +694,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun openNotificationTarget(sessionId: String, messageId: String) {
-        container.realtimeSession.selectSession(sessionId)
-        navigationTarget.value = NavigationTargetUi(sessionId, messageId)
+    internal fun acceptNotificationTarget(request: NotificationTargetRequest) {
+        if (pendingNotificationTarget.value == request) return
+        if (
+            request.messageId != null &&
+            savedStateHandle.get<NotificationTargetRequest>(COMPLETED_NOTIFICATION_TARGET) == request
+        ) {
+            return
+        }
+        navigationTarget.value = null
+        savedStateHandle[PENDING_NOTIFICATION_TARGET] = request
     }
 
     fun acknowledgeNavigationTarget(messageId: String) {
-        if (navigationTarget.value?.messageId == messageId) navigationTarget.value = null
+        if (navigationTarget.value?.messageId != messageId) return
+        completeNotificationTarget()
+    }
+
+    private fun completeNotificationTarget() {
+        pendingNotificationTarget.value?.takeIf { it.messageId != null }?.let { request ->
+            savedStateHandle[COMPLETED_NOTIFICATION_TARGET] = request
+        }
+        clearNotificationTarget()
+    }
+
+    private fun clearNotificationTarget() {
+        navigationTarget.value = null
+        savedStateHandle[PENDING_NOTIFICATION_TARGET] = null
     }
 
     fun restartPairing() = MobileConnectionService.disconnect(getApplication())

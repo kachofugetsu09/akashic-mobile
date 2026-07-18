@@ -13,6 +13,7 @@ import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.MessageEntity
 import com.akashic.mobile.data.local.MediaAttachmentEntity
 import com.akashic.mobile.data.local.MediaCacheStore
+import com.akashic.mobile.data.local.NotificationTargetProjection
 import com.akashic.mobile.data.local.OutboxCommandEntity
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.RemoveUnavailableConversationResult
@@ -72,6 +73,26 @@ data class MobileSessionState(
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
+
+internal enum class NotificationTargetOpenResult {
+    OPENED,
+    WAITING_FOR_SYNC,
+    STALE,
+}
+
+internal fun notificationTargetOpenResult(
+    projection: NotificationTargetProjection,
+    connectionPhase: ConnectionPhase,
+): NotificationTargetOpenResult = when (projection) {
+    NotificationTargetProjection.AVAILABLE -> NotificationTargetOpenResult.OPENED
+    NotificationTargetProjection.MISSING -> if (connectionPhase == ConnectionPhase.READY) {
+        NotificationTargetOpenResult.STALE
+    } else {
+        NotificationTargetOpenResult.WAITING_FOR_SYNC
+    }
+    NotificationTargetProjection.WRONG_SERVER,
+    NotificationTargetProjection.WRONG_SESSION -> NotificationTargetOpenResult.STALE
+}
 
 internal object FullJitterBackoff {
     fun maximumDelayMillis(retry: Int): Long {
@@ -1015,6 +1036,38 @@ class RealtimeSession(
         }
     }
 
+    /** 核对持久投影后选择通知会话，并区分待同步与过期目标。 */
+    internal suspend fun openNotificationTarget(
+        sessionId: String?,
+        messageId: String?,
+    ): NotificationTargetOpenResult = mutex.withLock {
+        // 1. Intent 是外部边界；非法身份直接作为过期通知显式失败
+        if (
+            sessionId == null || !MOBILE_SESSION.matches(sessionId) ||
+            (messageId != null && messageId.length !in 1..512)
+        ) {
+            mutableState.value = mutableState.value.copy(errorMessage = STALE_NOTIFICATION_MESSAGE)
+            return@withLock NotificationTargetOpenResult.STALE
+        }
+        val currentProfile = profile ?: return@withLock NotificationTargetOpenResult.WAITING_FOR_SYNC
+
+        // 2. 本地命中无需等待网络；缺失投影只有在完整同步后才能判定过期
+        val projection = deliveryStore.notificationTargetProjection(
+            currentProfile.serverId,
+            sessionId,
+            messageId,
+        )
+        val result = notificationTargetOpenResult(projection, mutableState.value.connection.phase)
+        when (result) {
+            NotificationTargetOpenResult.OPENED -> selectKnownSession(currentProfile, sessionId)
+            NotificationTargetOpenResult.STALE -> {
+                mutableState.value = mutableState.value.copy(errorMessage = STALE_NOTIFICATION_MESSAGE)
+            }
+            NotificationTargetOpenResult.WAITING_FOR_SYNC -> Unit
+        }
+        result
+    }
+
     /** 选择属于当前电脑的现有手机会话。 */
     fun selectSession(sessionId: String) {
         scope.launch {
@@ -1026,22 +1079,26 @@ class RealtimeSession(
                     "Unknown mobile session: $sessionId"
                 }
                 require(conversation.serverId == currentProfile.serverId) { "Mobile session belongs to another server" }
-
-                // 2. 用户从列表主动进入时从最新消息开始，应用重启仍保留原阅读恢复语义
-                if (mutableState.value.currentSessionId != sessionId) {
-                    deliveryStore.clearReadingPosition(
-                        sessionId = sessionId,
-                        expectedServerId = currentProfile.serverId,
-                        updatedAt = System.currentTimeMillis(),
-                    )
-                }
-
-                // 3. 持久化选择
-                preferences.selectSession(sessionId)
-                mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
-                publishTurnState()
+                selectKnownSession(currentProfile, sessionId)
             }
         }
+    }
+
+    /** 持久化已验证会话的选择，并维持进入会话时的阅读恢复语义。 */
+    private suspend fun selectKnownSession(currentProfile: ServerProfileEntity, sessionId: String) {
+        // 1. 主动进入另一会话时从最新消息开始
+        if (mutableState.value.currentSessionId != sessionId) {
+            deliveryStore.clearReadingPosition(
+                sessionId = sessionId,
+                expectedServerId = currentProfile.serverId,
+                updatedAt = System.currentTimeMillis(),
+            )
+        }
+
+        // 2. 同步持久选择与进程内投影
+        preferences.selectSession(sessionId)
+        mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+        publishTurnState()
     }
 
     override fun onOpen(candidateId: SocketCandidateId, endpoint: ServerEndpoint) {
@@ -2130,6 +2187,7 @@ class RealtimeSession(
 
     private companion object {
         const val TAG = "RealtimeSession"
+        const val STALE_NOTIFICATION_MESSAGE = "通知对应的会话或消息已不可用"
         val CAPABILITIES = listOf("chat", "streaming", "tools", "proactive", "attachments-v1")
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
         val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")

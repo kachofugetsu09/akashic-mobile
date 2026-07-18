@@ -39,6 +39,13 @@ enum class PreparedComposerDraftResult {
     CONFLICT,
 }
 
+internal enum class NotificationTargetProjection {
+    AVAILABLE,
+    MISSING,
+    WRONG_SERVER,
+    WRONG_SESSION,
+}
+
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
 private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
 private const val MAX_CANONICAL_MESSAGE_ALIASES = 256
@@ -79,6 +86,29 @@ class LocalDeliveryStore(
 
         // 2. 否则只从当前电脑的持久会话中选择最近一项
         return database.conversations().latestMobileForServer(serverId)?.sessionId
+    }
+
+    /** 核对系统通知指向当前电脑拥有的本地会话与消息投影。 */
+    internal suspend fun notificationTargetProjection(
+        serverId: String,
+        sessionId: String,
+        messageId: String?,
+    ): NotificationTargetProjection = projectionStateMutex.withLock {
+        // 1. 会话必须存在且仍由当前电脑拥有
+        val conversation = database.conversations().get(sessionId)
+            ?: return@withLock NotificationTargetProjection.MISSING
+        if (conversation.serverId != serverId) {
+            return@withLock NotificationTargetProjection.WRONG_SERVER
+        }
+
+        // 2. 连接通知只选择会话；消息通知还必须命中同一会话内的消息
+        if (messageId == null) return@withLock NotificationTargetProjection.AVAILABLE
+        val message = database.messages().get(messageId)
+            ?: return@withLock NotificationTargetProjection.MISSING
+        if (message.sessionId != sessionId) {
+            return@withLock NotificationTargetProjection.WRONG_SESSION
+        }
+        NotificationTargetProjection.AVAILABLE
     }
 
     /** 串行校验并保存当前电脑的一份会话草稿。 */

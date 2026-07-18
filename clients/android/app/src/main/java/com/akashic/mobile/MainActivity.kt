@@ -52,15 +52,12 @@ import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
-    private val requestedSessionId = mutableStateOf<String?>(null)
-    private val requestedMessageId = mutableStateOf<String?>(null)
     private val notificationsEnabled = mutableStateOf(true)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         consumeIncomingShare(intent)
-        requestedSessionId.value = intent.getStringExtra(MobileConnectionService.EXTRA_SESSION_ID)
-        requestedMessageId.value = intent.getStringExtra(MobileConnectionService.EXTRA_MESSAGE_ID)
+        takeNotificationTarget(intent)?.let(viewModel::acceptNotificationTarget)
         notificationsEnabled.value = NotificationManagerCompat.from(this).areNotificationsEnabled()
         MobileConnectionService.start(this)
         enableEdgeToEdge(
@@ -167,21 +164,6 @@ class MainActivity : ComponentActivity() {
                         viewModel.dispatchIncomingShareAttachments(share.id)
                     }
                 }
-                LaunchedEffect(
-                    session.initialized,
-                    session.hasProfile,
-                    requestedSessionId.value,
-                    requestedMessageId.value,
-                ) {
-                    val sessionId = requestedSessionId.value
-                    if (session.initialized && session.hasProfile && sessionId != null) {
-                        val messageId = requestedMessageId.value
-                        if (messageId == null) viewModel.selectSession(sessionId)
-                        else viewModel.openNotificationTarget(sessionId, messageId)
-                        requestedSessionId.value = null
-                        requestedMessageId.value = null
-                    }
-                }
                 Box(Modifier.fillMaxSize()) {
                     if (!session.initialized) {
                         CircularProgressIndicator(Modifier.align(Alignment.Center))
@@ -279,8 +261,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeIncomingShare(intent)
-        requestedSessionId.value = intent.getStringExtra(MobileConnectionService.EXTRA_SESSION_ID)
-        requestedMessageId.value = intent.getStringExtra(MobileConnectionService.EXTRA_MESSAGE_ID)
+        takeNotificationTarget(intent)?.let(viewModel::acceptNotificationTarget)
     }
 
     override fun onResume() {
@@ -343,6 +324,26 @@ class MainActivity : ComponentActivity() {
         const val PERMISSION_PREFERENCES = "notification_permission"
         const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "requested"
     }
+}
+
+internal data class NotificationTargetRequest(
+    val sessionId: String?,
+    val messageId: String?,
+) : java.io.Serializable
+
+/** 从 Activity Intent 一次性交接通知目标，避免重建时重复读取 extras。 */
+internal fun takeNotificationTarget(intent: Intent): NotificationTargetRequest? {
+    val hasSession = intent.hasExtra(MobileConnectionService.EXTRA_SESSION_ID)
+    val hasMessage = intent.hasExtra(MobileConnectionService.EXTRA_MESSAGE_ID)
+    if (!hasSession && !hasMessage) return null
+
+    val request = NotificationTargetRequest(
+        intent.getStringExtra(MobileConnectionService.EXTRA_SESSION_ID),
+        intent.getStringExtra(MobileConnectionService.EXTRA_MESSAGE_ID),
+    )
+    intent.removeExtra(MobileConnectionService.EXTRA_SESSION_ID)
+    intent.removeExtra(MobileConnectionService.EXTRA_MESSAGE_ID)
+    return request
 }
 
 @Composable
