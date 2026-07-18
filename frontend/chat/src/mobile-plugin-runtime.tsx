@@ -10,6 +10,7 @@ export interface MobilePluginContext {
   slot: MobilePluginSlotName;
   sessionId?: string;
   messageId?: string;
+  turnId?: string;
   block?: unknown;
   request(method: string, payload?: Record<string, unknown>): Promise<Record<string, unknown>>;
 }
@@ -183,11 +184,13 @@ export function MobilePluginSlot({
   name,
   sessionId,
   messageId,
+  turnId,
   block,
 }: {
   name: MobilePluginSlotName;
   sessionId?: string;
   messageId?: string;
+  turnId?: string;
   block?: unknown;
 }) {
   const version = useSyncExternalStore(
@@ -203,7 +206,7 @@ export function MobilePluginSlot({
           key={`${pluginId}:${name}`}
           pluginId={pluginId}
           renderer={renderer!}
-          context={{ slot: name, sessionId, messageId, block }}
+          context={{ slot: name, sessionId, messageId, turnId, block }}
         />
       ))}
     </div>
@@ -221,7 +224,7 @@ function MountedPlugin({
 }) {
   const hostRef = React.useRef<HTMLDivElement>(null);
   const ownerRef = React.useRef(Symbol(pluginId));
-  const { block, messageId, sessionId, slot } = context;
+  const { block, messageId, sessionId, slot, turnId } = context;
   const blockRevision = block === undefined ? undefined : JSON.stringify(block);
   const stableBlock = useMemo(
     () => blockRevision === undefined ? undefined : JSON.parse(blockRevision) as unknown,
@@ -237,9 +240,10 @@ function MountedPlugin({
         slot,
         sessionId,
         messageId,
+        turnId,
         block: stableBlock,
         request(method, payload = {}) {
-          const requestId = crypto.randomUUID();
+          const requestId = createRequestId();
           return new Promise((resolve, reject) => {
             if (!window.AkashicNative) {
               reject(new Error("原生插件桥未连接"));
@@ -262,7 +266,14 @@ function MountedPlugin({
             }, 30_000);
             pending.set(requestId, { resolve, reject, owner, timeout });
             try {
-              window.AkashicNative.callPluginUi(requestId, pluginId, method, encoded);
+              window.AkashicNative.callPluginUi(
+                requestId,
+                sessionId ?? null,
+                turnId ?? null,
+                pluginId,
+                method,
+                encoded,
+              );
             } catch (error) {
               window.clearTimeout(timeout);
               pending.delete(requestId);
@@ -289,6 +300,15 @@ function MountedPlugin({
       }
       host.replaceChildren();
     };
-  }, [messageId, pluginId, renderer, sessionId, slot, stableBlock]);
+  }, [messageId, pluginId, renderer, sessionId, slot, stableBlock, turnId]);
   return <div ref={hostRef} className="mobile-plugin-host" data-plugin={pluginId} />;
+}
+
+function createRequestId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }

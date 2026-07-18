@@ -15,6 +15,7 @@ import com.akashic.mobile.ui.conversation.ComposerAttachmentUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.MessageUi
+import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
 import com.akashic.mobile.ui.conversation.ProcessBlockKind
@@ -72,6 +73,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 .filter { it.sessionId.startsWith("mobile:") }
                 .map { SessionUi(it.sessionId, it.title) },
             selectedSessionId = session.currentSessionId,
+            projectionGeneration = session.projectionGeneration,
             messages = messages,
             attachments = attachments.map { attachment ->
                 val waitingForConnection = session.connection.phase != ConnectionPhase.READY &&
@@ -100,7 +102,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             isStreaming = graph.any { it.message.deliveryState == "streaming" },
             isResyncing = session.connection.phase == ConnectionPhase.SYNCING,
-            canResync = session.connection.phase == ConnectionPhase.READY && session.activeTurnId == null,
+            canResync = session.connection.phase == ConnectionPhase.READY &&
+                session.activeTurnId == null &&
+                !session.hasActiveAttachmentDownload,
             isStopping = session.isStopping,
             canStop = session.activeTurnId != null &&
                 session.connection.phase == ConnectionPhase.READY &&
@@ -117,6 +121,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             errorNotice = null,
             sessions = emptyList(),
             selectedSessionId = null,
+            projectionGeneration = 0,
             messages = emptyList(),
             attachments = emptyList(),
             commands = emptyList(),
@@ -131,12 +136,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun onQrCode(value: String) = container.realtimeSession.beginPairing(value)
 
-    fun sendMessage(value: String) = container.realtimeSession.sendMessage(value)
+    fun sendMessage(value: String, replyToMessageId: String?) =
+        container.realtimeSession.sendMessage(value, replyToMessageId)
 
     fun sendCommand(value: String) = container.realtimeSession.sendCommand(value)
 
-    fun callPluginUi(requestId: String, pluginId: String, method: String, payloadJson: String) =
-        container.realtimeSession.callPluginUi(requestId, pluginId, method, payloadJson)
+    fun callPluginUi(
+        requestId: String,
+        sessionId: String?,
+        turnId: String?,
+        pluginId: String,
+        method: String,
+        payloadJson: String,
+    ) = container.realtimeSession.callPluginUi(
+        requestId,
+        sessionId,
+        turnId,
+        pluginId,
+        method,
+        payloadJson,
+    )
 
     fun acknowledgePluginUiResponses(requestIds: Set<String>) =
         container.realtimeSession.acknowledgePluginUiResponses(requestIds)
@@ -170,6 +189,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (message.role == "user") {
             return MessageUi.User(
                 id = message.messageId,
+                sessionId = message.sessionId,
                 text = message.text,
                 deliveryLabel = when (message.deliveryState) {
                     "pending" -> "待发送"
@@ -177,11 +197,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     "failed" -> "发送失败"
                     else -> error("未知用户消息状态: ${message.deliveryState}")
                 },
+                replyable = userMessageCanReply(message.deliveryState),
+                createdAtMillis = message.createdAt,
+                reply = message.toReplyUi(),
                 attachments = graph.attachmentLinks.toMessageAttachmentUi(),
+                updatedAtMillis = message.updatedAt,
             )
         }
         return MessageUi.AssistantTurn(
             id = message.messageId,
+            sessionId = message.sessionId,
             intro = null,
             blocks = graph.blocks.sortedBy { it.ordinal }.map { block ->
                 val storedTool = if (block.kind == "tool") decodeStoredToolBlock(block.content) else null
@@ -189,12 +214,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     id = block.blockId,
                     kind = if (block.kind == "thinking") ProcessBlockKind.THINKING else ProcessBlockKind.TOOL,
                     title = storedTool?.name ?: "思考",
-                    detail = storedTool?.description ?: storedTool?.resultPreview ?: block.content,
+                    detail = storedTool?.description ?: if (storedTool == null) block.content else "",
                     state = when (block.status) {
                         "running" -> ProcessBlockState.RUNNING
                         "failed" -> ProcessBlockState.FAILED
                         else -> ProcessBlockState.COMPLETED
                     },
+                    arguments = storedTool?.arguments,
+                    resultPreview = storedTool?.resultPreview,
+                    durationMillis = storedTool?.durationMillis,
                 )
             },
             answer = message.text,
@@ -209,7 +237,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 updatedAt = message.updatedAt,
                 isTerminal = message.deliveryState in setOf("complete", "interrupted"),
             ),
+            createdAtMillis = message.createdAt,
+            reply = message.toReplyUi(),
             attachments = graph.attachmentLinks.toMessageAttachmentUi(),
+            updatedAtMillis = message.updatedAt,
+        )
+    }
+
+    private fun com.akashic.mobile.data.local.MessageEntity.toReplyUi(): MessageReplyUi? {
+        val target = replyToMessageId ?: return null
+        return MessageReplyUi(
+            messageId = target,
+            role = requireNotNull(replyRole) { "引用消息缺少角色: $messageId" },
+            preview = requireNotNull(replyPreview) { "引用消息缺少预览: $messageId" },
         )
     }
 }
@@ -234,6 +274,8 @@ internal fun List<MessageAttachmentWithMedia>.toMessageAttachmentUi(): List<Mess
             cachePath = attachment.cachePath,
         )
     }
+
+internal fun userMessageCanReply(deliveryState: String): Boolean = deliveryState == "complete"
 
 internal data class ConnectionPresentation(
     val label: String,

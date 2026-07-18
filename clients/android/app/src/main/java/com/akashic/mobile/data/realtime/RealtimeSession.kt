@@ -54,12 +54,14 @@ import kotlinx.serialization.json.put
 data class MobileSessionState(
     val initialized: Boolean = false,
     val scanGeneration: Long = 0,
+    val projectionGeneration: Long = 0,
     val connection: ConnectionState = ConnectionState(),
     val hasProfile: Boolean = false,
     val serverId: String? = null,
     val pairingConfirmationCode: String? = null,
     val currentSessionId: String? = null,
     val activeTurnId: String? = null,
+    val hasActiveAttachmentDownload: Boolean = false,
     val isStopping: Boolean = false,
     val commands: List<RemoteCommandItem> = emptyList(),
     val pluginUiAssets: List<MobileUiAssetPayload> = emptyList(),
@@ -82,6 +84,18 @@ internal object FullJitterBackoff {
 
     fun nextDelayMillis(retry: Int, random: Random = Random.Default): Long =
         random.nextLong(maximumDelayMillis(retry) + 1)
+}
+
+internal enum class TerminalProtocolAction {
+    FAIL_ACTIVE_COMMAND,
+    PRESERVE_OUTBOX,
+}
+
+internal fun terminalProtocolAction(code: Int): TerminalProtocolAction? = when (code) {
+    4400 -> TerminalProtocolAction.PRESERVE_OUTBOX
+    4406 -> TerminalProtocolAction.PRESERVE_OUTBOX
+    4410 -> TerminalProtocolAction.FAIL_ACTIVE_COMMAND
+    else -> null
 }
 
 class RealtimeSession(
@@ -128,6 +142,7 @@ class RealtimeSession(
         onDownloadFailed = { message ->
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
+        onStateChanged = ::publishDownloadState,
     )
     private val stops = TurnStopCoordinator(
         send = ::sendTurnStopCommand,
@@ -154,6 +169,7 @@ class RealtimeSession(
     private var ackJob: Job? = null
     private var pendingAckCount = 0
     private var pendingAckSeq = 0L
+    private var activeOutboxCommandId: String? = null
     private var syncGeneration = 0L
     private var completedSyncGeneration = 0L
     private var resetRebuildGeneration: Long? = null
@@ -271,6 +287,9 @@ class RealtimeSession(
                     "History reload requires a ready connection"
                 }
                 check(mutableState.value.activeTurnId == null) { "History reload cannot interrupt an active turn" }
+                check(!mutableState.value.hasActiveAttachmentDownload) {
+                    "History reload cannot interrupt an attachment download"
+                }
                 mutableState.value = mutableState.value.copy(
                     connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
                     errorMessage = null,
@@ -388,20 +407,39 @@ class RealtimeSession(
     }
 
     /** 创建本地消息和 outbox 命令，并在链路可用时立即发送。 */
-    fun sendMessage(text: String) {
-        enqueueMessage(text, includeDraftAttachments = true)
+    fun sendMessage(text: String, replyToMessageId: String? = null) {
+        enqueueMessage(
+            text,
+            includeDraftAttachments = true,
+            replyToMessageId = replyToMessageId,
+        )
     }
 
     /** 发送不携带或消费附件草稿的纯文本命令。 */
     fun sendCommand(command: String) {
-        enqueueMessage(command, includeDraftAttachments = false)
+        enqueueMessage(command, includeDraftAttachments = false, replyToMessageId = null)
     }
 
-    /** 从 Web UI 发起一个绑定当前会话的插件请求。 */
-    fun callPluginUi(requestId: String, pluginId: String, method: String, payloadJson: String) {
+    /** 从 Web UI 发起一个绑定渲染槽位会话与轮次的插件请求。 */
+    fun callPluginUi(
+        requestId: String,
+        sessionId: String?,
+        turnId: String?,
+        pluginId: String,
+        method: String,
+        payloadJson: String,
+    ) {
         scope.launch {
             mutex.withLock {
                 if (requestId.length !in 1..128) return@withLock
+                if (sessionId != null && !MOBILE_SESSION.matches(sessionId)) {
+                    appendPluginUiError(requestId, "插件请求的会话无效")
+                    return@withLock
+                }
+                if (turnId != null && turnId.length !in 1..512) {
+                    appendPluginUiError(requestId, "插件请求的轮次无效")
+                    return@withLock
+                }
                 val payload = try {
                     json.parseToJsonElement(payloadJson).jsonObject
                 } catch (error: SerializationException) {
@@ -418,8 +456,8 @@ class RealtimeSession(
                         put("method", method)
                         put("payload", payload)
                     },
-                    sessionId = mutableState.value.currentSessionId,
-                    turnId = mutableState.value.activeTurnId,
+                    sessionId = sessionId,
+                    turnId = turnId,
                 ) ?: run {
                     appendPluginUiError(requestId, "连接不可用，插件请求未发送")
                     return@withLock
@@ -443,7 +481,11 @@ class RealtimeSession(
         }
     }
 
-    private fun enqueueMessage(text: String, includeDraftAttachments: Boolean) {
+    private fun enqueueMessage(
+        text: String,
+        includeDraftAttachments: Boolean,
+        replyToMessageId: String?,
+    ) {
         scope.launch {
             mutex.withLock {
                 // 1. 确定当前手机会话
@@ -458,6 +500,14 @@ class RealtimeSession(
                 }
                 require(body.isNotEmpty() || attachments.isNotEmpty()) { "消息和附件不能同时为空" }
                 require(attachments.all { it.state == "ready" }) { "请等待附件上传完成" }
+                val replyTarget = replyToMessageId?.let { messageId ->
+                    val target = requireNotNull(database.messages().get(messageId)) {
+                        "被引用的本地消息不存在: $messageId"
+                    }
+                    require(target.sessionId == sessionId) { "不能引用其他会话的消息" }
+                    require(target.role in setOf("user", "assistant")) { "被引用消息角色无效" }
+                    target
+                }
 
                 // 2. 持久化消息和可重放命令
                 val now = System.currentTimeMillis()
@@ -469,6 +519,17 @@ class RealtimeSession(
                     text = body,
                     mediaRefs = attachments.map { it.attachmentId },
                     clientCreatedAt = Instant.ofEpochMilli(now).toString(),
+                    replyTo = replyTarget?.let { target ->
+                        if (target.clientMessageId != null) {
+                            MessageReplyReference(
+                                clientMessageId = target.clientMessageId,
+                            )
+                        } else {
+                            MessageReplyReference(
+                                messageId = target.messageId,
+                            )
+                        }
+                    },
                 )
                 val cachedAttachments = try {
                     attachments.map { transfer ->
@@ -523,6 +584,12 @@ class RealtimeSession(
                         deliveryState = "pending",
                         createdAt = now,
                         updatedAt = now,
+                        replyToMessageId = replyTarget?.messageId,
+                        replyRole = replyTarget?.role,
+                        replyPreview = replyTarget?.let { target ->
+                            target.text.trim().replace(Regex("\\s+"), " ").take(512)
+                                .ifBlank { "[无文字消息]" }
+                        },
                     ),
                     command = OutboxCommandEntity(
                         commandId = commandId,
@@ -670,12 +737,19 @@ class RealtimeSession(
     override fun onClosed(candidateId: SocketCandidateId, code: Int, reason: String) {
         scope.launch {
             mutex.withLock {
-                if (candidateId == activeCandidate) scheduleReconnect("连接关闭：$code $reason")
+                if (candidateId != activeCandidate) return@withLock
+                val action = terminalProtocolAction(code)
+                if (action != null) {
+                    failProtocolConnection(code, action)
+                } else {
+                    scheduleReconnect("连接关闭：$code $reason")
+                }
             }
         }
     }
 
     override fun onFailure(candidateId: SocketCandidateId, error: Throwable) {
+        Log.e(TAG, "实时连接候选失败: candidate=$candidateId", error)
         scope.launch {
             mutex.withLock {
                 if (candidateId == activeCandidate) scheduleReconnect(error.message ?: "连接失败")
@@ -692,6 +766,7 @@ class RealtimeSession(
     }
 
     override fun onRaceExhausted(generation: Long, error: Throwable) {
+        Log.e(TAG, "实时连接候选全部失败: generation=$generation", error)
         scope.launch {
             mutex.withLock {
                 if (generation == currentGeneration()) scheduleReconnect(error.message ?: "所有 endpoint 均不可用")
@@ -969,14 +1044,21 @@ class RealtimeSession(
                     return
                 }
                 when (envelope.type) {
-                    "message.send.ok" -> attachmentDrafts.deleteSentFiles(
-                        deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis()),
-                    )
+                    "message.send.ok" -> {
+                        require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的 ACK: $id" }
+                        val sentFiles = deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
+                        activeOutboxCommandId = null
+                        attachmentDrafts.deleteSentFiles(sentFiles)
+                        flushOutbox()
+                    }
                     "message.send.error" -> {
+                        require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的错误: $id" }
                         deliveryStore.failOutbox(id, System.currentTimeMillis())
+                        activeOutboxCommandId = null
                         mutableState.value = mutableState.value.copy(
                             errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "消息发送失败",
                         )
+                        flushOutbox()
                     }
                     "session.list.ok", "history.get.ok" -> completeSyncReply(envelope)
                     else -> {
@@ -1262,6 +1344,7 @@ class RealtimeSession(
         resetPluginUiPending("服务端要求重新同步")
         requestedHistoryPages.clear()
         mutableState.value = mutableState.value.copy(
+            projectionGeneration = mutableState.value.projectionGeneration + 1,
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
             errorMessage = null,
         )
@@ -1323,17 +1406,18 @@ class RealtimeSession(
     }
 
     private suspend fun flushOutbox() {
+        if (activeOutboxCommandId != null) return
         val currentProfile = requireNotNull(profile)
         val epoch = activeEpoch ?: return
         val candidate = activeCandidate ?: return
-        database.outbox().pending(currentProfile.serverId).forEach { command ->
-            val stored = ProtocolCodec.decode(command.envelopeJson)
-            val wire = stored.copy(connectionEpoch = epoch)
-            deliveryStore.markOutboxAttempt(command.commandId, System.currentTimeMillis())
-            if (!socket.send(candidate, wire)) {
-                deliveryStore.retryOutbox(command.commandId)
-                return
-            }
+        val command = database.outbox().pending(currentProfile.serverId).firstOrNull() ?: return
+        val stored = ProtocolCodec.decode(command.envelopeJson)
+        val wire = stored.copy(connectionEpoch = epoch)
+        deliveryStore.markOutboxAttempt(command.commandId, System.currentTimeMillis())
+        activeOutboxCommandId = command.commandId
+        if (!socket.send(candidate, wire)) {
+            activeOutboxCommandId = null
+            deliveryStore.retryOutbox(command.commandId)
         }
     }
 
@@ -1426,6 +1510,7 @@ class RealtimeSession(
         if (reconnectJob?.isActive == true) return
         activeCandidate = null
         activeEpoch = null
+        activeOutboxCommandId = null
         ackJob?.cancel()
         ackJob = null
         pendingAckCount = 0
@@ -1450,6 +1535,45 @@ class RealtimeSession(
                 pendingPairing?.let { connectQr(it.qr) } ?: profile?.let(::connectProfile)
             }
         }
+    }
+
+    /** 停止永久协议错误，并按错误类型隔离或保留当前 outbox。 */
+    private suspend fun failProtocolConnection(code: Int, action: TerminalProtocolAction) {
+        // 1. 收起当前连接态任务
+        reconnectJob?.cancel()
+        reconnectJob = null
+        activeCandidate = null
+        activeEpoch = null
+        ackJob?.cancel()
+        ackJob = null
+        pendingAckCount = 0
+        uploads.onDisconnected()
+        downloads.onDisconnected()
+        pendingSyncCommands.clear()
+        pendingCommandListId = null
+        resetPluginUiPending("协议不兼容")
+        requestedHistoryPages.clear()
+        resetRebuildGeneration = null
+
+        // 2. 隔离坏命令；只有版本不兼容时才保留等待升级
+        val currentProfile = requireNotNull(profile)
+        val commandId = activeOutboxCommandId
+        if (action == TerminalProtocolAction.FAIL_ACTIVE_COMMAND && commandId != null) {
+            deliveryStore.failOutbox(commandId, System.currentTimeMillis())
+            activeOutboxCommandId = null
+            scheduleReconnect("消息格式无效，已标记发送失败")
+            return
+        } else {
+            database.outbox().resetInFlight(currentProfile.serverId)
+        }
+        activeOutboxCommandId = null
+        mutableState.value = mutableState.value.copy(
+            connection = mutableState.value.connection.copy(
+                phase = ConnectionPhase.FAILED,
+                lastErrorCode = "protocol_$code",
+            ),
+            errorMessage = "消息协议不兼容，请确认手机与电脑端版本一致后重新连接",
+        )
     }
 
     private fun failDownloadConnection(message: String) {
@@ -1486,6 +1610,7 @@ class RealtimeSession(
         candidateEndpoints.clear()
         activeCandidate = null
         activeEpoch = null
+        activeOutboxCommandId = null
         pendingCommandListId = null
         resetPluginUiPending("连接已重置")
     }
@@ -1511,6 +1636,10 @@ class RealtimeSession(
             activeTurnId = stops.activeTurnId(sessionId),
             isStopping = stops.isStopping(sessionId),
         )
+    }
+
+    private fun publishDownloadState(active: Boolean) {
+        mutableState.value = mutableState.value.copy(hasActiveAttachmentDownload = active)
     }
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(

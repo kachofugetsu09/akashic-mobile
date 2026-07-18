@@ -1,5 +1,7 @@
 package com.akashic.mobile.ui.conversation
 
+import kotlinx.serialization.json.JsonObject
+
 data class ConversationUiState(
     val connectionLabel: String,
     val connectionStatus: ConnectionStatusUi,
@@ -7,6 +9,7 @@ data class ConversationUiState(
     val errorNotice: String?,
     val sessions: List<SessionUi>,
     val selectedSessionId: String?,
+    val projectionGeneration: Long,
     val messages: List<MessageUi>,
     val attachments: List<ComposerAttachmentUi>,
     val commands: List<CommandUi>,
@@ -61,6 +64,12 @@ data class CommandUi(
     val description: String,
 )
 
+data class MessageReplyUi(
+    val messageId: String,
+    val role: String,
+    val preview: String,
+)
+
 enum class ConnectionStatusUi {
     CONNECTING,
     READY,
@@ -71,23 +80,36 @@ enum class ConnectionStatusUi {
 
 sealed interface MessageUi {
     val id: String
+    val sessionId: String
+    val createdAtMillis: Long
+    val updatedAtMillis: Long
+    val reply: MessageReplyUi?
     val attachments: List<MessageAttachmentUi>
 
     data class User(
         override val id: String,
+        override val sessionId: String,
         val text: String,
         val deliveryLabel: String,
+        val replyable: Boolean,
+        override val createdAtMillis: Long,
+        override val reply: MessageReplyUi?,
         override val attachments: List<MessageAttachmentUi> = emptyList(),
+        override val updatedAtMillis: Long = createdAtMillis,
     ) : MessageUi
 
     data class AssistantTurn(
         override val id: String,
+        override val sessionId: String,
         val intro: String?,
         val blocks: List<ProcessBlockUi>,
         val answer: String,
         val status: AssistantTurnStatus,
         val durationSeconds: Int?,
+        override val createdAtMillis: Long,
+        override val reply: MessageReplyUi? = null,
         override val attachments: List<MessageAttachmentUi> = emptyList(),
+        override val updatedAtMillis: Long = createdAtMillis,
     ) : MessageUi {
         val isStreaming: Boolean
             get() = status == AssistantTurnStatus.STREAMING
@@ -124,6 +146,9 @@ data class ProcessBlockUi(
     val title: String,
     val detail: String,
     val state: ProcessBlockState,
+    val arguments: JsonObject? = null,
+    val resultPreview: String? = null,
+    val durationMillis: Long? = null,
 )
 
 enum class ProcessBlockKind {
@@ -144,6 +169,7 @@ internal val EmptyConversationState = ConversationUiState(
     errorNotice = null,
     sessions = emptyList(),
     selectedSessionId = null,
+    projectionGeneration = 0,
     messages = emptyList(),
     attachments = emptyList(),
     commands = emptyList(),
@@ -166,14 +192,20 @@ internal val PreviewConversationState = ConversationUiState(
         SessionUi("mobile:preview-3", "Material 3 交互细节"),
     ),
     selectedSessionId = "mobile:preview-1",
+    projectionGeneration = 0,
     messages = listOf(
         MessageUi.User(
             id = "user-1",
+            sessionId = "mobile:preview-1",
             text = "帮我检查移动端实时链路，尤其是网络抖动后的恢复。",
             deliveryLabel = "已发送",
+            replyable = true,
+            createdAtMillis = 1_752_681_600_000,
+            reply = null,
         ),
         MessageUi.AssistantTurn(
             id = "assistant-1",
+            sessionId = "mobile:preview-1",
             intro = "我先沿着协议和恢复链路检查。",
             blocks = listOf(
                 ProcessBlockUi(
@@ -208,6 +240,7 @@ internal val PreviewConversationState = ConversationUiState(
             answer = "当前事件顺序保持一致；连接恢复后会从最后一次累计 ACK 继续。",
             status = AssistantTurnStatus.STREAMING,
             durationSeconds = null,
+            createdAtMillis = 1_752_681_601_000,
             attachments = listOf(
                 MessageAttachmentUi(
                     id = "preview-download",

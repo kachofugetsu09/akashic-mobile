@@ -9,6 +9,7 @@ import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
 import com.akashic.mobile.ui.conversation.MessageUi
+import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.ProcessBlockKind
 import com.akashic.mobile.ui.conversation.ProcessBlockState
 import com.akashic.mobile.ui.conversation.ProcessBlockUi
@@ -17,6 +18,7 @@ import com.akashic.mobile.ui.conversation.PluginUiResponseUi
 import com.akashic.mobile.ui.conversation.SessionUi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class MobileWebSnapshot(
@@ -24,6 +26,7 @@ data class MobileWebSnapshot(
     val connection: MobileWebConnection,
     val sessions: List<MobileWebSession>,
     val selectedSessionId: String?,
+    val projectionGeneration: Long,
     val messages: List<MobileWebMessage>,
     val pluginResponses: List<MobileWebPluginResponse>,
     val composer: MobileWebComposer,
@@ -71,14 +74,26 @@ data class MobileWebSession(
 @Serializable
 data class MobileWebMessage(
     val id: String,
+    val sessionId: String,
     val role: MobileWebRole,
     val content: String,
+    val createdAt: Long,
+    val searchRevision: Long,
+    val replyable: Boolean,
+    val reply: MobileWebReply? = null,
     val deliveryLabel: String? = null,
     val blocks: List<MobileWebProcessBlock> = emptyList(),
     val streaming: Boolean = false,
     val interrupted: Boolean = false,
     val durationSeconds: Int? = null,
     val attachments: List<MobileWebAttachment> = emptyList(),
+)
+
+@Serializable
+data class MobileWebReply(
+    val messageId: String,
+    val role: String,
+    val preview: String,
 )
 
 @Serializable
@@ -94,6 +109,9 @@ data class MobileWebProcessBlock(
     val title: String,
     val detail: String,
     val state: MobileWebProcessState,
+    val arguments: JsonObject? = null,
+    val resultPreview: String? = null,
+    val durationMillis: Long? = null,
 )
 
 @Serializable
@@ -141,7 +159,7 @@ data class MobileWebComposer(
 
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 1,
+    protocolVersion = 2,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -150,6 +168,7 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     ),
     sessions = sessions.map(SessionUi::toMobileWebSession),
     selectedSessionId = selectedSessionId,
+    projectionGeneration = projectionGeneration,
     messages = messages.map(MessageUi::toMobileWebMessage),
     pluginResponses = pluginUiResponses.map(PluginUiResponseUi::toMobileWebPluginResponse),
     composer = MobileWebComposer(
@@ -178,15 +197,25 @@ private fun SessionUi.toMobileWebSession() = MobileWebSession(sessionId, title)
 private fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
     is MessageUi.User -> MobileWebMessage(
         id = id,
+        sessionId = sessionId,
         role = MobileWebRole.USER,
         content = text,
+        createdAt = createdAtMillis,
+        searchRevision = updatedAtMillis,
+        replyable = replyable,
+        reply = reply?.toMobileWebReply(),
         deliveryLabel = deliveryLabel,
         attachments = attachments.map(MessageAttachmentUi::toMobileWebAttachment),
     )
     is MessageUi.AssistantTurn -> MobileWebMessage(
         id = id,
+        sessionId = sessionId,
         role = MobileWebRole.ASSISTANT,
         content = answer,
+        createdAt = createdAtMillis,
+        searchRevision = updatedAtMillis,
+        replyable = status == AssistantTurnStatus.COMPLETE,
+        reply = reply?.toMobileWebReply(),
         blocks = blocks.map(ProcessBlockUi::toMobileWebProcessBlock),
         streaming = status == AssistantTurnStatus.STREAMING,
         interrupted = status == AssistantTurnStatus.INTERRUPTED,
@@ -208,7 +237,12 @@ private fun ProcessBlockUi.toMobileWebProcessBlock() = MobileWebProcessBlock(
         ProcessBlockState.RUNNING -> MobileWebProcessState.RUNNING
         ProcessBlockState.FAILED -> MobileWebProcessState.FAILED
     },
+    arguments = arguments,
+    resultPreview = resultPreview,
+    durationMillis = durationMillis,
 )
+
+private fun MessageReplyUi.toMobileWebReply() = MobileWebReply(messageId, role, preview)
 
 private fun ComposerAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
     id = id,

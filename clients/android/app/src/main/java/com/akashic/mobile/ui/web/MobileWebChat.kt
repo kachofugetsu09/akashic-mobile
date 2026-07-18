@@ -1,16 +1,29 @@
 package com.akashic.mobile.ui.web
 
 import android.annotation.SuppressLint
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
+import android.webkit.ConsoleMessage
+import android.util.Log
+import android.view.HapticFeedbackConstants
 import android.widget.Toast
 import androidx.annotation.Keep
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.SideEffect
@@ -20,11 +33,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.webkit.WebResourceErrorCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageUi
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.util.concurrent.atomic.AtomicReference
@@ -43,6 +60,8 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 
 private const val MOBILE_WEB_URL = "https://appassets.androidplatform.net/assets/mobile.html"
+private const val MOBILE_WEB_LOG_TAG = "AkashicMobileWeb"
+private const val MOBILE_WEB_RENDER_DEADLINE_MILLIS = 10_000L
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -60,9 +79,9 @@ fun MobileWebChat(
     onOpenDownloadedAttachment: (String) -> Unit,
     onShareDownloadedAttachment: (String) -> Unit,
     onDismissError: () -> Unit,
-    onSend: (String) -> Unit,
+    onSend: (String, String?) -> Unit,
     onSendCommand: (String) -> Unit,
-    onPluginUiCall: (String, String, String, String) -> Unit,
+    onPluginUiCall: (String, String?, String?, String, String, String) -> Unit,
     onPluginUiResponsesAcknowledged: (Set<String>) -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
@@ -71,6 +90,7 @@ fun MobileWebChat(
     val mediaRegistry = remember { MobileMediaRegistry() }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var snapshotPump by remember { mutableStateOf<MobileSnapshotPump?>(null) }
+    var webLoadError by remember { mutableStateOf<String?>(null) }
 
     val callbacks by rememberUpdatedState(
         MobileWebCallbacks(
@@ -94,9 +114,10 @@ fun MobileWebChat(
         ),
     )
 
-    AndroidView(
-        modifier = modifier,
-        factory = { context ->
+    Box(modifier = modifier) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
             val assetLoader = WebViewAssetLoader.Builder()
                 .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
                 .addPathHandler("/media/", mediaRegistry)
@@ -108,22 +129,78 @@ fun MobileWebChat(
                 settings.allowContentAccess = false
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 settings.mediaPlaybackRequiresUserGesture = true
-                settings.blockNetworkLoads = true
-                setBackgroundColor(android.graphics.Color.TRANSPARENT)
-                webViewClient = MobileWebClient(context, assetLoader)
+                // appassets 使用受控 HTTPS origin；外部请求由 MobileWebClient 拒绝。
+                settings.blockNetworkLoads = false
+                // WebView 默认走硬件合成；强制软件层会让动态页面退回整层位图重绘。
+                setLayerType(android.view.View.LAYER_TYPE_NONE, null)
+                setBackgroundColor(android.graphics.Color.rgb(243, 247, 252))
+                webViewClient = MobileWebClient(
+                    context,
+                    assetLoader,
+                    onMainFrameStarted = { post { webLoadError = null } },
+                    onMainFrameError = { message -> post { webLoadError = message } },
+                )
                 addJavascriptInterface(
                     MobileWebBridge(
                         dispatch = { work -> post { work(callbacks) } },
-                        requestSnapshot = { post { snapshotPump?.request(latestState) } },
+                        reportReady = { post { webLoadError = null } },
+                        requestSnapshot = {
+                            post {
+                                val pump = snapshotPump
+                                Log.i(MOBILE_WEB_LOG_TAG, "bridge requestSnapshot: pumpReady=${pump != null}")
+                                pump?.request(latestState)
+                            }
+                        },
+                        copyText = { text ->
+                            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(
+                                ClipData.newPlainText("Akashic message", text),
+                            )
+                        },
+                        performReplyHaptic = {
+                            post {
+                                performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                            }
+                        },
                     ),
                     "AkashicNative",
                 )
+                webChromeClient = object : WebChromeClient() {
+                    override fun onConsoleMessage(message: ConsoleMessage): Boolean {
+                        Log.e(
+                            MOBILE_WEB_LOG_TAG,
+                            "console ${message.messageLevel()} ${message.sourceId()}:${message.lineNumber()} ${message.message()}",
+                        )
+                        return true
+                    }
+                }
                 loadUrl(MOBILE_WEB_URL)
                 webView = this
                 snapshotPump = MobileSnapshotPump(this, mediaRegistry)
             }
-        },
-    )
+            },
+        )
+        if (webLoadError != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(32.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "会话界面加载失败",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(top = 96.dp),
+                )
+                Text(
+                    text = requireNotNull(webLoadError),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                TextButton(onClick = { webView?.reload() }) { Text("重新加载") }
+            }
+        }
+    }
 
     SideEffect { snapshotPump?.submit(state) }
     DisposableEffect(Unit) {
@@ -148,9 +225,9 @@ private data class MobileWebCallbacks(
     val onOpenDownloadedAttachment: (String) -> Unit,
     val onShareDownloadedAttachment: (String) -> Unit,
     val onDismissError: () -> Unit,
-    val onSend: (String) -> Unit,
+    val onSend: (String, String?) -> Unit,
     val onSendCommand: (String) -> Unit,
-    val onPluginUiCall: (String, String, String, String) -> Unit,
+    val onPluginUiCall: (String, String?, String?, String, String, String) -> Unit,
     val onPluginUiResponsesAcknowledged: (Set<String>) -> Unit,
     val onStop: () -> Unit,
 )
@@ -158,8 +235,14 @@ private data class MobileWebCallbacks(
 @Keep
 private class MobileWebBridge(
     private val dispatch: ((MobileWebCallbacks) -> Unit) -> Unit,
+    private val reportReady: () -> Unit,
     private val requestSnapshot: () -> Unit,
+    private val copyText: (String) -> Unit,
+    private val performReplyHaptic: () -> Unit,
 ) {
+    @JavascriptInterface
+    fun reportReady() = reportReady.invoke()
+
     @JavascriptInterface
     fun requestSnapshot() = requestSnapshot.invoke()
 
@@ -208,14 +291,28 @@ private class MobileWebBridge(
     fun dismissError() = dispatch { it.onDismissError() }
 
     @JavascriptInterface
-    fun sendMessage(text: String) = dispatch { it.onSend(text) }
+    fun sendMessage(text: String, replyToMessageId: String) = dispatch {
+        it.onSend(text, replyToMessageId.ifBlank { null })
+    }
+
+    @JavascriptInterface
+    fun copyText(text: String) = copyText.invoke(text)
+
+    @JavascriptInterface
+    fun performReplyHaptic() = performReplyHaptic.invoke()
 
     @JavascriptInterface
     fun sendCommand(command: String) = dispatch { it.onSendCommand(command) }
 
     @JavascriptInterface
-    fun callPluginUi(requestId: String, pluginId: String, method: String, payloadJson: String) =
-        dispatch { it.onPluginUiCall(requestId, pluginId, method, payloadJson) }
+    fun callPluginUi(
+        requestId: String,
+        sessionId: String?,
+        turnId: String?,
+        pluginId: String,
+        method: String,
+        payloadJson: String,
+    ) = dispatch { it.onPluginUiCall(requestId, sessionId, turnId, pluginId, method, payloadJson) }
 
     @JavascriptInterface
     fun acknowledgePluginUiResponses(requestIdsJson: String) {
@@ -238,9 +335,78 @@ private class MobileWebBridge(
 private class MobileWebClient(
     private val context: Context,
     private val assetLoader: WebViewAssetLoader,
+    private val onMainFrameStarted: WebView.() -> Unit,
+    private val onMainFrameError: WebView.(String) -> Unit,
 ) : WebViewClientCompat() {
-    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? =
-        assetLoader.shouldInterceptRequest(request.url)
+    private var pageGeneration = 0L
+
+    override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+        Log.i(MOBILE_WEB_LOG_TAG, "page started: $url")
+        pageGeneration += 1
+        view.onMainFrameStarted()
+    }
+
+    override fun onPageFinished(view: WebView, url: String) {
+        Log.i(MOBILE_WEB_LOG_TAG, "page finished: $url")
+        if (url != MOBILE_WEB_URL) return
+        val generation = pageGeneration
+        view.postDelayed({
+            if (generation != pageGeneration) return@postDelayed
+            view.evaluateJavascript(
+                """document.getElementById('root')?.childElementCount > 0""",
+            ) { rendered ->
+                Log.i(MOBILE_WEB_LOG_TAG, "page deadline rendered: $rendered")
+                if (rendered != "true") view.onMainFrameError("会话脚本没有生成界面")
+            }
+        }, MOBILE_WEB_RENDER_DEADLINE_MILLIS)
+    }
+
+    override fun onReceivedError(
+        view: WebView,
+        request: WebResourceRequest,
+        error: WebResourceErrorCompat,
+    ) {
+        Log.e(MOBILE_WEB_LOG_TAG, "resource error: ${request.url} ${error.errorCode} ${error.description}")
+        if (request.isForMainFrame || request.isCriticalAppAsset()) {
+            view.onMainFrameError("资源加载失败: ${request.url.path} (${error.description})")
+        }
+    }
+
+    override fun onReceivedHttpError(
+        view: WebView,
+        request: WebResourceRequest,
+        errorResponse: WebResourceResponse,
+    ) {
+        if (request.isForMainFrame || request.isCriticalAppAsset()) {
+            Log.e(
+                MOBILE_WEB_LOG_TAG,
+                "critical HTTP error: ${request.url} ${errorResponse.statusCode} ${errorResponse.reasonPhrase}",
+            )
+            view.onMainFrameError(
+                "资源加载失败: ${request.url.path} (HTTP ${errorResponse.statusCode})",
+            )
+        }
+    }
+
+    override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+        if (request.url.host == "appassets.androidplatform.net") {
+            return assetLoader.shouldInterceptRequest(request.url) ?: blockedResponse(404, "Not Found")
+        }
+        return blockedResponse(403, "Blocked")
+    }
+
+    private fun blockedResponse(statusCode: Int, reason: String) =
+        WebResourceResponse(
+            "text/plain",
+            "utf-8",
+            statusCode,
+            reason,
+            emptyMap(),
+            ByteArrayInputStream(ByteArray(0)),
+        )
+
+    private fun WebResourceRequest.isCriticalAppAsset(): Boolean =
+        url.host == "appassets.androidplatform.net" && url.lastPathSegment.orEmpty().startsWith("mobile-")
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
         return when (mobileNavigationAction(request.url.toString(), request.isForMainFrame)) {
@@ -309,7 +475,9 @@ private fun ConversationUiState.mediaResources(): Map<String, MobileMediaResourc
         .associate { it.id to MobileMediaResource(it.cachePath, it.contentType) }
 
 private fun WebView.pushSnapshot(snapshotJson: String) {
-    evaluateJavascript("window.AkashicMobile?.receiveSnapshot($snapshotJson)", null)
+    evaluateJavascript(
+        """(() => { if (!window.AkashicMobile?.receiveSnapshot) return 'missing'; window.AkashicMobile.receiveSnapshot($snapshotJson); return 'delivered'; })()""",
+    ) { result -> Log.d(MOBILE_WEB_LOG_TAG, "snapshot push: $result") }
 }
 
 private fun WebView.pushPluginAssets(assetsJson: String) {
