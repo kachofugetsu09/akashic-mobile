@@ -1,8 +1,8 @@
 {
-  "layer": "02-session-recovery-and-release",
+  "layer": "03-resumable-attachment-upload",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
   "source_branch": "feature/im-phone",
-  "source_commit": "ef3a771b0f1796eb68f12707487c3ecdf710b212",
+  "source_commit": "bb8e960942bfb86a21d4c73d685f800102617ba0",
   "source_paths": [
     "clients/android"
   ]
