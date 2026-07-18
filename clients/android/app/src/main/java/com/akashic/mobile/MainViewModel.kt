@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.data.local.PreparedComposerDraftResult
+import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.AttachmentTransferEntity
 import com.akashic.mobile.data.local.ComposerDraftEntity
 import com.akashic.mobile.data.local.ConversationSummary
@@ -46,6 +47,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlin.math.ceil
 
 private const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
@@ -60,7 +62,7 @@ data class IncomingShareUi(
     val errorMessage: String?,
 )
 
-private data class QueuedIncomingShare(
+internal data class QueuedIncomingShare(
     val content: IncomingShare,
     val targetSessionId: String? = null,
     val preparedText: String? = null,
@@ -73,6 +75,24 @@ private data class QueuedIncomingShare(
     val revision: Int = 0,
     val errorMessage: String? = null,
 )
+
+internal fun PersistedIncomingShare.toQueuedIncomingShare() = QueuedIncomingShare(
+    content = content,
+    targetSessionId = targetSessionId,
+    preparedText = preparedText,
+    preparedReplyToMessageId = preparedReplyToMessageId,
+    preparedBaseText = preparedBaseText,
+    preparedBaseReplyToMessageId = preparedBaseReplyToMessageId,
+    preparedBaseUpdatedAt = preparedBaseUpdatedAt,
+)
+
+internal fun mergePersistedIncomingShare(
+    queue: List<QueuedIncomingShare>,
+    persisted: PersistedIncomingShare,
+): List<QueuedIncomingShare> {
+    if (queue.any { it.content.id == persisted.content.id }) return queue
+    return queue + persisted.toQueuedIncomingShare()
+}
 
 private data class ComposerLocalState(
     val attachments: List<AttachmentTransferEntity>,
@@ -115,20 +135,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch {
-            val restored = container.incomingShareStore.load().map { persisted ->
-                QueuedIncomingShare(
-                    content = persisted.content,
-                    targetSessionId = persisted.targetSessionId,
-                    preparedText = persisted.preparedText,
-                    preparedReplyToMessageId = persisted.preparedReplyToMessageId,
-                    preparedBaseText = persisted.preparedBaseText,
-                    preparedBaseReplyToMessageId = persisted.preparedBaseReplyToMessageId,
-                    preparedBaseUpdatedAt = persisted.preparedBaseUpdatedAt,
-                )
-            }
+            val restored = container.incomingShareStore.load().map(
+                PersistedIncomingShare::toQueuedIncomingShare,
+            )
             val restoredIds = restored.mapTo(mutableSetOf()) { it.content.id }
-            incomingShareQueue.value = restored + incomingShareQueue.value.filterNot {
-                it.content.id in restoredIds
+            incomingShareQueue.update { current ->
+                restored + current.filterNot { it.content.id in restoredIds }
             }
         }
     }
@@ -355,11 +367,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** 先持久接收系统分享，再把它交给进程内 UI 队列。 */
     suspend fun acceptIncomingShare(incoming: IncomingShare) {
         val persisted = container.incomingShareStore.enqueue(incoming)
-        if (incomingShareQueue.value.none { it.content.id == incoming.id }) {
-            incomingShareQueue.value = incomingShareQueue.value + QueuedIncomingShare(
-                persisted.content,
-                persisted.targetSessionId,
-            )
+        incomingShareQueue.update { current ->
+            mergePersistedIncomingShare(current, persisted)
         }
     }
 

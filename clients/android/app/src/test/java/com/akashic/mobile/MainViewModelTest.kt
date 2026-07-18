@@ -1,6 +1,7 @@
 package com.akashic.mobile
 
 import com.akashic.mobile.data.local.ConversationSummary
+import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.canRemoveFrom
 import com.akashic.mobile.data.local.isRemoteMissingIn
 import com.akashic.mobile.domain.model.ConnectionPhase
@@ -8,9 +9,44 @@ import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Test
 
 class MainViewModelTest {
+    @Test
+    fun persistedShareIdentityWinsAndPreparedStateIsRestoredExactlyOnce() {
+        val persisted = PersistedIncomingShare(
+            content = IncomingShare(
+                id = "8a525db5-bca7-481b-a8c8-69f585c1568a",
+                text = null,
+                uris = emptyList(),
+                attachmentIds = emptyList(),
+                sourceFingerprint = "persisted-fingerprint",
+            ),
+            targetSessionId = "mobile:target",
+            preparedText = "已有草稿\n共享文字",
+            preparedReplyToMessageId = "reply-message",
+            preparedBaseText = "已有草稿",
+            preparedBaseReplyToMessageId = "base-reply",
+            preparedBaseUpdatedAt = 41L,
+        )
+
+        val accepted = mergePersistedIncomingShare(emptyList(), persisted)
+        val replayed = mergePersistedIncomingShare(accepted, persisted)
+
+        assertEquals(1, accepted.size)
+        assertSame(accepted, replayed)
+        with(accepted.single()) {
+            assertEquals(persisted.content.id, content.id)
+            assertEquals("mobile:target", targetSessionId)
+            assertEquals("已有草稿\n共享文字", preparedText)
+            assertEquals("reply-message", preparedReplyToMessageId)
+            assertEquals("已有草稿", preparedBaseText)
+            assertEquals("base-reply", preparedBaseReplyToMessageId)
+            assertEquals(41L, preparedBaseUpdatedAt)
+        }
+    }
+
     @Test
     fun connectionPresentationUsesLinkHealthInsteadOfAuthenticationState() {
         val ready = connectionPresentation(ConnectionState(phase = ConnectionPhase.READY))

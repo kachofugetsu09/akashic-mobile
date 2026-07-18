@@ -7,12 +7,15 @@ import androidx.core.content.FileProvider
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.akashic.mobile.data.local.IncomingShareStore
+import com.akashic.mobile.data.local.MAX_PENDING_INCOMING_SHARES
 import com.akashic.mobile.data.local.fallbackAttachmentFilename
 import java.io.File
+import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -170,5 +173,39 @@ class IncomingShareTest {
         assertEquals(emptyList<Any>(), store.load())
         source.delete()
         Unit
+    }
+
+    @Test
+    fun pendingShareCountQuotaRejectsOnlyTheNewRecord() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val root = File(context.filesDir, "incoming-shares")
+        root.deleteRecursively()
+        context.getSharedPreferences("incoming_shares", android.content.Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        val store = IncomingShareStore(context, root)
+        repeat(MAX_PENDING_INCOMING_SHARES) { index ->
+            store.enqueue(
+                IncomingShare(
+                    id = UUID.nameUUIDFromBytes("pending-share-$index".toByteArray()).toString(),
+                    text = "待处理分享 $index",
+                    uris = emptyList(),
+                ),
+            )
+        }
+
+        val error = runCatching {
+            store.enqueue(
+                IncomingShare(
+                    id = UUID.nameUUIDFromBytes("pending-share-overflow".toByteArray()).toString(),
+                    text = "超出队列",
+                    uris = emptyList(),
+                ),
+            )
+        }.exceptionOrNull()
+
+        assertTrue(error is IllegalArgumentException)
+        assertEquals("待处理系统分享不能超过 32 条", error?.message)
+        assertEquals(MAX_PENDING_INCOMING_SHARES, store.load().size)
+        store.load().forEach { store.discard(it.content.id) }
     }
 }

@@ -55,6 +55,12 @@ class IncomingShareStore(
             return@locked normalized.toPublic()
         }
         require(incoming.uris.size <= MAX_FILES) { "单次最多分享 $MAX_FILES 个附件" }
+        val pendingUsage = pendingUsage(records)
+        requireIncomingShareCapacity(
+            usage = pendingUsage,
+            incomingBytes = 0,
+            hasIncomingFiles = incoming.uris.isNotEmpty(),
+        )
         val staging = root.resolve(".${incoming.id}")
         check(!staging.exists() && staging.mkdirs()) { "无法创建系统分享暂存目录" }
         val files = mutableListOf<String>()
@@ -74,6 +80,11 @@ class IncomingShareStore(
                             if (count < 0) break
                             totalBytes += count
                             require(totalBytes <= MAX_BYTES) { "单次分享附件总量不能超过 50 MiB" }
+                            requireIncomingShareCapacity(
+                                usage = pendingUsage,
+                                incomingBytes = totalBytes,
+                                hasIncomingFiles = true,
+                            )
                             output.write(buffer, 0, count)
                         }
                     }
@@ -195,6 +206,18 @@ class IncomingShareStore(
         }
         writeRecords(updated)
         if (updated.none { it.id == id }) root.resolve(id).deleteRecursively()
+    }
+
+    /** 以持久化记录实际拥有的文件统计全局待处理容量。 */
+    private fun pendingUsage(records: List<StoredShare>): IncomingShareQuotaUsage {
+        val pendingBytes = records.sumOf { record ->
+            record.files.sumOf { relative ->
+                root.resolve(relative).also { file ->
+                    check(file.isFile) { "系统分享暂存文件丢失：$relative" }
+                }.length()
+            }
+        }
+        return IncomingShareQuotaUsage(records.size, pendingBytes)
     }
 
     private suspend fun <T> locked(block: () -> T): T = withContext(Dispatchers.IO) {
