@@ -152,6 +152,27 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `round trips proactive delivery reply identity`() {
+        val payload = MessageSendPayload(
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            sessionId = "mobile:one",
+            text = "继续说",
+            mediaRefs = emptyList(),
+            clientCreatedAt = "2026-07-20T00:00:00Z",
+            replyTo = MessageReplyReference(deliveryId = "delivery-42"),
+        )
+
+        val encoded = ProtocolCodec.json().encodeToJsonElement(
+            MessageSendPayload.serializer(),
+            payload,
+        ).jsonObject
+        val decoded = ProtocolCodec.decodePayload<MessageSendPayload>(encoded)
+
+        assertEquals("delivery-42", decoded.replyTo?.deliveryId)
+        assertEquals(null, decoded.replyTo?.messageId)
+    }
+
+    @Test
     fun `decodes plugin ui change as authenticated control`() {
         val frame = """
             {

@@ -53,6 +53,8 @@ data class MessageReplyReference(
     val messageId: String? = null,
     @SerialName("client_message_id")
     val clientMessageId: String? = null,
+    @SerialName("delivery_id")
+    val deliveryId: String? = null,
 )
 
 @Serializable

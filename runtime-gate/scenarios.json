@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-v0.8.5-release-v2",
+  "profile": "mobile-proactive-reply-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -127,6 +127,12 @@
       "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_metadata_sender_forwards_delivery_id",
       "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
       "consumer_test": "historyCanonicalizesProactiveProjectionByDeliveryIdentity"
+    },
+    {
+      "id": "proactive-reply-before-history-sync",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_resolves_reply_into_agent_context_and_metadata",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/MessageNotificationPolicyTest.kt",
+      "consumer_test": "proactiveReplyUsesCoreDeliveryIdentityBeforeHistorySync"
     },
     {
       "id": "proactive-distinct-deliveries-remain-distinct",

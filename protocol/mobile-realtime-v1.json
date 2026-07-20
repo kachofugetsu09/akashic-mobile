@@ -38,6 +38,10 @@
     "history.get",
     "message.send",
     "ping",
+    "plugin.ui.asset.get",
+    "plugin.ui.cancel",
+    "plugin.ui.catalog",
+    "plugin.ui.query",
     "session.create",
     "session.list",
     "session.open",
@@ -49,6 +53,7 @@
     "pair.accepted",
     "pair.claim",
     "pair.pending",
+    "plugin.ui.changed",
     "protocol.error",
     "resume",
     "server.challenge"
@@ -640,6 +645,10 @@
               "session.open",
               "history.get",
               "command.list",
+              "plugin.ui.catalog",
+              "plugin.ui.asset.get",
+              "plugin.ui.query",
+              "plugin.ui.cancel",
               "turn.stop",
               "device.update",
               "ping"
@@ -835,6 +844,85 @@
         "type": "object"
       },
       "JsonValue": {},
+      "MessageReplyReference": {
+        "additionalProperties": false,
+        "properties": {
+          "client_message_id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 26,
+                "pattern": "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Client Message Id"
+          },
+          "delivery_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Delivery Id"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Message Id"
+          },
+          "preview": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Preview"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "user",
+                  "assistant"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Role"
+          }
+        },
+        "title": "MessageReplyReference",
+        "type": "object"
+      },
       "MessageSendCommand": {
         "additionalProperties": false,
         "properties": {
@@ -907,6 +995,7 @@
           "client_created_at": {
             "maxLength": 64,
             "minLength": 1,
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{1,9})?(?:Z|[+-]\\d{2}:\\d{2})$",
             "title": "Client Created At",
             "type": "string"
           },
@@ -926,6 +1015,17 @@
             "maxItems": 10,
             "title": "Media Refs",
             "type": "array"
+          },
+          "reply_to": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/MessageReplyReference"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "session_id": {
             "maxLength": 512,
@@ -947,6 +1047,62 @@
           "client_created_at"
         ],
         "title": "MessageSendPayload",
+        "type": "object"
+      },
+      "PluginUiChangedControl": {
+        "additionalProperties": false,
+        "properties": {
+          "connection_epoch": {
+            "minimum": 1,
+            "title": "Connection Epoch",
+            "type": "integer"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "maxLength": 36,
+                "minLength": 26,
+                "pattern": "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Id"
+          },
+          "kind": {
+            "const": "control",
+            "title": "Kind",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "title": "Payload",
+            "type": "object"
+          },
+          "type": {
+            "const": "plugin.ui.changed",
+            "title": "Type",
+            "type": "string"
+          },
+          "v": {
+            "const": 1,
+            "title": "V",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "v",
+          "kind",
+          "type",
+          "connection_epoch",
+          "payload"
+        ],
+        "title": "PluginUiChangedControl",
         "type": "object"
       },
       "ReplyFrame": {
@@ -1331,6 +1487,10 @@
               "history.get": "#/$defs/GenericCommand",
               "message.send": "#/$defs/MessageSendCommand",
               "ping": "#/$defs/GenericCommand",
+              "plugin.ui.asset.get": "#/$defs/GenericCommand",
+              "plugin.ui.cancel": "#/$defs/GenericCommand",
+              "plugin.ui.catalog": "#/$defs/GenericCommand",
+              "plugin.ui.query": "#/$defs/GenericCommand",
               "session.create": "#/$defs/GenericCommand",
               "session.list": "#/$defs/GenericCommand",
               "session.open": "#/$defs/GenericCommand",
@@ -1364,6 +1524,7 @@
               "pair.accepted": "#/$defs/GenericControl",
               "pair.claim": "#/$defs/GenericControl",
               "pair.pending": "#/$defs/GenericControl",
+              "plugin.ui.changed": "#/$defs/PluginUiChangedControl",
               "protocol.error": "#/$defs/GenericControl",
               "resume": "#/$defs/ResumeControl",
               "server.challenge": "#/$defs/GenericControl"
@@ -1376,6 +1537,9 @@
             },
             {
               "$ref": "#/$defs/ResumeControl"
+            },
+            {
+              "$ref": "#/$defs/PluginUiChangedControl"
             },
             {
               "$ref": "#/$defs/GenericControl"
@@ -1438,6 +1602,10 @@
             "history.get": "#/$defs/GenericCommand",
             "message.send": "#/$defs/MessageSendCommand",
             "ping": "#/$defs/GenericCommand",
+            "plugin.ui.asset.get": "#/$defs/GenericCommand",
+            "plugin.ui.cancel": "#/$defs/GenericCommand",
+            "plugin.ui.catalog": "#/$defs/GenericCommand",
+            "plugin.ui.query": "#/$defs/GenericCommand",
             "session.create": "#/$defs/GenericCommand",
             "session.list": "#/$defs/GenericCommand",
             "session.open": "#/$defs/GenericCommand",
@@ -1517,6 +1685,7 @@
             "pair.accepted": "#/$defs/GenericControl",
             "pair.claim": "#/$defs/GenericControl",
             "pair.pending": "#/$defs/GenericControl",
+            "plugin.ui.changed": "#/$defs/PluginUiChangedControl",
             "protocol.error": "#/$defs/GenericControl",
             "resume": "#/$defs/ResumeControl",
             "server.challenge": "#/$defs/GenericControl"
@@ -1529,6 +1698,9 @@
           },
           {
             "$ref": "#/$defs/ResumeControl"
+          },
+          {
+            "$ref": "#/$defs/PluginUiChangedControl"
           },
           {
             "$ref": "#/$defs/GenericControl"

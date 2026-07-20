@@ -844,15 +844,7 @@ class RealtimeSession(
                     mediaRefs = attachments.map { it.attachmentId },
                     clientCreatedAt = Instant.ofEpochMilli(now).toString(),
                     replyTo = replyTarget?.let { target ->
-                        if (target.clientMessageId != null) {
-                            MessageReplyReference(
-                                clientMessageId = target.clientMessageId,
-                            )
-                        } else {
-                            MessageReplyReference(
-                                messageId = target.messageId,
-                            )
-                        }
+                        messageReplyReference(target.messageId, target.clientMessageId)
                     },
                 )
                 val cachedAttachments = try {
