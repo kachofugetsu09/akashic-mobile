@@ -4,6 +4,7 @@ import com.akashic.mobile.data.realtime.FinalMessageEvent
 import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
 import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
+import com.akashic.mobile.data.realtime.messageReplyReference
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -115,5 +116,20 @@ class MessageNotificationPolicyTest {
         )
 
         assertEquals("proactive:delivery-42", event.messageId)
+    }
+
+    @Test
+    fun proactiveReplyUsesCoreDeliveryIdentityBeforeHistorySync() {
+        val proactive = messageReplyReference("proactive:delivery-42", null)
+        val canonical = messageReplyReference("mobile:session-a:42", null)
+        val optimistic = messageReplyReference(
+            "user:01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        )
+
+        assertEquals("delivery-42", proactive.deliveryId)
+        assertEquals(null, proactive.messageId)
+        assertEquals("mobile:session-a:42", canonical.messageId)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", optimistic.clientMessageId)
     }
 }

@@ -28,6 +28,23 @@ internal fun proactiveMessageId(deliveryId: String): String {
     return "proactive:$deliveryId"
 }
 
+internal fun messageReplyReference(
+    messageId: String,
+    clientMessageId: String?,
+): MessageReplyReference = when {
+    clientMessageId != null -> MessageReplyReference(clientMessageId = clientMessageId)
+    messageId.startsWith(PROACTIVE_MESSAGE_PREFIX) -> MessageReplyReference(
+        deliveryId = messageId.removePrefix(PROACTIVE_MESSAGE_PREFIX).also(::validateDeliveryId),
+    )
+    else -> MessageReplyReference(messageId = messageId)
+}
+
+private fun validateDeliveryId(deliveryId: String) {
+    require(deliveryId.isNotBlank() && deliveryId.length <= 128) {
+        "Proactive delivery id is invalid"
+    }
+}
+
 internal fun deliveredFinalMessageEvent(envelope: WireEnvelope): FinalMessageEvent {
     require(envelope.type == "message.final" || envelope.type == "message.proactive") {
         "Unsupported final message event: ${envelope.type}"
@@ -62,3 +79,5 @@ internal fun finalMessageAttention(payload: JsonObject): FinalMessageAttention {
         else -> error("最终消息 mobile_attention 无效")
     }
 }
+
+private const val PROACTIVE_MESSAGE_PREFIX = "proactive:"
