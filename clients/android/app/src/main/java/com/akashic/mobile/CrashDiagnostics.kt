@@ -15,8 +15,9 @@ internal object CrashDiagnostics {
     private const val LAST_CRASH_FILE = "last-crash.txt"
     private const val EXIT_HISTORY_FILE = "exit-history.txt"
     private const val MAX_EXIT_REASONS = 8
+    private const val MAX_EXPORTED_SECTION_CHARS = 128 * 1024
 
-    /** 安装 debug 专用异常记录器，并保存系统最近的进程退出原因。 */
+    /** 安装轻量异常记录器，并保存系统最近的进程退出原因。 */
     fun install(application: Application) {
         // 1. 先接管未捕获异常，覆盖后续启动阶段
         val previous = Thread.getDefaultUncaughtExceptionHandler()
@@ -38,6 +39,35 @@ internal object CrashDiagnostics {
 
         // 2. Android 11+ 保存系统判定的退出类型，不读取可能很大的 trace
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) writeExitHistory(application)
+    }
+
+    /** 汇总当前构建和已有诊断记录，供用户通过系统分享页主动导出。 */
+    fun exportReport(application: Application): String {
+        // 1. 始终带上当前构建身份，空报告也能确认测试版本
+        val report = StringBuilder()
+            .appendLine("Akashic Mobile diagnostics")
+            .appendLine("generated_at_ms=${System.currentTimeMillis()}")
+            .appendLine("app_version=${BuildConfig.VERSION_NAME}")
+            .appendLine("version_code=${BuildConfig.VERSION_CODE}")
+            .appendLine("package=${application.packageName}")
+            .appendLine("device=${Build.MANUFACTURER} ${Build.MODEL}")
+            .appendLine("android=${Build.VERSION.RELEASE}")
+            .appendLine("sdk=${Build.VERSION.SDK_INT}")
+
+        // 2. 私有诊断文件不存在表示尚未观察到对应事件，不伪造崩溃
+        listOf(LAST_CRASH_FILE, EXIT_HISTORY_FILE).forEach { name ->
+            report.appendLine().appendLine("===== $name =====")
+            val content = try {
+                diagnosticsDirectory(application).resolve(name).takeIf(File::isFile)?.readText()
+                    ?: "<not recorded>"
+            } catch (_: IOException) {
+                "<read failed>"
+            } catch (_: SecurityException) {
+                "<read denied>"
+            }
+            report.appendLine(content.take(MAX_EXPORTED_SECTION_CHARS))
+        }
+        return report.toString()
     }
 
     private fun writeLastCrash(application: Application, thread: Thread, error: Throwable) {
