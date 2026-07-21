@@ -186,6 +186,7 @@ class MainActivity : ComponentActivity() {
                             onNewSession = viewModel::createSession,
                             onRestartPairing = viewModel::restartPairing,
                             onReloadFromServer = viewModel::reloadFromServer,
+                            onExportDiagnostics = ::shareDiagnostics,
                             onAttach = { attachmentPicker.launch(arrayOf("*/*")) },
                             onRemoveAttachment = viewModel::removeAttachment,
                             onRetryAttachment = viewModel::retryAttachment,
@@ -317,6 +318,20 @@ class MainActivity : ComponentActivity() {
                 data = "package:$packageName".toUri()
                 putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
             },
+        )
+    }
+
+    private fun shareDiagnostics() {
+        val report = CrashDiagnostics.exportReport(application)
+        startActivity(
+            Intent.createChooser(
+                Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "Akashic Mobile ${BuildConfig.VERSION_NAME} 诊断报告")
+                    putExtra(Intent.EXTRA_TEXT, report)
+                },
+                "导出诊断报告",
+            ),
         )
     }
 

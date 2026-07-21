@@ -24,6 +24,7 @@ class App : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        CrashDiagnostics.install(this)
         registerActivityLifecycleCallbacks(visibility)
         container = AppContainer(this)
     }

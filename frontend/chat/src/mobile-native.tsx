@@ -230,6 +230,7 @@ interface NativeBridge {
   createSession(): void;
   restartPairing(): void;
   reloadFromServer(): void;
+  exportDiagnostics(): void;
   chooseAttachments(): void;
   removeAttachment(attachmentId: string): void;
   retryAttachment(attachmentId: string): void;
@@ -1933,6 +1934,13 @@ function MobileDrawer({
         </nav>
         <MobilePluginSlot name="drawer.panel" sessionId={snapshot.selectedSessionId} />
         <div className="mobile-drawer__actions">
+          <button className="drawer-action" type="button" onClick={() => {
+            window.AkashicNative?.exportDiagnostics();
+            onClose();
+          }}>
+            <FileText size={18} />
+            <span>导出诊断报告</span>
+          </button>
           <button className="drawer-action" type="button" disabled={!snapshot.composer.canResync} onClick={() => {
             if (window.confirm("清除本机已同步消息和附件缓存，并从电脑重新拉取？连接状态会保留。")) {
               window.AkashicNative?.reloadFromServer();
