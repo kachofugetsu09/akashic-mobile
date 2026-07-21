@@ -38,6 +38,18 @@ ANDROID_HOME=/path/to/android-sdk ./device-gate.sh \
 
 报告位于 `clients/android/build/reports/device-gate/<run-id>/`。脚本只清理由当前进程成功安装的临时包。配对材料仍必须来自全新的隔离 Gateway workspace，不能使用正式 workspace。
 
+## Debug 崩溃诊断
+
+Debug APK 使用独立包名 `com.akashic.mobile.debug`。它只在发生未捕获异常时覆盖写入一份最多 128 KiB 的堆栈，并在启动时保存最近八次系统退出原因；不常驻采样，也不上传数据。
+
+手机通过 USB 连接并允许调试后执行：
+
+```bash
+clients/android/scripts/collect-debug-diagnostics.sh
+```
+
+报告写入 `clients/android/build/reports/debug-diagnostics/<时间戳>/`。Debug 包与正式包数据隔离，需要单独配对。
+
 ## 安全边界
 
 - 不提交 APK 签名文件或密码。
