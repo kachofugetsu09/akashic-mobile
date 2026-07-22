@@ -341,6 +341,18 @@ interface MessageDao {
     )
     suspend fun activeAssistantTurns(serverId: String): List<MessageEntity>
 
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE sessionId = :sessionId
+          AND role = 'assistant'
+          AND deliveryState = 'streaming'
+          AND messageId LIKE 'assistant:%'
+        LIMIT 1
+        """,
+    )
+    suspend fun activeAssistantTurn(sessionId: String): MessageEntity?
+
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: String): Int
 

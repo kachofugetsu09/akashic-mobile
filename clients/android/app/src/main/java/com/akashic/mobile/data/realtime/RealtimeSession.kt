@@ -231,6 +231,7 @@ class RealtimeSession(
     pluginUiResultStore: PluginUiResultStore,
     private val scope: CoroutineScope,
     allowInsecureTransport: Boolean,
+    private val onRuntimeError: (String, Throwable) -> Unit,
 ) : RealtimeSocketListener {
     private data class PendingSyncCommand(
         val generation: Long,
@@ -1130,17 +1131,17 @@ class RealtimeSession(
                 try {
                     handleEnvelope(candidateId, envelope)
                 } catch (error: IllegalArgumentException) {
-                    failCandidateProtocol(candidateId, "连接协议校验失败：${error.message}")
+                    failCandidateProtocol(candidateId, envelope, error, "连接协议校验失败：${error.message}")
                 } catch (error: IllegalStateException) {
-                    failCandidateProtocol(candidateId, "连接状态校验失败：${error.message}")
+                    failCandidateProtocol(candidateId, envelope, error, "连接状态校验失败：${error.message}")
                 } catch (error: ArithmeticException) {
-                    failCandidateProtocol(candidateId, "连接协议数值溢出")
+                    failCandidateProtocol(candidateId, envelope, error, "连接协议数值溢出")
                 } catch (error: SQLiteException) {
-                    failCandidateProtocol(candidateId, "本地数据库处理失败：${error.message}")
+                    failCandidateProtocol(candidateId, envelope, error, "本地数据库处理失败：${error.message}")
                 } catch (error: IOException) {
-                    failCandidateProtocol(candidateId, "本地文件处理失败：${error.message}")
+                    failCandidateProtocol(candidateId, envelope, error, "本地文件处理失败：${error.message}")
                 } catch (error: SecurityException) {
-                    failCandidateProtocol(candidateId, "本地缓存路径不安全：${error.message}")
+                    failCandidateProtocol(candidateId, envelope, error, "本地缓存路径不安全：${error.message}")
                 }
             }
         }
@@ -1198,6 +1199,11 @@ class RealtimeSession(
     override fun onProtocolFailure(candidateId: SocketCandidateId, error: IllegalArgumentException) {
         scope.launch {
             mutex.withLock {
+                onRuntimeError(
+                    "operation=decode candidate_generation=${candidateId.generation} " +
+                        "candidate_ordinal=${candidateId.ordinal}",
+                    error,
+                )
                 mutableState.value = mutableState.value.copy(errorMessage = error.message)
             }
         }
@@ -2100,6 +2106,7 @@ class RealtimeSession(
 
     private fun failStartup(code: String, message: String, error: Throwable) {
         Log.e(TAG, message, error)
+        onRuntimeError("operation=startup code=$code", error)
         mutableState.value = mutableState.value.copy(
             initialized = true,
             connection = mutableState.value.connection.copy(
@@ -2110,7 +2117,19 @@ class RealtimeSession(
         )
     }
 
-    private fun failCandidateProtocol(candidateId: SocketCandidateId, message: String) {
+    private fun failCandidateProtocol(
+        candidateId: SocketCandidateId,
+        envelope: WireEnvelope,
+        error: Throwable,
+        message: String,
+    ) {
+        onRuntimeError(
+            "operation=envelope candidate_generation=${candidateId.generation} " +
+                "candidate_ordinal=${candidateId.ordinal} kind=${envelope.kind} type=${envelope.type} " +
+                "event_seq=${envelope.eventSeq} connection_epoch=${envelope.connectionEpoch} " +
+                "phase=${mutableState.value.connection.phase}",
+            error,
+        )
         mutableState.value = mutableState.value.copy(errorMessage = message)
         if (candidateId == activeCandidate) {
             socket.close(4406, "invalid authenticated server frame")

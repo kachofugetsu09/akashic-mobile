@@ -30,6 +30,7 @@ class AppDatabaseMigrationTest {
             DATABASE_7_8,
             DATABASE_8_9,
             DATABASE_9_10,
+            DATABASE_10_11,
         )
             .forEach(context::deleteDatabase)
     }
@@ -373,6 +374,51 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate10To11RepairsOverlappingStreamingTurnsWithoutDeletingContent() {
+        helper.createDatabase(DATABASE_10_11, 10).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages VALUES('assistant:turn-old', NULL, 'mobile:test', 'assistant', '旧回答', 'streaming', 3, 8, NULL, NULL, NULL, NULL)",
+            )
+            execSQL(
+                "INSERT INTO messages VALUES('assistant:turn-new', NULL, 'mobile:test', 'assistant', '新回答', 'streaming', 4, 4, NULL, NULL, NULL, NULL)",
+            )
+            execSQL(
+                "INSERT INTO turn_blocks VALUES('block-old', 'assistant:turn-old', 'turn-old', 0, 'thinking', 'running', '保留思考', 8)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_10_11,
+            11,
+            true,
+            AppDatabase.MIGRATION_10_11,
+        ).use { database ->
+            database.query(
+                "SELECT messageId, text, deliveryState FROM messages ORDER BY createdAt",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("assistant:turn-old", cursor.getString(0))
+                assertEquals("旧回答", cursor.getString(1))
+                assertEquals("interrupted", cursor.getString(2))
+                check(cursor.moveToNext())
+                assertEquals("assistant:turn-new", cursor.getString(0))
+                assertEquals("新回答", cursor.getString(1))
+                assertEquals("streaming", cursor.getString(2))
+            }
+            database.query("SELECT content, status FROM turn_blocks WHERE blockId = 'block-old'").use { cursor ->
+                check(cursor.moveToFirst()) { "迁移删除了旧 turn block" }
+                assertEquals("保留思考", cursor.getString(0))
+                assertEquals("completed", cursor.getString(1))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -383,5 +429,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_7_8 = "migration-7-8"
         const val DATABASE_8_9 = "migration-8-9"
         const val DATABASE_9_10 = "migration-9-10"
+        const val DATABASE_10_11 = "migration-10-11"
     }
 }

@@ -38,4 +38,21 @@ class CrashReportFormatterTest {
         assertTrue(report.contains("caused_by=<truncated>"))
         assertFalse(report.contains("cause-0"))
     }
+
+    @Test
+    fun runtimeErrorIncludesSafeBoundaryContextAndStack() {
+        val report = formatRuntimeErrorReport(
+            timestampMillis = 1234,
+            threadName = "realtime",
+            identity = CrashReportIdentity("0.8.7", 28, "test device", "16", 36),
+            source = "RealtimeSession",
+            context = "operation=envelope\ntype=turn.started event_seq=42",
+            error = IllegalArgumentException("同一会话出现重叠 turn"),
+        )
+
+        assertTrue(report.contains("source=RealtimeSession"))
+        assertTrue(report.contains("context=operation=envelope type=turn.started event_seq=42"))
+        assertTrue(report.contains("exception=java.lang.IllegalArgumentException: 同一会话出现重叠 turn"))
+        assertFalse(report.contains("\ncontext=operation=envelope\ntype="))
+    }
 }

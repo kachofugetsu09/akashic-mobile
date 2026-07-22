@@ -13,6 +13,7 @@ import kotlin.system.exitProcess
 internal object CrashDiagnostics {
     private const val DIAGNOSTICS_DIRECTORY = "diagnostics"
     private const val LAST_CRASH_FILE = "last-crash.txt"
+    private const val LAST_RUNTIME_ERROR_FILE = "last-runtime-error.txt"
     private const val EXIT_HISTORY_FILE = "exit-history.txt"
     private const val MAX_EXIT_REASONS = 8
     private const val MAX_EXPORTED_SECTION_CHARS = 128 * 1024
@@ -55,7 +56,7 @@ internal object CrashDiagnostics {
             .appendLine("sdk=${Build.VERSION.SDK_INT}")
 
         // 2. 私有诊断文件不存在表示尚未观察到对应事件，不伪造崩溃
-        listOf(LAST_CRASH_FILE, EXIT_HISTORY_FILE).forEach { name ->
+        listOf(LAST_CRASH_FILE, LAST_RUNTIME_ERROR_FILE, EXIT_HISTORY_FILE).forEach { name ->
             report.appendLine().appendLine("===== $name =====")
             val content = try {
                 diagnosticsDirectory(application).resolve(name).takeIf(File::isFile)?.readText()
@@ -71,16 +72,29 @@ internal object CrashDiagnostics {
     }
 
     private fun writeLastCrash(application: Application, thread: Thread, error: Throwable) {
-        val identity = CrashReportIdentity(
-            appVersion = BuildConfig.VERSION_NAME,
-            versionCode = BuildConfig.VERSION_CODE.toLong(),
-            device = "${Build.MANUFACTURER} ${Build.MODEL}",
-            androidRelease = Build.VERSION.RELEASE,
-            sdk = Build.VERSION.SDK_INT,
-        )
         diagnosticsDirectory(application).resolve(LAST_CRASH_FILE).writeText(
-            formatCrashReport(System.currentTimeMillis(), thread.name, identity, error),
+            formatCrashReport(System.currentTimeMillis(), thread.name, reportIdentity(), error),
         )
+    }
+
+    /** 覆盖保存最近一次已处理的功能阻断错误，不把诊断失败带回业务链。 */
+    fun recordRuntimeError(application: Application, source: String, context: String, error: Throwable) {
+        try {
+            diagnosticsDirectory(application).resolve(LAST_RUNTIME_ERROR_FILE).writeText(
+                formatRuntimeErrorReport(
+                    timestampMillis = System.currentTimeMillis(),
+                    threadName = Thread.currentThread().name,
+                    identity = reportIdentity(),
+                    source = source,
+                    context = context,
+                    error = error,
+                ),
+            )
+        } catch (_: IOException) {
+            // 诊断写盘失败不能替换已经由业务边界处理的原始错误。
+        } catch (_: SecurityException) {
+            // 私有目录不可写时保留业务层原有的显式失败语义。
+        }
     }
 
     @RequiresApi(Build.VERSION_CODES.R)
@@ -119,6 +133,14 @@ internal object CrashDiagnostics {
             }
             if (!directory.isDirectory) throw IOException("诊断路径不是目录")
         }
+
+    private fun reportIdentity() = CrashReportIdentity(
+        appVersion = BuildConfig.VERSION_NAME,
+        versionCode = BuildConfig.VERSION_CODE.toLong(),
+        device = "${Build.MANUFACTURER} ${Build.MODEL}",
+        androidRelease = Build.VERSION.RELEASE,
+        sdk = Build.VERSION.SDK_INT,
+    )
 
     @RequiresApi(Build.VERSION_CODES.R)
     private fun exitReasonName(reason: Int): String = when (reason) {

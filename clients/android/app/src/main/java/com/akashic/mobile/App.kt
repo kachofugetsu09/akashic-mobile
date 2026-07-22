@@ -70,5 +70,8 @@ class AppContainer(application: Application) {
         pluginUiResultStore = pluginUiResultStore,
         scope = applicationScope,
         allowInsecureTransport = BuildConfig.ALLOW_INSECURE_WS,
+        onRuntimeError = { context, error ->
+            CrashDiagnostics.recordRuntimeError(application, "RealtimeSession", context, error)
+        },
     )
 }

@@ -34,8 +34,8 @@
 ### Room 服务端投影
 
 - 增加：配对后的目录、历史和 realtime 事件 upsert 会话、消息、turn 和附件元数据。
-- 更新：delivery、stream、read position、cursor 和下载状态按各 DAO 状态机更新。
-- 逻辑失效：附件缓存以 `evicted` 表达文件不可用；消息投递使用明确状态，不用缺行伪装终态。
+- 更新：delivery、stream、read position、cursor 和下载状态按各 DAO 状态机更新。`LocalDeliveryStore` 在同一事务中拥有“每个会话至多一个 streaming assistant turn”不变量；重叠 `turn.started` 在写消息和推进 cursor 前失败。
+- 逻辑失效：附件缓存以 `evicted` 表达文件不可用；消息投递使用明确状态，不用缺行伪装终态。v10→v11 迁移只把同一会话中较旧的重复 streaming 临时消息更新为 `interrupted`，同步结束其 running blocks，并保留最新活动投影、消息正文和全部 turn blocks。
 - 物理删除：`reloadFromServer` 只允许清理可重载投影，并通过查询保护带本地工作的消息和会话。
 - 恢复：从固定核心协议重新同步；失败必须暴露，不能用空列表冒充成功。
 
@@ -70,7 +70,7 @@
 
 ### 崩溃诊断
 
-- 增加：未捕获异常发生时覆盖 `last-crash.txt`；Android 11+ 启动时用系统最近八次退出原因覆盖 `exit-history.txt`。
+- 增加：未捕获异常发生时覆盖 `last-crash.txt`；Realtime 既有错误处理边界确认的功能阻断错误覆盖 `last-runtime-error.txt`；Android 11+ 启动时用系统最近八次退出原因覆盖 `exit-history.txt`。
 - 更新：每类诊断只保留一份固定容量报告，不追加无界历史。
 - 逻辑失效：新报告覆盖旧报告后，旧证据不再有效。
 - 物理删除：卸载、清除应用数据或后续同类报告覆盖时减少旧证据；正常会话、同步和配对流程不操作诊断目录。
