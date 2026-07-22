@@ -40,6 +40,24 @@ internal fun formatCrashReport(
     return report.toString().take(MAX_REPORT_CHARS)
 }
 
+/** 把已处理但会阻断功能的运行失败保存为带上下文的有界诊断。 */
+internal fun formatRuntimeErrorReport(
+    timestampMillis: Long,
+    threadName: String,
+    identity: CrashReportIdentity,
+    source: String,
+    context: String,
+    error: Throwable,
+): String = buildString {
+    appendLine("source=${source.toDiagnosticLine()}")
+    appendLine("context=${context.toDiagnosticLine()}")
+    append(formatCrashReport(timestampMillis, threadName, identity, error))
+}.take(MAX_REPORT_CHARS)
+
+private fun String.toDiagnosticLine(): String =
+    replace('\r', ' ').replace('\n', ' ').take(MAX_CONTEXT_CHARS)
+
 private const val MAX_CAUSE_DEPTH = 8
 private const val MAX_FRAMES_PER_CAUSE = 64
 private const val MAX_REPORT_CHARS = 128 * 1024
+private const val MAX_CONTEXT_CHARS = 2 * 1024

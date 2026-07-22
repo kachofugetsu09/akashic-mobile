@@ -23,6 +23,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 
 @RunWith(AndroidJUnit4::class)
@@ -517,6 +518,25 @@ class LocalDeliveryStoreTest {
         val conversation = requireNotNull(database.conversations().get("mobile:test"))
         assertTrue(conversation.remoteKnown)
         assertEquals("streaming", database.messages().get("assistant:turn")!!.deliveryState)
+        assertEquals(1, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
+    }
+
+    @Test
+    fun overlappingTurnStartRollsBackProjectionAndCursor() = runBlocking {
+        store.applyEvent("server", "device", event(1, "turn.started", buildJsonObject {}, "turn-old"), 2)
+
+        val error = assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent("server", "device", event(2, "turn.started", buildJsonObject {}, "turn-new"), 3)
+            }
+        }
+
+        assertEquals("同一会话出现重叠 turn: turn-old -> turn-new", error.message)
+        assertEquals(null, database.messages().get("assistant:turn-new"))
+        assertEquals(
+            listOf("assistant:turn-old"),
+            database.messages().activeAssistantTurns("server").map(MessageEntity::messageId),
+        )
         assertEquals(1, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
     }
 
@@ -1956,7 +1976,12 @@ class LocalDeliveryStoreTest {
         serverSeq = serverSeq,
     )
 
-    private fun event(sequence: Long, type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(
+    private fun event(
+        sequence: Long,
+        type: String,
+        payload: kotlinx.serialization.json.JsonObject,
+        turnId: String = "turn",
+    ) = WireEnvelope(
         v = 1,
         kind = WireKind.EVENT,
         type = type,
@@ -1964,7 +1989,7 @@ class LocalDeliveryStoreTest {
         connectionEpoch = 1,
         eventSeq = sequence,
         sessionId = "mobile:test",
-        turnId = "turn",
+        turnId = turnId,
         payload = payload,
     )
 }

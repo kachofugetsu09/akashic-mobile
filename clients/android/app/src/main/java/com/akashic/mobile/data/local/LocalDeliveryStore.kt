@@ -837,6 +837,12 @@ class LocalDeliveryStore(
         val messageId = "assistant:$turnId"
         val existing = database.messages().get(messageId)
         if (existing != null) return existing
+        val active = database.messages().activeAssistantTurn(sessionId)
+        if (active != null) {
+            throw IllegalArgumentException(
+                "同一会话出现重叠 turn: ${active.messageId.removePrefix("assistant:")} -> $turnId",
+            )
+        }
         val message = MessageEntity(
             messageId = messageId,
             clientMessageId = null,

@@ -23,7 +23,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PendingMessageNotificationEntity::class,
         PendingTurnStopEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -64,6 +64,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_7_8,
             MIGRATION_8_9,
             MIGRATION_9_10,
+            MIGRATION_10_11,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -288,6 +289,47 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_pending_turn_stops_createdAt` ON `pending_turn_stops` (`createdAt`)",
+                )
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 保留每个会话最新的活动 turn，将旧版重叠投影显式收敛为中断态
+                db.execSQL(
+                    """
+                    UPDATE `messages`
+                    SET `deliveryState` = 'interrupted'
+                    WHERE `role` = 'assistant'
+                      AND `deliveryState` = 'streaming'
+                      AND `messageId` LIKE 'assistant:%'
+                      AND `messageId` != (
+                          SELECT newer.`messageId`
+                          FROM `messages` AS newer
+                          WHERE newer.`sessionId` = `messages`.`sessionId`
+                            AND newer.`role` = 'assistant'
+                            AND newer.`deliveryState` = 'streaming'
+                            AND newer.`messageId` LIKE 'assistant:%'
+                          ORDER BY newer.`createdAt` DESC, newer.`rowid` DESC
+                          LIMIT 1
+                      )
+                    """.trimIndent(),
+                )
+
+                // 2. 被收敛为中断态的旧 turn 不再保留运行中的 block 状态
+                db.execSQL(
+                    """
+                    UPDATE `turn_blocks`
+                    SET `status` = 'completed'
+                    WHERE `status` = 'running'
+                      AND `messageId` IN (
+                          SELECT `messageId`
+                          FROM `messages`
+                          WHERE `role` = 'assistant'
+                            AND `deliveryState` = 'interrupted'
+                            AND `messageId` LIKE 'assistant:%'
+                      )
+                    """.trimIndent(),
                 )
             }
         }
