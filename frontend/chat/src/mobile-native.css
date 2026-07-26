@@ -879,6 +879,11 @@ button {
   user-select: none;
 }
 
+.mobile-message-anchor:not(.streaming) {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 120px;
+}
+
 .mobile-message-anchor .agent-content {
   user-select: none;
 }

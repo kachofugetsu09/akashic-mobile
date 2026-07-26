@@ -52,6 +52,7 @@ import java.io.ByteArrayInputStream
 import java.io.File
 import java.io.FileNotFoundException
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -737,6 +738,12 @@ private fun WebView.pushSnapshot(snapshotJson: String) {
     ) { result -> Log.d(MOBILE_WEB_LOG_TAG, "snapshot push: $result") }
 }
 
+private fun WebView.pushStreamPatch(patchJson: String) {
+    evaluateJavascript(
+        """(() => { if (!window.AkashicMobile?.receiveStreamPatch) return 'missing'; window.AkashicMobile.receiveStreamPatch($patchJson); return 'delivered'; })()""",
+    ) { result -> Log.d(MOBILE_WEB_LOG_TAG, "stream patch push: $result") }
+}
+
 private fun WebView.pushSharedTextDraft(draft: MobileSharedTextDraft) {
     evaluateJavascript(
         "window.AkashicMobile?.receiveSharedText(" +
@@ -753,6 +760,8 @@ private class MobileSnapshotPump(
     private val json = Json { explicitNulls = false }
     private val states = Channel<ConversationUiState>(Channel.CONFLATED)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val forceFullSnapshot = AtomicBoolean()
+    private var deliveredState: ConversationUiState? = null
 
     init {
         scope.launch {
@@ -762,11 +771,21 @@ private class MobileSnapshotPump(
                 while (true) {
                     latest = states.tryReceive().getOrNull() ?: break
                 }
-                val snapshotJson = json.encodeToString(latest.toMobileWebSnapshot())
-                mediaRegistry.replace(latest.mediaResources())
-                withContext(Dispatchers.Main.immediate) {
-                    webView.pushSnapshot(snapshotJson)
+                val patch = deliveredState
+                    ?.takeUnless { forceFullSnapshot.get() }
+                    ?.let(latest::toMobileWebStreamPatch)
+                val payload = if (patch == null) {
+                    forceFullSnapshot.set(false)
+                    mediaRegistry.replace(latest.mediaResources())
+                    json.encodeToString(latest.toMobileWebSnapshot())
+                } else {
+                    json.encodeToString(patch)
                 }
+                withContext(Dispatchers.Main.immediate) {
+                    if (patch == null) webView.pushSnapshot(payload)
+                    else webView.pushStreamPatch(payload)
+                }
+                deliveredState = latest
             }
         }
     }
@@ -776,6 +795,7 @@ private class MobileSnapshotPump(
     }
 
     fun request(state: ConversationUiState) {
+        forceFullSnapshot.set(true)
         submit(state)
     }
 

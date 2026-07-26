@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  applyMobileStreamPatch,
   advanceMobileProjectionBaseline,
   advanceMobileUnreadTracking,
   allMobileAttachmentsReady,
@@ -31,6 +32,50 @@ import {
   updateMobileUnreadMessageIds,
   updateMobileSearchIndex,
 } from "./mobile-message-state.ts";
+
+test("stream patch replaces only the matching message projection", () => {
+  const first = { id: "history", content: "稳定历史" };
+  const active = { id: "assistant:turn", content: "正在" };
+  const snapshot = {
+    projectionGeneration: 7,
+    selectedSessionId: "mobile:test",
+    messages: [first, active],
+  };
+  const patchedMessage = { id: active.id, content: "正在分析" };
+
+  const next = applyMobileStreamPatch(snapshot, {
+    projectionGeneration: 7,
+    selectedSessionId: "mobile:test",
+    messageIndex: 1,
+    message: patchedMessage,
+  });
+
+  assert.notEqual(next, null);
+  assert.equal(next.messages[0], first);
+  assert.equal(next.messages[1], patchedMessage);
+});
+
+test("stream patch rejects stale generation, session, index, and identity", () => {
+  const snapshot = {
+    projectionGeneration: 7,
+    selectedSessionId: "mobile:test",
+    messages: [{ id: "assistant:turn", content: "正在" }],
+  };
+  const base = {
+    projectionGeneration: 7,
+    selectedSessionId: "mobile:test",
+    messageIndex: 0,
+    message: { id: "assistant:turn", content: "完成" },
+  };
+
+  assert.equal(applyMobileStreamPatch(snapshot, { ...base, projectionGeneration: 8 }), null);
+  assert.equal(applyMobileStreamPatch(snapshot, { ...base, selectedSessionId: "mobile:other" }), null);
+  assert.equal(applyMobileStreamPatch(snapshot, { ...base, messageIndex: 1 }), null);
+  assert.equal(applyMobileStreamPatch(snapshot, {
+    ...base,
+    message: { id: "assistant:other", content: "完成" },
+  }), null);
+});
 
 test("clearing a persisted reading anchor changes an in-flight restore to the conversation tail", () => {
   const anchor = { messageId: "message-1", offsetPx: -18 };

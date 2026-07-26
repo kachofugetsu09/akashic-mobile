@@ -64,6 +64,7 @@ import {
   useMobilePluginDashboards,
 } from "./mobile-plugin-runtime";
 import {
+  applyMobileStreamPatch,
   advanceMobileProjectionBaseline,
   advanceMobileUnreadTracking,
   allMobileAttachmentsReady,
@@ -175,6 +176,14 @@ interface MobileSession {
   isRunning: boolean;
   isAvailable: boolean;
   canRemove: boolean;
+}
+
+interface MobileStreamPatch {
+  protocolVersion: 1;
+  projectionGeneration: number;
+  selectedSessionId: string;
+  messageIndex: number;
+  message: MobileMessage;
 }
 
 interface MobileReadingPosition {
@@ -434,6 +443,30 @@ function parseTransferStatus(value: unknown): MobileTransferStatus {
   };
 }
 
+/** 校验 native 在完整快照之后发送的单消息 streaming patch。 */
+function parseMobileStreamPatch(value: unknown): MobileStreamPatch {
+  const raw = requireRecord(value, "streamPatch");
+  if (raw.protocolVersion !== 1) {
+    throw new Error(`不支持的 stream patch 版本: ${String(raw.protocolVersion)}`);
+  }
+  const projectionGeneration = requireNonNegativeInteger(
+    raw.projectionGeneration,
+    "streamPatch.projectionGeneration",
+  );
+  const messageIndex = requireNonNegativeInteger(raw.messageIndex, "streamPatch.messageIndex");
+  const message = parseMessage(raw.message, messageIndex);
+  if (!message.streaming || message.role !== "assistant") {
+    throw new Error("stream patch 只能更新正在执行的助手消息");
+  }
+  return {
+    protocolVersion: 1,
+    projectionGeneration,
+    selectedSessionId: requireString(raw.selectedSessionId, "streamPatch.selectedSessionId"),
+    messageIndex,
+    message,
+  };
+}
+
 /** 在 native 协议边界校验完整快照，并只补齐 Kotlin 明确定义的默认字段。 */
 function parseMobileSnapshot(value: unknown): MobileSnapshot {
   // 1. 校验协议版本与根对象
@@ -613,6 +646,7 @@ declare global {
     AkashicNative?: NativeBridge;
     AkashicMobile?: {
       receiveSnapshot(snapshot: unknown): void;
+      receiveStreamPatch(patch: unknown): void;
       receivePluginCatalog(catalog: unknown): void;
       receivePluginUiResult(result: unknown): void;
       receiveSendResult(requestId: string, accepted: boolean): void;
@@ -814,7 +848,9 @@ function MobileNativeApp() {
 
   useEffect(() => {
     let pending: MobileSnapshot | null = null;
+    let pendingPatch: MobileStreamPatch | null = null;
     let frame: number | null = null;
+    let patchFrame: number | null = null;
     let requestTimer: number | null = null;
     let snapshotAccepted = false;
     const requestSnapshot = () => {
@@ -836,6 +872,11 @@ function MobileNativeApp() {
         try {
           const parsed = parseMobileSnapshot(next);
           pending = parsed;
+          pendingPatch = null;
+          if (patchFrame !== null) {
+            window.cancelAnimationFrame(patchFrame);
+            patchFrame = null;
+          }
           setSnapshotError(null);
         } catch (error) {
           console.error("[mobile] rejected native snapshot", error);
@@ -859,6 +900,43 @@ function MobileNativeApp() {
           setSnapshot(nextSnapshot);
           snapshotAccepted = true;
           if (requestTimer !== null) window.clearTimeout(requestTimer);
+        });
+      },
+      receiveStreamPatch(next) {
+        try {
+          pendingPatch = parseMobileStreamPatch(next);
+          setSnapshotError(null);
+        } catch (error) {
+          console.error("[mobile] rejected native stream patch", error);
+          setSnapshotError(error instanceof Error ? error.message : "原生流式 patch 无效");
+          return;
+        }
+        if (pending !== null || patchFrame !== null) return;
+        patchFrame = requestAnimationFrame(() => {
+          patchFrame = null;
+          const patch = pendingPatch;
+          if (patch === null) throw new Error("移动端流式帧缺少待发布 patch");
+          pendingPatch = null;
+          setSnapshot((current) => {
+            if (current === null) {
+              window.AkashicNative?.requestSnapshot();
+              return current;
+            }
+            const nextSnapshot = applyMobileStreamPatch(current, patch);
+            if (nextSnapshot === null) {
+              window.AkashicNative?.requestSnapshot();
+              return current;
+            }
+            if (searchOpenRef.current && normalizedSearchQueryRef.current) {
+              setSearchIndex((index) => updateMobileSearchIndex(
+                index,
+                nextSnapshot.messages,
+                normalizedSearchQueryRef.current,
+                false,
+              ));
+            }
+            return nextSnapshot;
+          });
         });
       },
       receivePluginCatalog(nextCatalog) {
@@ -946,6 +1024,7 @@ function MobileNativeApp() {
     requestSnapshot();
     return () => {
       if (frame !== null) cancelAnimationFrame(frame);
+      if (patchFrame !== null) cancelAnimationFrame(patchFrame);
       if (requestTimer !== null) window.clearTimeout(requestTimer);
       window.removeEventListener("popstate", handlePopState);
       window.history.scrollRestoration = previousScrollRestoration;
@@ -1083,7 +1162,7 @@ function MobileNativeApp() {
   }, []);
 
   const messages = useMemo(
-    () => snapshot?.messages.map(toChatMessage) ?? [],
+    () => snapshot?.messages.map(toCachedChatMessage) ?? [],
     [snapshot?.messages],
   );
   const normalizedSearchQuery = normalizeMobileSearchText(searchQuery.trim());
@@ -1527,7 +1606,7 @@ function MobileNativeApp() {
                           if (element) messageElementsRef.current.set(source.id, element);
                           else messageElementsRef.current.delete(source.id);
                         }}
-                        className={`mobile-message-anchor ${source.role} ${highlightedMessageId === source.id ? "search-target" : ""} ${selectedMessageIds.has(source.id) ? "selected" : ""}`}
+                        className={`mobile-message-anchor ${source.role} ${source.streaming ? "streaming" : ""} ${highlightedMessageId === source.id ? "search-target" : ""} ${selectedMessageIds.has(source.id) ? "selected" : ""}`}
                         data-message-id={source.id}
                         tabIndex={-1}
                         selectable={!source.streaming}
@@ -3421,6 +3500,16 @@ function toChatMessage(message: MobileMessage): ChatMessage {
     interrupted: message.interrupted,
     durationMs: message.durationSeconds !== undefined ? message.durationSeconds * 1000 : undefined,
   };
+}
+
+const chatMessageProjectionCache = new WeakMap<MobileMessage, ChatMessage>();
+
+function toCachedChatMessage(message: MobileMessage): ChatMessage {
+  const cached = chatMessageProjectionCache.get(message);
+  if (cached !== undefined) return cached;
+  const projected = toChatMessage(message);
+  chatMessageProjectionCache.set(message, projected);
+  return projected;
 }
 
 function isPluginTurnMessage(message: ChatMessage): boolean {

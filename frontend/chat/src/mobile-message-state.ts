@@ -51,6 +51,36 @@ export interface MobileReadingAnchor {
   offsetPx: number;
 }
 
+export interface MobileStreamPatch<T> {
+  projectionGeneration: number;
+  selectedSessionId: string;
+  messageIndex: number;
+  message: T & { id: string };
+}
+
+export interface MobileStreamProjection<T> {
+  projectionGeneration: number;
+  selectedSessionId?: string;
+  messages: T[];
+}
+
+/** 在 generation、会话和消息身份一致时局部替换一个 streaming 投影。 */
+export function applyMobileStreamPatch<
+  T extends { id: string },
+  S extends MobileStreamProjection<T>,
+>(snapshot: S, patch: MobileStreamPatch<T>): S | null {
+  if (
+    snapshot.projectionGeneration !== patch.projectionGeneration
+    || snapshot.selectedSessionId !== patch.selectedSessionId
+    || snapshot.messages[patch.messageIndex]?.id !== patch.message.id
+  ) {
+    return null
+  }
+  const messages = snapshot.messages.slice()
+  messages[patch.messageIndex] = patch.message
+  return { ...snapshot, messages }
+}
+
 /** 同步原生阅读锚点，并把明确清除锚点解释为回到会话末尾。 */
 export function updateMobileReadingRestoreTarget<T extends MobileReadingAnchor>(
   current: T | null | undefined,
