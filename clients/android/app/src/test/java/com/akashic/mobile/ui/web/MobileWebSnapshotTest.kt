@@ -2,6 +2,7 @@ package com.akashic.mobile.ui.web
 
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
+import com.akashic.mobile.ui.conversation.EmptyConversationState
 import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.CommandUi
 import com.akashic.mobile.ui.conversation.ComposerDraftUi
@@ -27,6 +28,132 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MobileWebSnapshotTest {
+    @Test
+    fun createsPatchForAppendOnlyStreamingAnswer() {
+        val beforeMessage = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+            updatedAtMillis = 1_100,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 7,
+            messages = listOf(beforeMessage),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            sessions = listOf(
+                SessionUi("mobile:test", "会话", "正在分析", 1_200, 0, true, true),
+            ),
+            messages = listOf(
+                beforeMessage.copy(
+                    answer = "正在分析",
+                    durationSeconds = 2,
+                    updatedAtMillis = 1_200,
+                ),
+            ),
+        )
+
+        val patch = after.toMobileWebStreamPatch(before)
+
+        assertEquals(1, patch?.protocolVersion)
+        assertEquals(7L, patch?.projectionGeneration)
+        assertEquals(0, patch?.messageIndex)
+        assertEquals("正在分析", patch?.message?.content)
+    }
+
+    @Test
+    fun createsPatchForAppendOnlyThinkingAndRejectsStructuralChange() {
+        val thinking = ProcessBlockUi(
+            id = "thinking-1",
+            kind = ProcessBlockKind.THINKING,
+            title = "思考",
+            detail = "先",
+            state = ProcessBlockState.RUNNING,
+        )
+        val beforeMessage = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = listOf(thinking),
+            answer = "",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = null,
+            createdAtMillis = 1_000,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(beforeMessage),
+            isStreaming = true,
+        )
+        val appended = before.copy(
+            messages = listOf(
+                beforeMessage.copy(blocks = listOf(thinking.copy(detail = "先检查调用链"))),
+            ),
+        )
+        val completed = appended.copy(
+            messages = listOf(
+                beforeMessage.copy(
+                    blocks = listOf(thinking.copy(detail = "先检查调用链")),
+                    status = AssistantTurnStatus.COMPLETE,
+                ),
+            ),
+            isStreaming = false,
+        )
+
+        assertEquals(
+            "先检查调用链",
+            appended.toMobileWebStreamPatch(before)?.message?.blocks?.single()?.detail,
+        )
+        assertEquals(null, completed.toMobileWebStreamPatch(appended))
+    }
+
+    @Test
+    fun streamingPatchDoesNotSerializeConversationHistory() {
+        val history = List(400) { index ->
+            MessageUi.User(
+                id = "user:$index",
+                sessionId = "mobile:test",
+                text = "历史消息-$index-${"内容".repeat(150)}",
+                deliveryLabel = "已发送",
+                replyable = true,
+                createdAtMillis = index.toLong(),
+                reply = null,
+            )
+        }
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:streaming",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = history + streaming,
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = history + streaming.copy(answer = "正在检查调用链"),
+        )
+
+        val patchJson = Json.encodeToString(after.toMobileWebStreamPatch(before))
+        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
+
+        assertTrue(snapshotJson.length > 100_000)
+        assertTrue(patchJson.length * 100 < snapshotJson.length)
+    }
+
     @Test
     fun serializesVersionedConversationSnapshot() {
         val snapshot = ConversationUiState(

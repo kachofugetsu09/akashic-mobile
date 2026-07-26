@@ -37,6 +37,15 @@ data class MobileWebSnapshot(
 )
 
 @Serializable
+data class MobileWebStreamPatch(
+    val protocolVersion: Int,
+    val projectionGeneration: Long,
+    val selectedSessionId: String,
+    val messageIndex: Int,
+    val message: MobileWebMessage,
+)
+
+@Serializable
 data class MobileWebConnection(
     val label: String,
     val status: MobileWebConnectionStatus,
@@ -229,6 +238,73 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     ),
 )
 
+/** 只为同一 streaming 消息的追加内容生成轻量 WebView patch。 */
+fun ConversationUiState.toMobileWebStreamPatch(
+    previous: ConversationUiState,
+): MobileWebStreamPatch? {
+    // 1. patch 只跳过会话摘要变化，其余 UI 状态必须保持逐项相同
+    if (
+        previous.copy(sessions = sessions, messages = messages) != this ||
+        selectedSessionId == null ||
+        messages.size != previous.messages.size
+    ) {
+        return null
+    }
+
+    // 2. 只允许一个现有 streaming assistant message 发生追加
+    var changedIndex = -1
+    for (index in messages.indices) {
+        val before = previous.messages[index]
+        val after = messages[index]
+        if (before == after) continue
+        if (changedIndex >= 0 || !after.isAppendOnlyStreamUpdate(before)) return null
+        changedIndex = index
+    }
+    if (changedIndex < 0) return null
+
+    // 3. WebView 用 generation、session 和 index 拒绝错代 patch
+    return MobileWebStreamPatch(
+        protocolVersion = 1,
+        projectionGeneration = projectionGeneration,
+        selectedSessionId = selectedSessionId,
+        messageIndex = changedIndex,
+        message = messages[changedIndex].toMobileWebMessage(),
+    )
+}
+
+private fun MessageUi.isAppendOnlyStreamUpdate(previous: MessageUi): Boolean {
+    if (this !is MessageUi.AssistantTurn || previous !is MessageUi.AssistantTurn) return false
+    if (!isStreaming || !previous.isStreaming || id != previous.id) return false
+    if (
+        previous.copy(
+            answer = answer,
+            blocks = blocks,
+            durationSeconds = durationSeconds,
+            updatedAtMillis = updatedAtMillis,
+        ) != this ||
+        !answer.startsWith(previous.answer) ||
+        blocks.size != previous.blocks.size
+    ) {
+        return false
+    }
+
+    var appended = answer.length > previous.answer.length
+    for (index in blocks.indices) {
+        val before = previous.blocks[index]
+        val after = blocks[index]
+        if (before == after) continue
+        if (
+            before.kind != ProcessBlockKind.THINKING ||
+            before.copy(detail = after.detail) != after ||
+            !after.detail.startsWith(before.detail)
+        ) {
+            return false
+        }
+        appended = appended || after.detail.length > before.detail.length
+    }
+    return appended
+}
+
 private fun TransferStatusUi.toMobileWebTransferStatus() = MobileWebTransferStatus(
     title = title,
     detail = detail,
@@ -256,7 +332,7 @@ private fun NavigationTargetUi.toMobileWebNavigationTarget() =
 private fun PendingMessageUi.toMobileWebPendingMessage() =
     MobileWebPendingMessage(messageId, preview, createdAtMillis)
 
-private fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
+internal fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
     is MessageUi.User -> MobileWebMessage(
         id = id,
         sessionId = sessionId,
