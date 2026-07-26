@@ -712,6 +712,8 @@ function MobileNativeApp() {
   const pendingComposerDraftRef = useRef<MobileComposerDraftWrite | null>(null);
   const optimisticComposerDraftsRef = useRef(new Map<string, MobileComposerDraftWrite>());
   const composerDraftTimerRef = useRef<number | null>(null);
+  const snapshotMessagesRef = useRef<MobileMessage[]>([]);
+  const composerInputRef = useRef("");
 
   const saveComposerDraft = useCallback((draft: MobileComposerDraftWrite) => {
     optimisticComposerDraftsRef.current.set(draft.sessionId, draft);
@@ -1264,6 +1266,85 @@ function MobileNativeApp() {
   useEffect(() => {
     setUnreadAnchorVisited(false);
   }, [unreadState.anchorKey]);
+
+  useLayoutEffect(() => {
+    snapshotMessagesRef.current = snapshot?.messages ?? [];
+  }, [snapshot?.messages]);
+
+  useLayoutEffect(() => {
+    composerInputRef.current = input;
+  }, [input]);
+
+  const copyMessage = useCallback((message: MobileMessage) => {
+    window.AkashicNative?.copyText(message.content);
+    setCopiedMessageId(message.id);
+    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
+    copiedTimerRef.current = window.setTimeout(() => {
+      setCopiedMessageId((current) => current === message.id ? null : current);
+      copiedTimerRef.current = null;
+    }, 1600);
+  }, []);
+  const enterSelection = useCallback((messageId: string) => {
+    if (pendingShareRequestRef.current !== null) return;
+    setDrawerOpen(false);
+    setSearchOpen(false);
+    searchOpenRef.current = false;
+    setSearchQuery("");
+    normalizedSearchQueryRef.current = "";
+    setSearchIndex(new Map());
+    setSearchTargetId(null);
+    setHighlightedMessageId(null);
+    setCommandsOpen(false);
+    setQueueOpen(false);
+    updateComposerDraft(composerInputRef.current, null);
+    textareaRef.current?.blur();
+    pendingShareRequestRef.current = null;
+    setSharePending(false);
+    setShareStatus(null);
+    selectionActiveRef.current = true;
+    setSelectedMessageIds(new Set([messageId]));
+  }, [updateComposerDraft]);
+  const toggleSelection = useCallback((messageId: string) => {
+    if (pendingShareRequestRef.current !== null) return;
+    setShareStatus(null);
+    setSelectedMessageIds((current) => {
+      const next = new Set(current);
+      if (next.has(messageId)) next.delete(messageId);
+      else next.add(messageId);
+      selectionActiveRef.current = next.size > 0;
+      return next;
+    });
+  }, []);
+  const navigateToReply = useCallback((sourceMessageId: string, reply: MobileReply) => {
+    const target = resolveMobileReplyNavigationTarget(reply.messageId, snapshotMessagesRef.current);
+    if (target) {
+      setMissingReplySourceId(null);
+      const announcement = formatMobileReplyNavigationAnnouncement(target, formatMessageTime);
+      setReplyNavigationAnnouncement("");
+      if (replyAnnouncementTimerRef.current !== null) window.clearTimeout(replyAnnouncementTimerRef.current);
+      replyAnnouncementTimerRef.current = window.setTimeout(() => {
+        setReplyNavigationAnnouncement(announcement);
+        replyAnnouncementTimerRef.current = null;
+      }, 40);
+      jumpToMessage(target.id, true);
+      return;
+    }
+    setMissingReplySourceId(sourceMessageId);
+    if (missingReplyTimerRef.current !== null) window.clearTimeout(missingReplyTimerRef.current);
+    missingReplyTimerRef.current = window.setTimeout(() => {
+      setMissingReplySourceId((current) => current === sourceMessageId ? null : current);
+      missingReplyTimerRef.current = null;
+    }, 1800);
+  }, [jumpToMessage]);
+  const retryMessageDelivery = useCallback((messageId: string) => {
+    setRecoveringMessageIds((current) => new Set(current).add(messageId));
+    window.AkashicNative?.performActionHaptic();
+    window.AkashicNative?.retryFailedMessage(messageId);
+  }, []);
+  const replyToMessage = useCallback((message: MobileMessage) => {
+    updateComposerDraft(composerInputRef.current, message);
+  }, [updateComposerDraft]);
+
   if (!snapshot) {
     if (snapshotError) {
       return (
@@ -1379,15 +1460,6 @@ function MobileNativeApp() {
     if (commandsOpen) closeCommands();
     else setCommandsOpen(true);
   };
-  const copyMessage = (message: MobileMessage) => {
-    window.AkashicNative?.copyText(message.content);
-    setCopiedMessageId(message.id);
-    if (copiedTimerRef.current !== null) window.clearTimeout(copiedTimerRef.current);
-    copiedTimerRef.current = window.setTimeout(() => {
-      setCopiedMessageId((current) => current === message.id ? null : current);
-      copiedTimerRef.current = null;
-    }, 1600);
-  };
   const selectedMessages = selectableMobileMessages(snapshot.messages, selectedMessageIds);
   const selectionActive = selectedMessages.length > 0;
   const clearSelection = () => {
@@ -1396,37 +1468,6 @@ function MobileNativeApp() {
     setShareStatus(null);
     selectionActiveRef.current = false;
     setSelectedMessageIds(new Set());
-  };
-  const enterSelection = (messageId: string) => {
-    if (pendingShareRequestRef.current !== null) return;
-    setDrawerOpen(false);
-    setSearchOpen(false);
-    searchOpenRef.current = false;
-    setSearchQuery("");
-    normalizedSearchQueryRef.current = "";
-    setSearchIndex(new Map());
-    setSearchTargetId(null);
-    setHighlightedMessageId(null);
-    setCommandsOpen(false);
-    setQueueOpen(false);
-    updateComposerDraft(input, null);
-    textareaRef.current?.blur();
-    pendingShareRequestRef.current = null;
-    setSharePending(false);
-    setShareStatus(null);
-    selectionActiveRef.current = true;
-    setSelectedMessageIds(new Set([messageId]));
-  };
-  const toggleSelection = (messageId: string) => {
-    if (pendingShareRequestRef.current !== null) return;
-    setShareStatus(null);
-    setSelectedMessageIds((current) => {
-      const next = new Set(current);
-      if (next.has(messageId)) next.delete(messageId);
-      else next.add(messageId);
-      selectionActiveRef.current = next.size > 0;
-      return next;
-    });
   };
   const copySelection = () => {
     const text = formatMobileSelectionCopyText(
@@ -1454,27 +1495,6 @@ function MobileNativeApp() {
     clearSelection();
     updateComposerDraft(input, target);
     requestAnimationFrame(() => textareaRef.current?.focus());
-  };
-  const navigateToReply = (sourceMessageId: string, reply: MobileReply) => {
-    const target = resolveMobileReplyNavigationTarget(reply.messageId, snapshot.messages);
-    if (target) {
-      setMissingReplySourceId(null);
-      const announcement = formatMobileReplyNavigationAnnouncement(target, formatMessageTime);
-      setReplyNavigationAnnouncement("");
-      if (replyAnnouncementTimerRef.current !== null) window.clearTimeout(replyAnnouncementTimerRef.current);
-      replyAnnouncementTimerRef.current = window.setTimeout(() => {
-        setReplyNavigationAnnouncement(announcement);
-        replyAnnouncementTimerRef.current = null;
-      }, 40);
-      jumpToMessage(target.id, true);
-      return;
-    }
-    setMissingReplySourceId(sourceMessageId);
-    if (missingReplyTimerRef.current !== null) window.clearTimeout(missingReplyTimerRef.current);
-    missingReplyTimerRef.current = window.setTimeout(() => {
-      setMissingReplySourceId((current) => current === sourceMessageId ? null : current);
-      missingReplyTimerRef.current = null;
-    }, 1800);
   };
   const navigateToSurface = (next: Exclude<MobileSurface, { kind: "chat" }>) => {
     pushMobileSurface(window.history, next);
@@ -1592,83 +1612,30 @@ function MobileNativeApp() {
                 messages.map((message, index) => {
                   const source = snapshot.messages[index];
                   const previous = snapshot.messages[index - 1];
-                  const startsDay = !previous || !sameLocalDay(previous.createdAt, source.createdAt);
-                  const canReply = mobileMessageCanReply(source, snapshot.selectedSessionId);
                   return (
-                    <React.Fragment key={message.id}>
-                      {startsDay ? <MessageDateDivider createdAt={source.createdAt} /> : null}
-                      {source.id === unreadState.firstMessageId ? <MessageUnreadDivider count={unreadState.count} /> : null}
-                      {!startsDay && previous?.role === source.role ? (
-                        <div className={`mobile-role-divider ${source.role}`} />
-                      ) : null}
-                      <MessageSelectionTarget
-                        ref={(element) => {
-                          if (element) messageElementsRef.current.set(source.id, element);
-                          else messageElementsRef.current.delete(source.id);
-                        }}
-                        className={`mobile-message-anchor ${source.role} ${source.streaming ? "streaming" : ""} ${highlightedMessageId === source.id ? "search-target" : ""} ${selectedMessageIds.has(source.id) ? "selected" : ""}`}
-                        data-message-id={source.id}
-                        tabIndex={-1}
-                        selectable={!source.streaming}
-                        selectionActive={selectionActive}
-                        selected={selectedMessageIds.has(source.id)}
-                        onEnterSelection={() => enterSelection(source.id)}
-                        onToggleSelection={() => toggleSelection(source.id)}
-                      >
-                        <SwipeToReply disabled={!canReply || selectionActive} onReply={() => updateComposerDraft(input, source)}>
-                          <ChatMessageView
-                            message={message}
-                            onCopyToolDetail={copyToolDetail}
-                            leadingContent={source.reply ? (
-                              <MessageReplyReference
-                                reply={source.reply}
-                                unavailable={missingReplySourceId === source.id}
-                                onNavigate={() => navigateToReply(source.id, source.reply!)}
-                              />
-                            ) : undefined}
-                            attachmentContent={<MobileMessageAttachments attachments={source.attachments} />}
-                            processStartContent={!selectedSessionUnavailable && isPluginTurnMessage(message) ? (
-                              <MobilePluginSlot
-                                name="turn.before_reasoning"
-                                sessionId={source.sessionId}
-                                messageId={message.id}
-                                turnId={pluginTurnId(message)}
-                              />
-                            ) : undefined}
-                            beforeProcessBlock={(block) => !selectedSessionUnavailable && isPluginTurnMessage(message) && block.kind === "tool" ? (
-                              <MobilePluginSlot
-                                name="turn.before_tool"
-                                sessionId={source.sessionId}
-                                messageId={message.id}
-                                turnId={pluginTurnId(message)}
-                                block={block}
-                              />
-                            ) : null}
-                            answerEndContent={!selectedSessionUnavailable && isPluginTurnMessage(message) ? (
-                              <MobilePluginSlot
-                                name="turn.after_answer"
-                                sessionId={source.sessionId}
-                                messageId={message.id}
-                                turnId={pluginTurnId(message)}
-                              />
-                            ) : undefined}
-                          />
-                          <MessageMeta
-                            source={source}
-                            copied={copiedMessageId === source.id}
-                            canReply={canReply}
-                            onCopy={() => copyMessage(source)}
-                            onReply={() => updateComposerDraft(input, source)}
-                            deliveryActionBusy={recoveringMessageIds.has(source.id)}
-                            onDeliveryAction={() => {
-                              setRecoveringMessageIds((current) => new Set(current).add(source.id));
-                              window.AkashicNative?.performActionHaptic();
-                              window.AkashicNative?.retryFailedMessage(source.id);
-                            }}
-                          />
-                        </SwipeToReply>
-                      </MessageSelectionTarget>
-                    </React.Fragment>
+                    <MobileMessageRow
+                      key={message.id}
+                      source={source}
+                      message={message}
+                      startsDay={!previous || !sameLocalDay(previous.createdAt, source.createdAt)}
+                      followsSameRole={previous?.role === source.role}
+                      unreadCount={source.id === unreadState.firstMessageId ? unreadState.count : 0}
+                      highlighted={highlightedMessageId === source.id}
+                      selected={selectedMessageIds.has(source.id)}
+                      selectionActive={selectionActive}
+                      canReply={mobileMessageCanReply(source, snapshot.selectedSessionId)}
+                      copied={copiedMessageId === source.id}
+                      deliveryActionBusy={recoveringMessageIds.has(source.id)}
+                      replySourceUnavailable={missingReplySourceId === source.id}
+                      selectedSessionUnavailable={selectedSessionUnavailable}
+                      messageElementsRef={messageElementsRef}
+                      onEnterSelection={enterSelection}
+                      onToggleSelection={toggleSelection}
+                      onReplyToMessage={replyToMessage}
+                      onNavigateToReply={navigateToReply}
+                      onCopyMessage={copyMessage}
+                      onRetryMessageDelivery={retryMessageDelivery}
+                    />
                   );
                 })
               )}
@@ -1733,6 +1700,128 @@ function MobileNativeApp() {
     </TooltipProvider>
   );
 }
+
+/** 让单消息 patch 只重渲染引用发生变化的消息行。 */
+const MobileMessageRow = React.memo(function MobileMessageRow({
+  source,
+  message,
+  startsDay,
+  followsSameRole,
+  unreadCount,
+  highlighted,
+  selected,
+  selectionActive,
+  canReply,
+  copied,
+  deliveryActionBusy,
+  replySourceUnavailable,
+  selectedSessionUnavailable,
+  messageElementsRef,
+  onEnterSelection,
+  onToggleSelection,
+  onReplyToMessage,
+  onNavigateToReply,
+  onCopyMessage,
+  onRetryMessageDelivery,
+}: {
+  source: MobileMessage;
+  message: ChatMessage;
+  startsDay: boolean;
+  followsSameRole: boolean;
+  unreadCount: number;
+  highlighted: boolean;
+  selected: boolean;
+  selectionActive: boolean;
+  canReply: boolean;
+  copied: boolean;
+  deliveryActionBusy: boolean;
+  replySourceUnavailable: boolean;
+  selectedSessionUnavailable: boolean;
+  messageElementsRef: React.RefObject<Map<string, HTMLDivElement>>;
+  onEnterSelection: (messageId: string) => void;
+  onToggleSelection: (messageId: string) => void;
+  onReplyToMessage: (message: MobileMessage) => void;
+  onNavigateToReply: (sourceMessageId: string, reply: MobileReply) => void;
+  onCopyMessage: (message: MobileMessage) => void;
+  onRetryMessageDelivery: (messageId: string) => void;
+}) {
+  const pluginTurn = !selectedSessionUnavailable && isPluginTurnMessage(message);
+  return (
+    <>
+      {startsDay ? <MessageDateDivider createdAt={source.createdAt} /> : null}
+      {unreadCount > 0 ? <MessageUnreadDivider count={unreadCount} /> : null}
+      {!startsDay && followsSameRole ? (
+        <div className={`mobile-role-divider ${source.role}`} />
+      ) : null}
+      <MessageSelectionTarget
+        ref={(element) => {
+          if (element) messageElementsRef.current.set(source.id, element);
+          else messageElementsRef.current.delete(source.id);
+        }}
+        className={`mobile-message-anchor ${source.role} ${source.streaming ? "streaming" : ""} ${highlighted ? "search-target" : ""} ${selected ? "selected" : ""}`}
+        data-message-id={source.id}
+        tabIndex={-1}
+        selectable={!source.streaming}
+        selectionActive={selectionActive}
+        selected={selected}
+        onEnterSelection={() => onEnterSelection(source.id)}
+        onToggleSelection={() => onToggleSelection(source.id)}
+      >
+        <SwipeToReply
+          disabled={!canReply || selectionActive}
+          onReply={() => onReplyToMessage(source)}
+        >
+          <ChatMessageView
+            message={message}
+            onCopyToolDetail={copyToolDetail}
+            leadingContent={source.reply ? (
+              <MessageReplyReference
+                reply={source.reply}
+                unavailable={replySourceUnavailable}
+                onNavigate={() => onNavigateToReply(source.id, source.reply!)}
+              />
+            ) : undefined}
+            attachmentContent={<MobileMessageAttachments attachments={source.attachments} />}
+            processStartContent={pluginTurn ? (
+              <MobilePluginSlot
+                name="turn.before_reasoning"
+                sessionId={source.sessionId}
+                messageId={message.id}
+                turnId={pluginTurnId(message)}
+              />
+            ) : undefined}
+            beforeProcessBlock={(block) => pluginTurn && block.kind === "tool" ? (
+              <MobilePluginSlot
+                name="turn.before_tool"
+                sessionId={source.sessionId}
+                messageId={message.id}
+                turnId={pluginTurnId(message)}
+                block={block}
+              />
+            ) : null}
+            answerEndContent={pluginTurn ? (
+              <MobilePluginSlot
+                name="turn.after_answer"
+                sessionId={source.sessionId}
+                messageId={message.id}
+                turnId={pluginTurnId(message)}
+              />
+            ) : undefined}
+          />
+          <MessageMeta
+            source={source}
+            copied={copied}
+            canReply={canReply}
+            onCopy={() => onCopyMessage(source)}
+            onReply={() => onReplyToMessage(source)}
+            deliveryActionBusy={deliveryActionBusy}
+            onDeliveryAction={() => onRetryMessageDelivery(source.id)}
+          />
+        </SwipeToReply>
+      </MessageSelectionTarget>
+    </>
+  );
+});
 
 function copyToolDetail(text: string) {
   window.AkashicNative?.copyText(text);
