@@ -59,7 +59,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -766,7 +765,6 @@ private class MobileSnapshotPump(
     init {
         scope.launch {
             for (first in states) {
-                delay(16)
                 var latest = first
                 while (true) {
                     latest = states.tryReceive().getOrNull() ?: break
