@@ -1110,6 +1110,14 @@ button {
   gap: 12px;
 }
 
+.mobile-plugin-slot[data-slot="turn.before_reasoning"],
+.mobile-plugin-slot[data-slot="turn.before_tool"] {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  margin-inline-start: 30px;
+}
+
 .process-item {
   position: relative;
   display: grid;
