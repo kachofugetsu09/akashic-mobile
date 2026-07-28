@@ -46,6 +46,25 @@ test("dashboard back stack returns to directory then chat without losing plugin 
   assert.deepEqual(readMobileSurfaceHistoryState(history.back()), { kind: "chat" });
 });
 
+test("runtime detail returns to expanded runtime directory then chat", () => {
+  const history = new FakeHistory();
+  replaceMobileSurface(history, { kind: "chat" });
+  pushMobileSurface(history, { kind: "runtime" });
+  pushMobileSurface(history, {
+    kind: "runtime-detail",
+    detailKind: "document",
+    key: "memory",
+  });
+
+  assert.deepEqual(readMobileSurfaceHistoryState(history.entries[history.index]), {
+    kind: "runtime-detail",
+    detailKind: "document",
+    key: "memory",
+  });
+  assert.deepEqual(readMobileSurfaceHistoryState(history.back()), { kind: "runtime" });
+  assert.deepEqual(readMobileSurfaceHistoryState(history.back()), { kind: "chat" });
+});
+
 test("foreign or malformed history state returns to chat", () => {
   assert.deepEqual(readMobileSurfaceHistoryState(null), { kind: "chat" });
   assert.deepEqual(

@@ -1,6 +1,8 @@
 export type MobileSurface =
   | { kind: "chat" }
   | { kind: "plugins" }
+  | { kind: "runtime" }
+  | { kind: "runtime-detail"; detailKind: "document" | "mcp" | "schedule"; key: string }
   | { kind: "dashboard"; pluginId: string };
 
 interface MobileSurfaceHistoryState {
@@ -21,7 +23,16 @@ export function readMobileSurfaceHistoryState(value: unknown): MobileSurface {
   if (!value || typeof value !== "object") return { kind: "chat" };
   const state = value as Partial<MobileSurfaceHistoryState>;
   if (state.akashicMobileSurface !== true || !state.surface) return { kind: "chat" };
-  if (state.surface.kind === "chat" || state.surface.kind === "plugins") return state.surface;
+  if (
+    state.surface.kind === "chat" ||
+    state.surface.kind === "plugins" ||
+    state.surface.kind === "runtime"
+  ) return state.surface;
+  if (
+    state.surface.kind === "runtime-detail" &&
+    ["document", "mcp", "schedule"].includes(state.surface.detailKind) &&
+    state.surface.key.trim()
+  ) return state.surface;
   if (state.surface.kind === "dashboard" && state.surface.pluginId.trim()) return state.surface;
   return { kind: "chat" };
 }

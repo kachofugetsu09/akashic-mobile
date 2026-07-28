@@ -322,6 +322,9 @@ class RealtimeSession(
         pluginUiResultStore,
         ::sendPluginUiCommand,
     )
+    val runtimeInspection = RuntimeInspectionCoordinator(
+        ::sendRuntimeInspectionCommand,
+    )
     private val started = AtomicBoolean(false)
     private var meteredLargeTransferApproved = false
     private var profile: ServerProfileEntity? = null
@@ -731,6 +734,46 @@ class RealtimeSession(
             replyToMessageId = null,
             targetSessionId = null,
         )
+    }
+
+    fun refreshRuntimeInspection() {
+        scope.launch {
+            mutex.withLock {
+                runtimeInspection.refresh()
+            }
+        }
+    }
+
+    fun openRuntimeDocument(documentId: String) {
+        scope.launch {
+            mutex.withLock {
+                runtimeInspection.openDocument(documentId)
+            }
+        }
+    }
+
+    fun openRuntimeMcp(ownerId: String, serverName: String) {
+        scope.launch {
+            mutex.withLock {
+                runtimeInspection.openMcp(ownerId, serverName)
+            }
+        }
+    }
+
+    fun openRuntimeJob(jobId: String) {
+        scope.launch {
+            mutex.withLock {
+                runtimeInspection.openJob(jobId)
+            }
+        }
+    }
+
+    fun clearRuntimeInspectionDetail() {
+        scope.launch {
+            mutex.withLock {
+                runtimeInspection.clearDetail()
+            }
+        }
     }
 
     /** 从 Web UI 发起一个绑定 owner、槽位、会话和轮次的插件查询。 */
@@ -1500,6 +1543,7 @@ class RealtimeSession(
                 }
                 if (uploads.onReply(envelope)) return
                 if (pluginUi.onReply(envelope)) return
+                if (runtimeInspection.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
                 if (envelope.type == "command.list.ok") {
                     applyCommandListReply(envelope)
@@ -1651,6 +1695,31 @@ class RealtimeSession(
         return commandId
     }
 
+    private fun sendRuntimeInspectionCommand(
+        type: String,
+        payload: kotlinx.serialization.json.JsonObject,
+    ): String? {
+        val epoch = activeEpoch ?: return null
+        val candidate = activeCandidate ?: return null
+        val commandId = Ulid.next()
+        val sent = socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = type,
+                id = commandId,
+                connectionEpoch = epoch,
+                payload = payload,
+            ),
+        )
+        if (!sent) {
+            scheduleReconnect("运行时检查命令未进入 WebSocket 队列: $type")
+            return null
+        }
+        return commandId
+    }
+
     private fun hasPendingSyncCommand(type: String): Boolean =
         pendingSyncCommands.values.any { it.generation == syncGeneration && it.type == type }
 
@@ -1766,6 +1835,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         pendingCommandListId = null
         pluginUi.onDisconnected("服务端要求重新同步")
+        runtimeInspection.onDisconnected()
         requestedHistoryPages.clear()
         mutableState.value = mutableState.value.copy(
             projectionGeneration = mutableState.value.projectionGeneration + 1,
@@ -1791,6 +1861,7 @@ class RealtimeSession(
         cancelPhaseDeadline()
         requestCommandList()
         pluginUi.onConnectionReady(currentProfile.serverId)
+        runtimeInspection.onConnectionReady(currentProfile.serverId)
         uploads.onConnectionReady(currentProfile.serverId)
         downloads.onConnectionReady(currentProfile.serverId)
         stops.onConnectionReady()
@@ -2079,6 +2150,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         pendingCommandListId = null
         pluginUi.onDisconnected("连接已中断")
+        runtimeInspection.onDisconnected()
         requestedHistoryPages.clear()
         resetRebuildGeneration = null
         retryCount += 1
@@ -2117,6 +2189,7 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         pendingCommandListId = null
         pluginUi.onDisconnected("协议不兼容")
+        runtimeInspection.onDisconnected()
         requestedHistoryPages.clear()
         resetRebuildGeneration = null
 
@@ -2192,6 +2265,7 @@ class RealtimeSession(
         activeOutboxCommandId = null
         pendingCommandListId = null
         pluginUi.onDisconnected("连接已重置")
+        runtimeInspection.onDisconnected()
     }
 
     private fun publishTurnState() {

@@ -112,6 +112,11 @@ fun MobileWebChat(
     onDismissError: () -> Unit,
     onSend: (String, String, String?, List<String>, Long, (Boolean) -> Unit) -> Unit,
     onSendCommand: (String) -> Unit,
+    onRefreshRuntimeInspection: () -> Unit,
+    onOpenRuntimeDocument: (String) -> Unit,
+    onOpenRuntimeMcp: (String, String) -> Unit,
+    onOpenRuntimeJob: (String) -> Unit,
+    onClearRuntimeInspectionDetail: () -> Unit,
     onPluginUiQuery: (String, String, String, String?, String?, String, String, String, String) -> Unit,
     onPluginUiOwnerCancelled: (String) -> Unit,
     onPluginUiWebViewDisposed: () -> Unit,
@@ -158,6 +163,11 @@ fun MobileWebChat(
             onDismissError = onDismissError,
             onSend = onSend,
             onSendCommand = onSendCommand,
+            onRefreshRuntimeInspection = onRefreshRuntimeInspection,
+            onOpenRuntimeDocument = onOpenRuntimeDocument,
+            onOpenRuntimeMcp = onOpenRuntimeMcp,
+            onOpenRuntimeJob = onOpenRuntimeJob,
+            onClearRuntimeInspectionDetail = onClearRuntimeInspectionDetail,
             onPluginUiQuery = onPluginUiQuery,
             onPluginUiOwnerCancelled = onPluginUiOwnerCancelled,
             onStop = onStop,
@@ -367,6 +377,11 @@ private data class MobileWebCallbacks(
     val onDismissError: () -> Unit,
     val onSend: (String, String, String?, List<String>, Long, (Boolean) -> Unit) -> Unit,
     val onSendCommand: (String) -> Unit,
+    val onRefreshRuntimeInspection: () -> Unit,
+    val onOpenRuntimeDocument: (String) -> Unit,
+    val onOpenRuntimeMcp: (String, String) -> Unit,
+    val onOpenRuntimeJob: (String) -> Unit,
+    val onClearRuntimeInspectionDetail: () -> Unit,
     val onPluginUiQuery: (String, String, String, String?, String?, String, String, String, String) -> Unit,
     val onPluginUiOwnerCancelled: (String) -> Unit,
     val onStop: () -> Unit,
@@ -547,6 +562,29 @@ private class MobileWebBridge(
 
     @JavascriptInterface
     fun sendCommand(command: String) = dispatch { it.onSendCommand(command) }
+
+    @JavascriptInterface
+    fun refreshRuntimeInspection() = dispatch { it.onRefreshRuntimeInspection() }
+
+    @JavascriptInterface
+    fun openRuntimeDocument(documentId: String) = dispatch {
+        it.onOpenRuntimeDocument(documentId)
+    }
+
+    @JavascriptInterface
+    fun openRuntimeMcp(ownerId: String, serverName: String) = dispatch {
+        it.onOpenRuntimeMcp(ownerId, serverName)
+    }
+
+    @JavascriptInterface
+    fun openRuntimeJob(jobId: String) = dispatch {
+        it.onOpenRuntimeJob(jobId)
+    }
+
+    @JavascriptInterface
+    fun clearRuntimeInspectionDetail() = dispatch {
+        it.onClearRuntimeInspectionDetail()
+    }
 
     @JavascriptInterface
     fun queryPluginUi(

@@ -19,6 +19,7 @@ import com.akashic.mobile.ui.conversation.ReadingPositionUi
 import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.SessionUi
 import com.akashic.mobile.ui.conversation.TransferStatusUi
+import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -34,6 +35,7 @@ data class MobileWebSnapshot(
     val projectionGeneration: Long,
     val messages: List<MobileWebMessage>,
     val composer: MobileWebComposer,
+    val runtimeInspection: MobileWebRuntimeInspection,
 )
 
 @Serializable
@@ -175,6 +177,55 @@ data class MobileWebCommand(
 )
 
 @Serializable
+data class MobileWebRuntimeInspection(
+    val refreshing: Boolean,
+    val detailLoading: Boolean,
+    val snapshotId: String?,
+    val documents: List<MobileWebRuntimeDocument>,
+    val jobs: List<MobileWebRuntimeJob>,
+    val mcpServers: List<MobileWebRuntimeMcp>,
+    val pluginCount: Int,
+    val skillCount: Int,
+    val detail: MobileWebRuntimeDetail?,
+    val errorMessage: String?,
+)
+
+@Serializable
+data class MobileWebRuntimeDocument(
+    val id: String,
+    val title: String,
+    val relativePath: String,
+    val description: String,
+    val available: Boolean,
+)
+
+@Serializable
+data class MobileWebRuntimeJob(
+    val id: String,
+    val name: String?,
+    val trigger: String,
+    val tier: String,
+    val fireAt: String,
+    val enabled: Boolean,
+)
+
+@Serializable
+data class MobileWebRuntimeMcp(
+    val ownerId: String,
+    val name: String,
+    val toolCount: Int,
+)
+
+@Serializable
+data class MobileWebRuntimeDetail(
+    val kind: String,
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val markdown: String,
+)
+
+@Serializable
 data class MobileWebComposer(
     val draft: MobileWebComposerDraft,
     val attachments: List<MobileWebAttachment>,
@@ -206,7 +257,7 @@ data class MobileWebTransferStatus(
 
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 6,
+    protocolVersion = 7,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -236,7 +287,49 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
         canStop = canStop,
         canSend = canSend,
     ),
+    runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
 )
+
+private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
+    MobileWebRuntimeInspection(
+        refreshing = refreshing,
+        detailLoading = detailLoading,
+        snapshotId = snapshotId,
+        documents = documents.map {
+            MobileWebRuntimeDocument(
+                it.id,
+                it.title,
+                it.relativePath,
+                it.description,
+                it.available,
+            )
+        },
+        jobs = jobs.map {
+            MobileWebRuntimeJob(
+                it.id,
+                it.name,
+                it.trigger,
+                it.tier,
+                it.fireAt,
+                it.enabled,
+            )
+        },
+        mcpServers = mcpServers.map {
+            MobileWebRuntimeMcp(it.ownerId, it.name, it.toolCount)
+        },
+        pluginCount = pluginCount,
+        skillCount = skillCount,
+        detail = detail?.let {
+            MobileWebRuntimeDetail(
+                it.kind,
+                it.key,
+                it.title,
+                it.subtitle,
+                it.markdown,
+            )
+        },
+        errorMessage = errorMessage,
+    )
 
 /** 只为同一 streaming 消息的追加内容生成轻量 WebView patch。 */
 fun ConversationUiState.toMobileWebStreamPatch(

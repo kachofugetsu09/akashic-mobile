@@ -1,0 +1,1544 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Akashic 运行资料入口 · 三个设计方向</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Roboto, "Noto Sans SC", system-ui, sans-serif;
+      font-synthesis: none;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      --page: oklch(0.965 0.009 90);
+      --page-ink: oklch(0.245 0.018 265);
+      --page-muted: oklch(0.49 0.025 265);
+      --page-line: oklch(0.86 0.014 265);
+      --page-card: oklch(0.99 0.004 90);
+      --shape-xs: 8px;
+      --shape-sm: 12px;
+      --shape-md: 16px;
+      --shape-lg: 24px;
+      --shape-xl: 32px;
+      --shape-full: 9999px;
+      --motion: cubic-bezier(0.2, 0, 0, 1);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-width: 320px;
+      background: var(--page);
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      color: var(--page-ink);
+      background:
+        radial-gradient(circle at 8% 0%, oklch(0.89 0.055 85 / 0.55), transparent 28rem),
+        radial-gradient(circle at 92% 8%, oklch(0.9 0.05 175 / 0.48), transparent 30rem),
+        var(--page);
+    }
+
+    button {
+      border: 0;
+      color: inherit;
+      font: inherit;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
+    button:focus-visible {
+      outline: 3px solid oklch(0.58 0.18 255 / 0.62);
+      outline-offset: 3px;
+    }
+
+    svg {
+      display: block;
+      width: 1.25rem;
+      height: 1.25rem;
+      fill: none;
+      stroke: currentColor;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-width: 1.8;
+    }
+
+    ::selection {
+      color: oklch(0.22 0.04 175);
+      background: oklch(0.88 0.075 175);
+    }
+
+    .page {
+      width: min(100%, 1480px);
+      margin-inline: auto;
+      padding: 40px 28px 56px;
+    }
+
+    .page-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: end;
+      gap: 24px;
+      margin-bottom: 28px;
+    }
+
+    .eyebrow {
+      margin: 0 0 10px;
+      color: oklch(0.45 0.075 175);
+      font-size: 0.75rem;
+      font-weight: 720;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 18ch;
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.5rem);
+      font-weight: 680;
+      letter-spacing: -0.035em;
+      line-height: 1.04;
+      text-wrap: balance;
+    }
+
+    .page-intro {
+      max-width: 64ch;
+      margin: 14px 0 0;
+      color: var(--page-muted);
+      font-size: 1rem;
+      line-height: 1.6;
+      text-wrap: pretty;
+    }
+
+    .instructions {
+      max-width: 19rem;
+      padding: 14px 16px;
+      border-radius: var(--shape-md);
+      color: oklch(0.31 0.035 265);
+      background: oklch(0.995 0.002 90 / 0.82);
+      box-shadow:
+        0 0 0 1px oklch(0 0 0 / 0.055),
+        0 8px 24px oklch(0.25 0.02 265 / 0.08);
+      font-size: 0.875rem;
+      line-height: 1.5;
+    }
+
+    .instructions strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--page-ink);
+      font-size: 0.9375rem;
+    }
+
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 20px;
+      align-items: start;
+    }
+
+    .concept {
+      min-width: 0;
+      padding: 16px;
+      border-radius: var(--shape-xl);
+      background: oklch(0.995 0.002 90 / 0.7);
+      box-shadow:
+        0 0 0 1px oklch(0 0 0 / 0.055),
+        0 2px 4px oklch(0 0 0 / 0.025),
+        0 18px 44px oklch(0.28 0.025 265 / 0.08);
+    }
+
+    .concept-heading {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      gap: 12px;
+      min-height: 86px;
+      padding: 2px 4px 16px;
+    }
+
+    .option-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 14px;
+      color: oklch(0.98 0.01 90);
+      background: var(--concept-mark);
+      font-size: 1rem;
+      font-weight: 760;
+    }
+
+    .concept-heading h2 {
+      margin: 1px 0 4px;
+      font-size: 1.125rem;
+      font-weight: 690;
+      line-height: 1.2;
+    }
+
+    .concept-heading p {
+      margin: 0;
+      color: var(--page-muted);
+      font-size: 0.8125rem;
+      line-height: 1.45;
+      text-wrap: pretty;
+    }
+
+    .phone {
+      position: relative;
+      width: 100%;
+      height: min(720px, 73vh);
+      min-height: 640px;
+      overflow: hidden;
+      border-radius: 30px;
+      color: var(--on-surface);
+      background: var(--surface);
+      box-shadow:
+        0 0 0 1px oklch(0 0 0 / 0.13),
+        0 2px 5px oklch(0 0 0 / 0.1),
+        0 16px 34px oklch(0 0 0 / 0.12);
+      isolation: isolate;
+    }
+
+    .phone::before {
+      position: absolute;
+      inset: 8px auto auto 50%;
+      z-index: 20;
+      width: 84px;
+      height: 24px;
+      border-radius: var(--shape-full);
+      background: oklch(0.16 0.01 265);
+      content: "";
+      transform: translateX(-50%);
+    }
+
+    .phone-screen {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      background: var(--surface);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(18px);
+      transition-property: opacity, transform;
+      transition-duration: 260ms;
+      transition-timing-function: var(--motion);
+    }
+
+    .phone[data-screen="drawer"] .drawer-screen,
+    .phone[data-screen="library"] .library-screen {
+      z-index: 2;
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+
+    .status-bar {
+      display: flex;
+      height: 44px;
+      flex: 0 0 auto;
+      align-items: end;
+      justify-content: space-between;
+      padding: 0 20px 6px;
+      color: var(--on-surface);
+      font-size: 0.6875rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .status-icons {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .status-icons i {
+      display: block;
+      width: 13px;
+      height: 7px;
+      border: 1.5px solid currentColor;
+      border-radius: 2px;
+    }
+
+    .drawer-body {
+      display: flex;
+      min-height: 0;
+      flex: 1;
+      flex-direction: column;
+      padding: 24px 12px 18px;
+    }
+
+    .runtime-entry {
+      display: grid;
+      width: 100%;
+      min-height: 60px;
+      grid-template-columns: 36px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 22px;
+      border-radius: var(--shape-full);
+      padding: 8px 16px 8px 10px;
+      color: var(--entry-on);
+      background: var(--entry);
+      text-align: start;
+      box-shadow: 0 7px 18px color-mix(in oklch, var(--entry) 24%, transparent);
+      transition-property: scale, filter;
+      transition-duration: 150ms;
+      transition-timing-function: var(--motion);
+    }
+
+    .runtime-entry:hover {
+      filter: brightness(0.96);
+    }
+
+    .runtime-entry:active,
+    .tap:active {
+      scale: 0.96;
+    }
+
+    .entry-icon {
+      display: grid;
+      width: 36px;
+      height: 36px;
+      place-items: center;
+      border-radius: var(--shape-full);
+      background: color-mix(in oklch, var(--entry-on) 14%, transparent);
+    }
+
+    .entry-copy {
+      display: grid;
+      min-width: 0;
+      gap: 1px;
+    }
+
+    .entry-copy strong {
+      font-size: 0.9375rem;
+      font-weight: 720;
+      line-height: 1.25;
+    }
+
+    .entry-copy small {
+      overflow: hidden;
+      font-size: 0.6875rem;
+      line-height: 1.25;
+      opacity: 0.76;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .drawer-title {
+      margin: 0 14px 8px;
+      color: var(--on-surface-variant);
+      font-size: 0.8125rem;
+      font-weight: 680;
+      letter-spacing: 0.015em;
+    }
+
+    .session-list {
+      display: grid;
+      gap: 2px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .session {
+      display: grid;
+      min-height: 64px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 8px;
+      border-radius: var(--shape-md);
+      padding: 8px 12px 8px 14px;
+    }
+
+    .session.active {
+      color: var(--on-primary-container);
+      background: var(--primary-container);
+    }
+
+    .session-copy {
+      display: grid;
+      min-width: 0;
+      gap: 4px;
+    }
+
+    .session-copy strong,
+    .session-copy small {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .session-copy strong {
+      font-size: 0.875rem;
+      font-weight: 620;
+    }
+
+    .session-copy small,
+    .session time {
+      color: var(--on-surface-variant);
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .session.active small,
+    .session.active time {
+      color: var(--on-primary-container);
+      opacity: 0.72;
+    }
+
+    .new-chat {
+      display: inline-flex;
+      min-height: 48px;
+      align-items: center;
+      align-self: start;
+      gap: 9px;
+      margin-top: auto;
+      border-radius: var(--shape-full);
+      padding: 0 18px;
+      color: var(--on-primary-container);
+      background: var(--primary-container);
+      font-size: 0.875rem;
+      font-weight: 680;
+      transition-property: scale, background-color;
+      transition-duration: 150ms;
+      transition-timing-function: var(--motion);
+    }
+
+    .top-bar {
+      display: grid;
+      min-height: 60px;
+      flex: 0 0 auto;
+      grid-template-columns: 48px minmax(0, 1fr) 48px;
+      align-items: center;
+      padding: 0 6px;
+      background: var(--surface);
+    }
+
+    .icon-button {
+      display: grid;
+      width: 48px;
+      height: 48px;
+      place-items: center;
+      border-radius: var(--shape-full);
+      color: var(--on-surface);
+      background: transparent;
+      transition-property: scale, background-color;
+      transition-duration: 150ms;
+      transition-timing-function: var(--motion);
+    }
+
+    .icon-button:hover {
+      background: var(--surface-container);
+    }
+
+    .top-title {
+      min-width: 0;
+      text-align: center;
+    }
+
+    .top-title strong {
+      display: block;
+      overflow: hidden;
+      font-size: 1rem;
+      font-weight: 690;
+      line-height: 1.25;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .top-title small {
+      display: block;
+      margin-top: 1px;
+      color: var(--on-surface-variant);
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .library-scroll {
+      min-height: 0;
+      flex: 1;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      scrollbar-width: none;
+    }
+
+    .library-scroll::-webkit-scrollbar {
+      display: none;
+    }
+
+    .library-content {
+      display: grid;
+      gap: 18px;
+      padding: 12px 14px 28px;
+    }
+
+    .library-hero {
+      display: grid;
+      gap: 8px;
+      padding: 6px 4px 2px;
+    }
+
+    .library-hero h3 {
+      max-width: 18ch;
+      margin: 0;
+      font-size: 1.5rem;
+      font-weight: 690;
+      letter-spacing: -0.025em;
+      line-height: 1.1;
+      text-wrap: balance;
+    }
+
+    .library-hero p {
+      max-width: 35ch;
+      margin: 0;
+      color: var(--on-surface-variant);
+      font-size: 0.8125rem;
+      line-height: 1.5;
+      text-wrap: pretty;
+    }
+
+    .section {
+      display: grid;
+      gap: 8px;
+    }
+
+    .section-heading {
+      display: grid;
+      grid-template-columns: 34px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      padding: 0 4px;
+    }
+
+    .semantic-icon {
+      display: grid;
+      width: 34px;
+      height: 34px;
+      place-items: center;
+      border-radius: 11px;
+      color: var(--semantic-on);
+      background: var(--semantic);
+    }
+
+    .semantic-icon svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    .section-heading h4 {
+      margin: 0;
+      font-size: 0.9375rem;
+      font-weight: 690;
+      line-height: 1.2;
+    }
+
+    .section-heading small {
+      display: block;
+      margin-top: 2px;
+      color: var(--on-surface-variant);
+      font-size: 0.6875rem;
+      line-height: 1.25;
+    }
+
+    .count {
+      color: var(--on-surface-variant);
+      font-size: 0.75rem;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .item-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .item {
+      display: grid;
+      width: 100%;
+      min-height: 58px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      border-radius: var(--shape-md);
+      padding: 10px 12px 10px 14px;
+      color: var(--on-surface);
+      background: var(--surface-container-low);
+      text-align: start;
+      transition-property: scale, background-color;
+      transition-duration: 150ms;
+      transition-timing-function: var(--motion);
+    }
+
+    .item:hover {
+      background: var(--surface-container);
+    }
+
+    .item-copy {
+      display: grid;
+      min-width: 0;
+      gap: 3px;
+    }
+
+    .item-copy strong {
+      overflow: hidden;
+      font-size: 0.8125rem;
+      font-weight: 660;
+      line-height: 1.3;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .item-copy small {
+      overflow: hidden;
+      color: var(--on-surface-variant);
+      font-size: 0.6875rem;
+      line-height: 1.35;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .item-trailing {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--on-surface-variant);
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .item-trailing svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: var(--shape-full);
+      background: var(--status-ok);
+    }
+
+    .bottom-sheet {
+      position: absolute;
+      inset: 0;
+      z-index: 8;
+      display: grid;
+      align-items: end;
+      visibility: hidden;
+      background: oklch(0.12 0.015 265 / 0);
+      pointer-events: none;
+      transition-property: visibility, background-color;
+      transition-duration: 220ms;
+      transition-timing-function: var(--motion);
+    }
+
+    .bottom-sheet.open {
+      visibility: visible;
+      background: oklch(0.12 0.015 265 / 0.48);
+      pointer-events: auto;
+    }
+
+    .sheet-panel {
+      display: grid;
+      max-height: 72%;
+      gap: 14px;
+      padding: 12px 18px 24px;
+      border-radius: 28px 28px 0 0;
+      color: var(--on-surface);
+      background: var(--surface-container-high);
+      transform: translateY(104%);
+      transition-property: transform;
+      transition-duration: 300ms;
+      transition-timing-function: cubic-bezier(0.05, 0.7, 0.1, 1);
+    }
+
+    .bottom-sheet.open .sheet-panel {
+      transform: translateY(0);
+    }
+
+    .sheet-handle {
+      width: 32px;
+      height: 4px;
+      margin-inline: auto;
+      border-radius: var(--shape-full);
+      background: var(--outline);
+    }
+
+    .sheet-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 44px;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .sheet-head h5 {
+      margin: 0;
+      font-size: 1.0625rem;
+      font-weight: 690;
+      line-height: 1.2;
+    }
+
+    .sheet-head small {
+      display: block;
+      margin-top: 4px;
+      color: var(--on-surface-variant);
+      font-size: 0.6875rem;
+    }
+
+    .sheet-body {
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      border-radius: var(--shape-md);
+      color: var(--on-surface);
+      background: var(--surface);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.75rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .markdown-body {
+      max-width: 65ch;
+      font-family: inherit;
+      font-size: 0.8125rem;
+      line-height: 1.6;
+      overflow-wrap: break-word;
+      user-select: text;
+      white-space: normal;
+    }
+
+    .markdown-body > :first-child {
+      margin-top: 0;
+    }
+
+    .markdown-body > :last-child {
+      margin-bottom: 0;
+    }
+
+    .markdown-body h1,
+    .markdown-body h2,
+    .markdown-body h3 {
+      color: var(--on-surface);
+      line-height: 1.15;
+      text-wrap: balance;
+    }
+
+    .markdown-body h1 {
+      margin: 0 0 14px;
+      font-size: 1.25rem;
+      font-weight: 720;
+      letter-spacing: -0.02em;
+    }
+
+    .markdown-body h2 {
+      margin: 20px 0 8px;
+      font-size: 1rem;
+      font-weight: 690;
+    }
+
+    .markdown-body h3 {
+      margin: 16px 0 6px;
+      font-size: 0.875rem;
+      font-weight: 680;
+    }
+
+    .markdown-body p {
+      margin: 0 0 12px;
+      color: var(--on-surface-variant);
+    }
+
+    .markdown-body ul {
+      display: grid;
+      gap: 6px;
+      margin: 8px 0 14px;
+      padding-inline-start: 20px;
+    }
+
+    .markdown-body li::marker {
+      color: var(--entry);
+    }
+
+    .markdown-body blockquote {
+      margin: 12px 0;
+      border-inline-start: 3px solid var(--entry);
+      padding: 8px 0 8px 12px;
+      color: var(--on-surface-variant);
+      background: color-mix(in oklch, var(--entry) 7%, transparent);
+    }
+
+    .markdown-body code {
+      border-radius: 6px;
+      padding: 2px 5px;
+      color: var(--on-surface);
+      background: var(--surface-container);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.75rem;
+    }
+
+    .markdown-body pre {
+      margin: 10px 0 14px;
+      overflow-x: auto;
+      border-radius: var(--shape-sm);
+      padding: 12px;
+      color: var(--on-surface);
+      background: var(--surface-container);
+      font-size: 0.75rem;
+      line-height: 1.55;
+      white-space: pre;
+    }
+
+    .markdown-body pre code {
+      padding: 0;
+      background: transparent;
+    }
+
+    .markdown-body strong {
+      color: var(--on-surface);
+      font-weight: 690;
+    }
+
+    /* A · 语义书架 */
+    .concept-a {
+      --concept-mark: oklch(0.48 0.09 170);
+      --surface: oklch(0.975 0.008 90);
+      --surface-container-low: oklch(0.95 0.012 90);
+      --surface-container: oklch(0.925 0.016 90);
+      --surface-container-high: oklch(0.89 0.021 90);
+      --on-surface: oklch(0.25 0.018 255);
+      --on-surface-variant: oklch(0.47 0.03 255);
+      --outline: oklch(0.67 0.025 255);
+      --primary-container: oklch(0.9 0.045 255);
+      --on-primary-container: oklch(0.32 0.095 255);
+      --entry: oklch(0.48 0.09 170);
+      --entry-on: oklch(0.98 0.012 170);
+      --doc: oklch(0.83 0.12 78);
+      --doc-on: oklch(0.31 0.07 60);
+      --mcp: oklch(0.77 0.105 185);
+      --mcp-on: oklch(0.25 0.04 190);
+      --job: oklch(0.78 0.105 325);
+      --job-on: oklch(0.29 0.08 325);
+      --status-ok: oklch(0.57 0.15 150);
+    }
+
+    .concept-a .section-docs { --semantic: var(--doc); --semantic-on: var(--doc-on); }
+    .concept-a .section-mcp { --semantic: var(--mcp); --semantic-on: var(--mcp-on); }
+    .concept-a .section-jobs { --semantic: var(--job); --semantic-on: var(--job-on); }
+
+    /* B · 彩色分区 */
+    .concept-b {
+      --concept-mark: oklch(0.52 0.065 205);
+      --surface: oklch(0.985 0.006 65);
+      --surface-container-low: oklch(0.955 0.012 65);
+      --surface-container: oklch(0.925 0.018 65);
+      --surface-container-high: oklch(0.89 0.022 65);
+      --on-surface: oklch(0.24 0.024 45);
+      --on-surface-variant: oklch(0.46 0.035 45);
+      --outline: oklch(0.66 0.03 45);
+      --primary-container: oklch(0.9 0.045 35);
+      --on-primary-container: oklch(0.34 0.11 35);
+      --entry: oklch(0.52 0.065 205);
+      --entry-on: oklch(0.98 0.006 205);
+      --doc: oklch(0.87 0.11 88);
+      --doc-on: oklch(0.32 0.065 72);
+      --mcp: oklch(0.79 0.13 155);
+      --mcp-on: oklch(0.26 0.06 155);
+      --job: oklch(0.79 0.1 275);
+      --job-on: oklch(0.28 0.09 275);
+      --status-ok: oklch(0.55 0.145 150);
+    }
+
+    .concept-b .library-content {
+      gap: 12px;
+    }
+
+    .concept-b .section {
+      gap: 10px;
+      border-radius: 22px;
+      padding: 14px;
+      color: var(--semantic-on);
+      background: var(--semantic);
+    }
+
+    .concept-b .section-docs { --semantic: var(--doc); --semantic-on: var(--doc-on); }
+    .concept-b .section-mcp { --semantic: var(--mcp); --semantic-on: var(--mcp-on); }
+    .concept-b .section-jobs { --semantic: var(--job); --semantic-on: var(--job-on); }
+
+    .concept-b .semantic-icon {
+      background: color-mix(in oklch, var(--semantic-on) 11%, transparent);
+    }
+
+    .concept-b .section-heading small,
+    .concept-b .section .count {
+      color: var(--semantic-on);
+      opacity: 0.72;
+    }
+
+    .concept-b .item {
+      color: var(--semantic-on);
+      background: color-mix(in oklch, var(--surface) 72%, transparent);
+    }
+
+    .concept-b .item:hover {
+      background: color-mix(in oklch, var(--surface) 84%, transparent);
+    }
+
+    .concept-b .item-copy small,
+    .concept-b .item-trailing {
+      color: var(--semantic-on);
+      opacity: 0.7;
+    }
+
+    /* C · 运行脉搏 */
+    .concept-c {
+      --concept-mark: oklch(0.68 0.105 205);
+      --surface: oklch(0.19 0.025 255);
+      --surface-container-low: oklch(0.235 0.03 255);
+      --surface-container: oklch(0.27 0.035 255);
+      --surface-container-high: oklch(0.31 0.04 255);
+      --on-surface: oklch(0.94 0.015 255);
+      --on-surface-variant: oklch(0.76 0.03 255);
+      --outline: oklch(0.54 0.035 255);
+      --primary-container: oklch(0.34 0.06 225);
+      --on-primary-container: oklch(0.9 0.05 220);
+      --entry: oklch(0.72 0.12 205);
+      --entry-on: oklch(0.2 0.03 205);
+      --doc: oklch(0.72 0.14 230);
+      --doc-on: oklch(0.18 0.032 230);
+      --mcp: oklch(0.74 0.16 150);
+      --mcp-on: oklch(0.18 0.045 150);
+      --job: oklch(0.8 0.135 80);
+      --job-on: oklch(0.24 0.048 70);
+      --status-ok: oklch(0.74 0.17 150);
+    }
+
+    .concept-c .phone {
+      box-shadow:
+        0 0 0 1px oklch(1 0 0 / 0.12),
+        0 2px 5px oklch(0 0 0 / 0.25),
+        0 20px 40px oklch(0 0 0 / 0.24);
+    }
+
+    .concept-c .section-docs { --semantic: var(--doc); --semantic-on: var(--doc-on); }
+    .concept-c .section-mcp { --semantic: var(--mcp); --semantic-on: var(--mcp-on); }
+    .concept-c .section-jobs { --semantic: var(--job); --semantic-on: var(--job-on); }
+
+    .concept-c .library-hero {
+      position: relative;
+      overflow: hidden;
+      border-radius: 22px;
+      padding: 18px;
+      background: var(--surface-container-low);
+    }
+
+    .concept-c .library-hero::after {
+      position: absolute;
+      inset: auto -20px -42px auto;
+      width: 110px;
+      height: 110px;
+      border: 15px solid oklch(0.72 0.12 205 / 0.16);
+      border-radius: var(--shape-full);
+      content: "";
+    }
+
+    .concept-c .item {
+      background: var(--surface-container-low);
+      box-shadow: inset 3px 0 0 var(--semantic);
+    }
+
+    .concept-c .semantic-icon {
+      box-shadow: 0 0 18px color-mix(in oklch, var(--semantic) 32%, transparent);
+    }
+
+    .concept-c .sheet-body {
+      background: var(--surface-container-low);
+    }
+
+    @media (max-width: 1050px) {
+      .gallery {
+        grid-template-columns: minmax(0, 1fr);
+        width: min(100%, 460px);
+        margin-inline: auto;
+      }
+
+      .phone {
+        height: 720px;
+      }
+
+      .page-header {
+        grid-template-columns: 1fr;
+      }
+
+      .instructions {
+        max-width: 38rem;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .page {
+        padding: 28px 12px 40px;
+      }
+
+      .concept {
+        padding: 10px;
+        border-radius: 26px;
+      }
+
+      .phone {
+        height: 690px;
+        min-height: 620px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" width="0" height="0" style="position:absolute">
+    <defs>
+      <symbol id="icon-library" viewBox="0 0 24 24">
+        <path d="M4 19.5V5.8A1.8 1.8 0 0 1 5.8 4H9v15.5H5.8A1.8 1.8 0 0 0 4 21.3"/>
+        <path d="M20 19.5V5.8A1.8 1.8 0 0 0 18.2 4H15v15.5h3.2a1.8 1.8 0 0 1 1.8 1.8M9 6h6M9 18h6"/>
+      </symbol>
+      <symbol id="icon-file" viewBox="0 0 24 24">
+        <path d="M6 3h8l4 4v14H6zM14 3v5h4M9 12h6M9 16h6"/>
+      </symbol>
+      <symbol id="icon-plug" viewBox="0 0 24 24">
+        <path d="m8 12 8-8M14 4l6 6M6.5 9.5l8 8M4 14l6 6M10 16l-3 3a2.8 2.8 0 0 1-4-4l3-3M14 8l3-3"/>
+      </symbol>
+      <symbol id="icon-clock" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9"/>
+        <path d="M12 7v5l3.5 2"/>
+      </symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24">
+        <path d="m9 18 6-6-6-6"/>
+      </symbol>
+      <symbol id="icon-back" viewBox="0 0 24 24">
+        <path d="m15 18-6-6 6-6"/>
+      </symbol>
+      <symbol id="icon-more" viewBox="0 0 24 24">
+        <circle cx="5" cy="12" r="1"/>
+        <circle cx="12" cy="12" r="1"/>
+        <circle cx="19" cy="12" r="1"/>
+      </symbol>
+      <symbol id="icon-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14"/>
+      </symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M18 6 6 18"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <main class="page">
+    <header class="page-header">
+      <div>
+        <p class="eyebrow">Material 3 · Runtime library</p>
+        <h1>用颜色说明信息属于哪里</h1>
+        <p class="page-intro">三个方案都把满色胶囊放在“会话”上方。点击胶囊进入运行资料页，再点击任意条目查看详情；差别在于颜色介入信息架构的深度。</p>
+      </div>
+      <aside class="instructions">
+        <strong>可以直接操作</strong>
+        点每台手机顶部胶囊进入总览；点文档、MCP 或任务条目会打开详情底部面板。
+      </aside>
+    </header>
+
+    <section class="gallery" aria-label="三个运行资料页面设计方案">
+      <article class="concept concept-a">
+        <header class="concept-heading">
+          <span class="option-mark">A</span>
+          <div>
+            <h2>语义书架</h2>
+            <p>中性表面承载阅读，颜色只标记类别。最接近当前产品，长期使用最安静。</p>
+          </div>
+        </header>
+        <div class="phone" data-screen="drawer">
+          <section class="phone-screen drawer-screen" aria-label="A 方案抽屉">
+            <div class="status-bar"><span>21:28</span><span class="status-icons">5G <i></i></span></div>
+            <div class="drawer-body">
+              <button class="runtime-entry tap" type="button" data-open-library>
+                <span class="entry-icon"><svg><use href="#icon-library"></use></svg></span>
+                <span class="entry-copy"><strong>运行资料</strong><small>文档 · MCP · 定时任务</small></span>
+                <svg><use href="#icon-chevron"></use></svg>
+              </button>
+              <p class="drawer-title">会话</p>
+              <ul class="session-list">
+                <li class="session active">
+                  <span class="session-copy"><strong>移动端运行资料设计</strong><small>三套方案正在准备</small></span>
+                  <time>现在</time>
+                </li>
+                <li class="session">
+                  <span class="session-copy"><strong>Akasha 记忆审计</strong><small>确认最新召回窗口</small></span>
+                  <time>19:42</time>
+                </li>
+                <li class="session">
+                  <span class="session-copy"><strong>Fitbit 睡眠提醒</strong><small>今晚继续观察</small></span>
+                  <time>昨天</time>
+                </li>
+              </ul>
+              <button class="new-chat tap" type="button"><svg><use href="#icon-plus"></use></svg>新聊天</button>
+            </div>
+          </section>
+          <section class="phone-screen library-screen" aria-label="A 方案运行资料页">
+            <div class="status-bar"><span>21:28</span><span class="status-icons">5G <i></i></span></div>
+            <header class="top-bar">
+              <button class="icon-button tap" type="button" data-back aria-label="返回抽屉"><svg><use href="#icon-back"></use></svg></button>
+              <span class="top-title"><strong>运行资料</strong><small>刚刚同步</small></span>
+              <button class="icon-button tap" type="button" aria-label="更多"><svg><use href="#icon-more"></use></svg></button>
+            </header>
+            <div class="library-scroll">
+              <div class="library-content">
+                <div class="library-hero">
+                  <h3>理解现在正在运行的 Akashic</h3>
+                  <p>只读查看服务端权威文档、已连接能力与自动任务。</p>
+                </div>
+                <section class="section section-docs">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-file"></use></svg></span>
+                    <div><h4>重要文档</h4><small>身份、记忆与运行规则</small></div>
+                    <span class="count">6</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="MEMORY.md" data-meta="长期记忆 · 12.4 KB" data-body="# Memory&#10;&#10;花月哥哥偏好真实调用链与持久化交付。&#10;&#10;更新于 18 分钟前">
+                      <span class="item-copy"><strong>MEMORY.md</strong><small>长期记忆与用户偏好</small></span>
+                      <span class="item-trailing">12.4 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="VEDA.md" data-meta="人格 · 4.8 KB" data-body="# VEDA&#10;&#10;保持好奇、坦率、有判断力，并让失败明确暴露。">
+                      <span class="item-copy"><strong>VEDA.md</strong><small>人格与表达方式</small></span>
+                      <span class="item-trailing">4.8 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="全部 6 个文档" data-meta="受控 allowlist" data-body="MEMORY.md&#10;SELF.md&#10;VEDA.md&#10;PENDING.md&#10;RECENT_CONTEXT.md&#10;PROACTIVE_CONTEXT.md">
+                      <span class="item-copy"><strong>查看全部</strong><small>另外还有 4 个受控文档</small></span>
+                      <span class="item-trailing"><svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+                <section class="section section-mcp">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-plug"></use></svg></span>
+                    <div><h4>MCP 与能力</h4><small>当前真正生效的连接</small></div>
+                    <span class="count">4</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="Fitbit MCP" data-meta="已连接 · 8 个工具" data-body="sleep_summary&#10;heart_rate_series&#10;activity_summary&#10;device_status&#10;以及另外 4 个工具">
+                      <span class="item-copy"><strong>Fitbit MCP</strong><small>健康与睡眠数据</small></span>
+                      <span class="item-trailing"><i class="status-dot"></i>8<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+                <section class="section section-jobs">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-clock"></use></svg></span>
+                    <div><h4>定时任务</h4><small>下一步会自动发生什么</small></div>
+                    <span class="count">3</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="晨间摘要" data-meta="每天 08:00 · Asia/Shanghai" data-body="下一次：明天 08:00&#10;类型：cron&#10;已运行：14 次&#10;状态：启用">
+                      <span class="item-copy"><strong>晨间摘要</strong><small>每天 08:00</small></span>
+                      <span class="item-trailing">10h 32m<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+          <div class="bottom-sheet" aria-hidden="true">
+            <div class="sheet-panel">
+              <span class="sheet-handle"></span>
+              <header class="sheet-head">
+                <div><h5 class="sheet-title">详情</h5><small class="sheet-meta"></small></div>
+                <button class="icon-button tap" type="button" data-close-sheet aria-label="关闭详情"><svg><use href="#icon-close"></use></svg></button>
+              </header>
+              <pre class="sheet-body"></pre>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept concept-b">
+        <header class="concept-heading">
+          <span class="option-mark">B</span>
+          <div>
+            <h2>彩色分区</h2>
+            <p>类别就是页面结构，进入页面一眼定位。最鲜明，也最像一张随身控制面板。</p>
+          </div>
+        </header>
+        <div class="phone" data-screen="drawer">
+          <section class="phone-screen drawer-screen" aria-label="B 方案抽屉">
+            <div class="status-bar"><span>21:28</span><span class="status-icons">5G <i></i></span></div>
+            <div class="drawer-body">
+              <button class="runtime-entry tap" type="button" data-open-library>
+                <span class="entry-icon"><svg><use href="#icon-library"></use></svg></span>
+                <span class="entry-copy"><strong>Akashic 资料库</strong><small>6 文档 · 4 MCP · 3 任务</small></span>
+                <svg><use href="#icon-chevron"></use></svg>
+              </button>
+              <p class="drawer-title">会话</p>
+              <ul class="session-list">
+                <li class="session active">
+                  <span class="session-copy"><strong>移动端运行资料设计</strong><small>颜色表达信息语义</small></span>
+                  <time>现在</time>
+                </li>
+                <li class="session">
+                  <span class="session-copy"><strong>OpenMinis 研究</strong><small>跨端实现经验</small></span>
+                  <time>20:16</time>
+                </li>
+                <li class="session">
+                  <span class="session-copy"><strong>定时任务隔离</strong><small>scheduler session 边界</small></span>
+                  <time>周日</time>
+                </li>
+              </ul>
+              <button class="new-chat tap" type="button"><svg><use href="#icon-plus"></use></svg>新聊天</button>
+            </div>
+          </section>
+          <section class="phone-screen library-screen" aria-label="B 方案运行资料页">
+            <div class="status-bar"><span>21:28</span><span class="status-icons">5G <i></i></span></div>
+            <header class="top-bar">
+              <button class="icon-button tap" type="button" data-back aria-label="返回抽屉"><svg><use href="#icon-back"></use></svg></button>
+              <span class="top-title"><strong>Akashic 资料库</strong><small>13 项可读资料</small></span>
+              <button class="icon-button tap" type="button" aria-label="更多"><svg><use href="#icon-more"></use></svg></button>
+            </header>
+            <div class="library-scroll">
+              <div class="library-content">
+                <div class="library-hero">
+                  <h3>三种颜色，三种运行事实</h3>
+                  <p>琥珀保存文字，绿色连接能力，紫色安排未来。</p>
+                </div>
+                <section class="section section-docs">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-file"></use></svg></span>
+                    <div><h4>文档</h4><small>被保存下来的系统理解</small></div>
+                    <span class="count">6 份</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-preview-key="b-memory" data-title="MEMORY.md" data-meta="长期记忆 · 12.4 KB" data-markdown="# MEMORY.md&#10;&#10;保存稳定的长期记忆与用户偏好。&#10;&#10;## 当前内容&#10;&#10;- 偏好真实调用链与运行证据&#10;- 持久化修改前创建可恢复备份&#10;- 交付继续做到验证与运行态刷新&#10;&#10;> 更新于 18 分钟前">
+                      <span class="item-copy"><strong>MEMORY.md</strong><small>长期记忆与用户偏好</small></span>
+                      <span class="item-trailing">12.4 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="SELF.md" data-meta="自我理解 · 3.2 KB" data-markdown="# SELF.md&#10;&#10;记录 Agent 对自身职责和边界的稳定理解。&#10;&#10;## 核心职责&#10;&#10;- 阅读真实代码与运行状态&#10;- 让错误 **fail-fast、fail-loud**&#10;- 不把客户端缓存提升为服务端事实">
+                      <span class="item-copy"><strong>SELF.md</strong><small>Agent 的自我理解</small></span>
+                      <span class="item-trailing">3.2 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="VEDA.md" data-meta="人格 · 4.8 KB" data-markdown="# VEDA.md&#10;&#10;定义人格、表达方式与长期行为倾向。&#10;&#10;## 表达原则&#10;&#10;- 好奇但不卖弄&#10;- 先给结论和行动&#10;- 对不确定性保持坦率">
+                      <span class="item-copy"><strong>VEDA.md</strong><small>人格与表达方式</small></span>
+                      <span class="item-trailing">4.8 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="PENDING.md" data-meta="事务状态 · 1.1 KB" data-markdown="# PENDING.md&#10;&#10;等待记忆优化器处理的事务输入。&#10;&#10;## 当前状态&#10;&#10;`pending_items: 2`&#10;&#10;- 合并近期偏好变化&#10;- 对账一次持久化更新">
+                      <span class="item-copy"><strong>PENDING.md</strong><small>等待处理的记忆事务</small></span>
+                      <span class="item-trailing">1.1 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="RECENT_CONTEXT.md" data-meta="近期投影 · 7.6 KB" data-markdown="# RECENT_CONTEXT.md&#10;&#10;可重建的近期上下文投影。&#10;&#10;## 最近主题&#10;&#10;- Mobile Realtime 只读检查协议&#10;- VEDA 大写路径迁移&#10;- Android 运行资料入口设计">
+                      <span class="item-copy"><strong>RECENT_CONTEXT.md</strong><small>可重建的近期上下文</small></span>
+                      <span class="item-trailing">7.6 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="PROACTIVE_CONTEXT.md" data-meta="主动规则 · 2.6 KB" data-markdown="# PROACTIVE_CONTEXT.md&#10;&#10;Wake、Drift 与 proactive 消息使用的运行规则。&#10;&#10;## 投递约束&#10;&#10;- 目标 channel 只接收一次 `message.proactive`&#10;- scheduler 推理保持原子隔离&#10;- 失败必须留下明确状态">
+                      <span class="item-copy"><strong>PROACTIVE_CONTEXT.md</strong><small>主动任务的运行规则</small></span>
+                      <span class="item-trailing">2.6 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+                <section class="section section-mcp">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-plug"></use></svg></span>
+                    <div><h4>MCP</h4><small>现在能调用的外部能力</small></div>
+                    <span class="count">4 个</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="Fitbit MCP" data-meta="已连接 · 8 个工具" data-markdown="# Fitbit MCP&#10;&#10;> 当前连接正常，来源为 `fitbit` 插件。&#10;&#10;## 可用工具&#10;&#10;- `sleep_summary` — 读取睡眠摘要&#10;- `heart_rate_series` — 读取心率序列&#10;- `device_status` — 检查设备状态&#10;- 另外 5 个工具">
+                      <span class="item-copy"><strong>Fitbit MCP</strong><small>健康、睡眠与设备状态</small></span>
+                      <span class="item-trailing"><i class="status-dot"></i>8<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="GitHub MCP" data-meta="已连接 · 6 个工具" data-markdown="# GitHub MCP&#10;&#10;> 当前连接正常，来源为 GitHub 插件。&#10;&#10;## 可用工具&#10;&#10;- `repository.read`&#10;- `pull_request.get`&#10;- `issue.search`&#10;- 另外 3 个工具">
+                      <span class="item-copy"><strong>GitHub MCP</strong><small>仓库、PR 与 Issue</small></span>
+                      <span class="item-trailing"><i class="status-dot"></i>6<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="Gmail MCP" data-meta="已连接 · 5 个工具" data-markdown="# Gmail MCP&#10;&#10;> 当前连接正常，来源为 Gmail 插件。&#10;&#10;## 可用工具&#10;&#10;- `mail.search`&#10;- `thread.read`&#10;- `draft.create`&#10;- 另外 2 个工具">
+                      <span class="item-copy"><strong>Gmail MCP</strong><small>邮件、线程与草稿</small></span>
+                      <span class="item-trailing"><i class="status-dot"></i>5<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="Workspace MCP" data-meta="兼容入口 · 4 个工具" data-markdown="# Workspace MCP&#10;&#10;工作区兼容入口，不属于插件 generation。&#10;&#10;## 来源&#10;&#10;`source: workspace_compat`&#10;&#10;## 可用工具&#10;&#10;- `workspace.status`&#10;- `workspace.files`&#10;- 另外 2 个工具">
+                      <span class="item-copy"><strong>Workspace MCP</strong><small>工作区兼容能力</small></span>
+                      <span class="item-trailing"><i class="status-dot"></i>4<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+                <section class="section section-jobs">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-clock"></use></svg></span>
+                    <div><h4>定时任务</h4><small>已经安排好的未来动作</small></div>
+                    <span class="count">3 项</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="晨间摘要" data-meta="明天 08:00 · cron" data-markdown="# 晨间摘要&#10;&#10;每天早晨生成当天摘要。&#10;&#10;## 调度信息&#10;&#10;- **下一次：** 明天 08:00&#10;- **时区：** `Asia/Shanghai`&#10;- **表达式：** `0 8 * * *`&#10;- **已运行：** 14 次">
+                      <span class="item-copy"><strong>晨间摘要</strong><small>每天 08:00 · 已运行 14 次</small></span>
+                      <span class="item-trailing">10h 32m<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="睡眠复盘" data-meta="明天 09:30 · cron" data-markdown="# 睡眠复盘&#10;&#10;读取 Fitbit 睡眠数据并生成复盘。&#10;&#10;## 调度信息&#10;&#10;- **下一次：** 明天 09:30&#10;- **时区：** `Asia/Shanghai`&#10;- **表达式：** `30 9 * * *`&#10;- **已运行：** 9 次">
+                      <span class="item-copy"><strong>睡眠复盘</strong><small>每天 09:30 · 已运行 9 次</small></span>
+                      <span class="item-trailing">12h 02m<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                    <button class="item tap" type="button" data-detail data-title="Wake 巡检" data-meta="每 15 分钟 · interval" data-markdown="# Wake 巡检&#10;&#10;检查 proactive 候选是否达到投递条件。&#10;&#10;## 调度信息&#10;&#10;- **下一次：** 12 分钟后&#10;- **间隔：** `900 seconds`&#10;- **层级：** `soft`&#10;- **已运行：** 286 次">
+                      <span class="item-copy"><strong>Wake 巡检</strong><small>每 15 分钟 · 已运行 286 次</small></span>
+                      <span class="item-trailing">12m<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+          <div class="bottom-sheet" aria-hidden="true">
+            <div class="sheet-panel">
+              <span class="sheet-handle"></span>
+              <header class="sheet-head">
+                <div><h5 class="sheet-title">详情</h5><small class="sheet-meta"></small></div>
+                <button class="icon-button tap" type="button" data-close-sheet aria-label="关闭详情"><svg><use href="#icon-close"></use></svg></button>
+              </header>
+              <article class="sheet-body markdown-body"></article>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="concept concept-c">
+        <header class="concept-heading">
+          <span class="option-mark">C</span>
+          <div>
+            <h2>运行脉搏</h2>
+            <p>深色运行台以状态优先：在线、可读、即将发生。最有监控感和技术感。</p>
+          </div>
+        </header>
+        <div class="phone" data-screen="drawer">
+          <section class="phone-screen drawer-screen" aria-label="C 方案抽屉">
+            <div class="status-bar"><span>21:28</span><span class="status-icons">5G <i></i></span></div>
+            <div class="drawer-body">
+              <button class="runtime-entry tap" type="button" data-open-library>
+                <span class="entry-icon"><svg><use href="#icon-library"></use></svg></span>
+                <span class="entry-copy"><strong>运行脉搏</strong><small>全部正常 · 1 项即将执行</small></span>
+                <svg><use href="#icon-chevron"></use></svg>
+              </button>
+              <p class="drawer-title">会话</p>
+              <ul class="session-list">
+                <li class="session active">
+                  <span class="session-copy"><strong>移动端运行资料设计</strong><small>正在比较三套方案</small></span>
+                  <time>现在</time>
+                </li>
+                <li class="session">
+                  <span class="session-copy"><strong>Gateway 长连接</strong><small>恢复路径验证通过</small></span>
+                  <time>18:51</time>
+                </li>
+                <li class="session">
+                  <span class="session-copy"><strong>插件发布闭环</strong><small>检查 generation</small></span>
+                  <time>周六</time>
+                </li>
+              </ul>
+              <button class="new-chat tap" type="button"><svg><use href="#icon-plus"></use></svg>新聊天</button>
+            </div>
+          </section>
+          <section class="phone-screen library-screen" aria-label="C 方案运行资料页">
+            <div class="status-bar"><span>21:28</span><span class="status-icons">5G <i></i></span></div>
+            <header class="top-bar">
+              <button class="icon-button tap" type="button" data-back aria-label="返回抽屉"><svg><use href="#icon-back"></use></svg></button>
+              <span class="top-title"><strong>运行脉搏</strong><small>全部正常</small></span>
+              <button class="icon-button tap" type="button" aria-label="更多"><svg><use href="#icon-more"></use></svg></button>
+            </header>
+            <div class="library-scroll">
+              <div class="library-content">
+                <div class="library-hero">
+                  <h3>13 项运行事实，当前全部可读</h3>
+                  <p>绿色表示在线，琥珀表示即将执行；颜色首先回答状态。</p>
+                </div>
+                <section class="section section-docs">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-file"></use></svg></span>
+                    <div><h4>文档可读</h4><small>6 / 6 已验证</small></div>
+                    <span class="count">刚刚</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="文档健康状态" data-meta="6 / 6 可读" data-body="所有 allowlist 文档存在且 UTF-8 合法。&#10;&#10;最近变化：MEMORY.md · 18 分钟前&#10;总大小：31.7 KB">
+                      <span class="item-copy"><strong>全部文档通过校验</strong><small>最近变化：MEMORY.md</small></span>
+                      <span class="item-trailing">31.7 KB<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+                <section class="section section-mcp">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-plug"></use></svg></span>
+                    <div><h4>能力在线</h4><small>4 / 4 MCP 已连接</small></div>
+                    <span class="count"><i class="status-dot"></i></span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="MCP 在线状态" data-meta="runtime-generation-42" data-body="Fitbit      online · 8 tools&#10;GitHub      online · 6 tools&#10;Gmail       online · 5 tools&#10;Workspace   online · 4 tools">
+                      <span class="item-copy"><strong>23 个工具现在可用</strong><small>runtime generation 42</small></span>
+                      <span class="item-trailing"><i class="status-dot"></i>在线<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+                <section class="section section-jobs">
+                  <header class="section-heading">
+                    <span class="semantic-icon"><svg><use href="#icon-clock"></use></svg></span>
+                    <div><h4>即将发生</h4><small>1 项进入 12 小时窗口</small></div>
+                    <span class="count">10:32</span>
+                  </header>
+                  <div class="item-list">
+                    <button class="item tap" type="button" data-detail data-title="晨间摘要" data-meta="明天 08:00" data-body="倒计时：10 小时 32 分钟&#10;时区：Asia/Shanghai&#10;触发器：cron&#10;运行次数：14">
+                      <span class="item-copy"><strong>晨间摘要</strong><small>明天 08:00 · 已运行 14 次</small></span>
+                      <span class="item-trailing">10h 32m<svg><use href="#icon-chevron"></use></svg></span>
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </div>
+          </section>
+          <div class="bottom-sheet" aria-hidden="true">
+            <div class="sheet-panel">
+              <span class="sheet-handle"></span>
+              <header class="sheet-head">
+                <div><h5 class="sheet-title">详情</h5><small class="sheet-meta"></small></div>
+                <button class="icon-button tap" type="button" data-close-sheet aria-label="关闭详情"><svg><use href="#icon-close"></use></svg></button>
+              </header>
+              <pre class="sheet-body"></pre>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const initialScreen = new URLSearchParams(window.location.search).get("screen");
+    const initialDetail = new URLSearchParams(window.location.search).get("detail");
+
+    function escapeMarkup(value) {
+      return value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function renderInlineMarkdown(value) {
+      return escapeMarkup(value)
+        .replace(/`([^`]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    }
+
+    function renderPreviewMarkdown(source) {
+      const lines = source.trim().split("\n");
+      const output = [];
+      let listOpen = false;
+      let codeOpen = false;
+      let codeLines = [];
+
+      const closeList = () => {
+        if (!listOpen) return;
+        output.push("</ul>");
+        listOpen = false;
+      };
+
+      for (const line of lines) {
+        if (line.startsWith("```")) {
+          closeList();
+          if (codeOpen) {
+            output.push(`<pre><code>${escapeMarkup(codeLines.join("\n"))}</code></pre>`);
+            codeLines = [];
+          }
+          codeOpen = !codeOpen;
+          continue;
+        }
+        if (codeOpen) {
+          codeLines.push(line);
+          continue;
+        }
+        if (line.startsWith("# ")) {
+          closeList();
+          output.push(`<h1>${renderInlineMarkdown(line.slice(2))}</h1>`);
+        } else if (line.startsWith("## ")) {
+          closeList();
+          output.push(`<h2>${renderInlineMarkdown(line.slice(3))}</h2>`);
+        } else if (line.startsWith("### ")) {
+          closeList();
+          output.push(`<h3>${renderInlineMarkdown(line.slice(4))}</h3>`);
+        } else if (line.startsWith("- ")) {
+          if (!listOpen) {
+            output.push("<ul>");
+            listOpen = true;
+          }
+          output.push(`<li>${renderInlineMarkdown(line.slice(2))}</li>`);
+        } else if (line.startsWith("> ")) {
+          closeList();
+          output.push(`<blockquote>${renderInlineMarkdown(line.slice(2))}</blockquote>`);
+        } else if (line.trim() === "") {
+          closeList();
+        } else {
+          closeList();
+          output.push(`<p>${renderInlineMarkdown(line)}</p>`);
+        }
+      }
+
+      closeList();
+      if (codeOpen) output.push(`<pre><code>${escapeMarkup(codeLines.join("\n"))}</code></pre>`);
+      return output.join("");
+    }
+
+    for (const phone of document.querySelectorAll(".phone")) {
+      const sheet = phone.querySelector(".bottom-sheet");
+      const sheetTitle = phone.querySelector(".sheet-title");
+      const sheetMeta = phone.querySelector(".sheet-meta");
+      const sheetBody = phone.querySelector(".sheet-body");
+
+      if (initialScreen === "library") phone.dataset.screen = "library";
+
+      phone.querySelector("[data-open-library]").addEventListener("click", () => {
+        phone.dataset.screen = "library";
+      });
+
+      phone.querySelector("[data-back]").addEventListener("click", () => {
+        phone.dataset.screen = "drawer";
+      });
+
+      for (const item of phone.querySelectorAll("[data-detail]")) {
+        item.addEventListener("click", () => {
+          sheetTitle.textContent = item.dataset.title;
+          sheetMeta.textContent = item.dataset.meta;
+          if (sheetBody.classList.contains("markdown-body")) {
+            sheetBody.innerHTML = renderPreviewMarkdown(item.dataset.markdown);
+          } else {
+            sheetBody.textContent = item.dataset.body;
+          }
+          sheet.classList.add("open");
+          sheet.setAttribute("aria-hidden", "false");
+        });
+      }
+
+      const initialDetailTarget = [...phone.querySelectorAll("[data-preview-key]")]
+        .find((item) => item.dataset.previewKey === initialDetail);
+      initialDetailTarget?.click();
+
+      const closeSheet = () => {
+        sheet.classList.remove("open");
+        sheet.setAttribute("aria-hidden", "true");
+      };
+
+      phone.querySelector("[data-close-sheet]").addEventListener("click", closeSheet);
+      sheet.addEventListener("click", (event) => {
+        if (event.target === sheet) closeSheet();
+      });
+    }
+  </script>
+</body>
+</html>
