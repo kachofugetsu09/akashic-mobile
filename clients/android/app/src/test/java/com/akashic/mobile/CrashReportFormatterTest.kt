@@ -6,8 +6,9 @@ import org.junit.Test
 
 class CrashReportFormatterTest {
     @Test
-    fun includesBuildThreadAndCauseChain() {
+    fun includesBuildThreadFullCauseAndSuppressedChains() {
         val error = IllegalStateException("outer", IllegalArgumentException("inner"))
+        error.addSuppressed(IllegalArgumentException("suppressed"))
 
         val report = formatCrashReport(
             timestampMillis = 1234,
@@ -19,12 +20,14 @@ class CrashReportFormatterTest {
         assertTrue(report.contains("timestamp_ms=1234"))
         assertTrue(report.contains("thread=main"))
         assertTrue(report.contains("app_version=0.8.5-debug"))
+        assertTrue(report.contains("incident=uncaught_exception"))
         assertTrue(report.contains("exception=java.lang.IllegalStateException: outer"))
-        assertTrue(report.contains("caused_by=java.lang.IllegalArgumentException: inner"))
+        assertTrue(report.contains("Suppressed: java.lang.IllegalArgumentException: suppressed"))
+        assertTrue(report.contains("Caused by: java.lang.IllegalArgumentException: inner"))
     }
 
     @Test
-    fun truncatesDeepCauseChains() {
+    fun keepsDeepCauseChainsBeyondLegacyDepthLimit() {
         var error: Throwable = IllegalStateException("root")
         repeat(12) { index -> error = IllegalStateException("cause-$index", error) }
 
@@ -35,8 +38,26 @@ class CrashReportFormatterTest {
             error = error,
         )
 
-        assertTrue(report.contains("caused_by=<truncated>"))
-        assertFalse(report.contains("cause-0"))
+        assertTrue(report.contains("cause-0"))
+        assertFalse(report.contains("diagnostic_truncated"))
+    }
+
+    @Test
+    fun keepsFramesBeyondLegacyPerCauseLimit() {
+        val error = IllegalStateException("wide").apply {
+            stackTrace = Array(96) { index ->
+                StackTraceElement("Example$index", "run", "Example.kt", index + 1)
+            }
+        }
+
+        val report = formatCrashReport(
+            timestampMillis = 1234,
+            threadName = "worker",
+            identity = CrashReportIdentity("debug", 1, "test", "16", 36),
+            error = error,
+        )
+
+        assertTrue(report.contains("Example95.run(Example.kt:96)"))
     }
 
     @Test
@@ -51,6 +72,7 @@ class CrashReportFormatterTest {
         )
 
         assertTrue(report.contains("source=RealtimeSession"))
+        assertTrue(report.contains("incident=runtime_error"))
         assertTrue(report.contains("context=operation=envelope type=turn.started event_seq=42"))
         assertTrue(report.contains("exception=java.lang.IllegalArgumentException: 同一会话出现重叠 turn"))
         assertFalse(report.contains("\ncontext=operation=envelope\ntype="))

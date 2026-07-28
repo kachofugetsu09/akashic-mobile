@@ -84,6 +84,24 @@ class ConnectionRecoveryPolicyTest {
     }
 
     @Test
+    fun `history batch stops after transport send failure`() {
+        val requested = mutableListOf<Pair<String, Int>>()
+        val sessions = listOf(
+            RemoteSessionSummary("empty", "空会话", "2026-07-28T00:00:00Z", 0),
+            RemoteSessionSummary("first", "第一段", "2026-07-28T00:00:00Z", 2),
+            RemoteSessionSummary("failed", "发送失败", "2026-07-28T00:00:00Z", 3),
+            RemoteSessionSummary("unreachable", "不应请求", "2026-07-28T00:00:00Z", 4),
+        )
+
+        requestHistoryBatch(sessions) { sessionId, page ->
+            requested += sessionId to page
+            sessionId != "failed"
+        }
+
+        assertEquals(listOf("first" to 1, "failed" to 1), requested)
+    }
+
+    @Test
     fun `late candidates cannot downgrade connection progress`() {
         assertFalse(
             shouldApplyCandidateOpen(

@@ -168,6 +168,16 @@ internal fun shouldRefreshSyncDeadline(
 ): Boolean = phaseBeforeFrame == ConnectionPhase.SYNCING &&
     phaseAfterFrame == ConnectionPhase.SYNCING
 
+/** 逐个请求有历史的会话，并在传输失效后停止当前批次。 */
+internal fun requestHistoryBatch(
+    sessions: List<RemoteSessionSummary>,
+    requestPage: (String, Int) -> Boolean,
+) {
+    for (session in sessions) {
+        if (session.messageCount > 0 && !requestPage(session.sessionId, 1)) return
+    }
+}
+
 internal class NetworkRecoveryLatch {
     private var unavailableGeneration: Long? = null
     private var recoveredGeneration: Long? = null
@@ -1624,9 +1634,7 @@ class RealtimeSession(
 
     private fun requestAllHistory(envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
-        payload.items.forEach { session ->
-            if (session.messageCount > 0) requestHistoryPage(session.sessionId, page = 1)
-        }
+        requestHistoryBatch(payload.items, ::requestHistoryPage)
     }
 
     private fun applyRemoteSessionList(envelope: WireEnvelope) {
@@ -1651,9 +1659,9 @@ class RealtimeSession(
         }
     }
 
-    private fun requestHistoryPage(sessionId: String, page: Int) {
-        if (!requestedHistoryPages.add(Triple(syncGeneration, sessionId, page))) return
-        sendSyncCommand(
+    private fun requestHistoryPage(sessionId: String, page: Int): Boolean {
+        if (!requestedHistoryPages.add(Triple(syncGeneration, sessionId, page))) return true
+        return sendSyncCommand(
             type = "history.get",
             sessionId = sessionId,
             payload = buildJsonObject {
@@ -1667,7 +1675,7 @@ class RealtimeSession(
         type: String,
         sessionId: String?,
         payload: kotlinx.serialization.json.JsonObject,
-    ) {
+    ): Boolean {
         val epoch = requireNotNull(activeEpoch) { "History sync requires an authenticated connection" }
         val candidate = requireNotNull(activeCandidate) { "History sync requires an active endpoint" }
         val commandId = Ulid.next()
@@ -1695,7 +1703,9 @@ class RealtimeSession(
         if (!sent) {
             pendingSyncCommands.remove(commandId)
             scheduleReconnect("历史同步命令未进入 WebSocket 队列")
+            return false
         }
+        return true
     }
 
     private suspend fun completeSyncReply(envelope: WireEnvelope) {
