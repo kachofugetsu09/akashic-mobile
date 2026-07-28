@@ -358,6 +358,16 @@ interface MessageDao {
 
     @Query(
         """
+        SELECT COUNT(*) AS messageCount, MAX(serverSeq) AS maxServerSeq
+        FROM messages
+        WHERE sessionId = :sessionId
+          AND serverSeq IS NOT NULL
+        """,
+    )
+    suspend fun historyProjectionProgress(sessionId: String): HistoryProjectionProgress
+
+    @Query(
+        """
         SELECT COUNT(*) FROM messages
         WHERE sessionId = :sessionId
           AND clientMessageId IS NOT NULL

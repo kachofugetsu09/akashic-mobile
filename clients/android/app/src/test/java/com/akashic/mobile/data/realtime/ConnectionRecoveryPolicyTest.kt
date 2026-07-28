@@ -1,8 +1,11 @@
 package com.akashic.mobile.data.realtime
 
+import com.akashic.mobile.data.local.HistoryProjectionProgress
 import com.akashic.mobile.domain.model.ConnectionPhase
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -84,21 +87,97 @@ class ConnectionRecoveryPolicyTest {
     }
 
     @Test
-    fun `history batch stops after transport send failure`() {
+    fun `history resumes from the first incomplete page`() {
+        assertNull(
+            historyStartPage(
+                remoteMessageCount = 0,
+                local = HistoryProjectionProgress(0, null),
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+        assertNull(
+            historyStartPage(
+                remoteMessageCount = 537,
+                local = HistoryProjectionProgress(537, 536),
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+        assertEquals(
+            54,
+            historyStartPage(
+                remoteMessageCount = 537,
+                local = HistoryProjectionProgress(536, 535),
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+        assertEquals(
+            46,
+            historyStartPage(
+                remoteMessageCount = 537,
+                local = HistoryProjectionProgress(450, 449),
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+        assertEquals(
+            1,
+            historyStartPage(
+                remoteMessageCount = 537,
+                local = HistoryProjectionProgress(538, 537),
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+        assertEquals(
+            1,
+            historyStartPage(
+                remoteMessageCount = 537,
+                local = HistoryProjectionProgress(450, 451),
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+        assertEquals(
+            1,
+            historyStartPage(
+                remoteMessageCount = 537,
+                local = HistoryProjectionProgress(537, 536),
+                forceReload = true,
+                pageSize = 10,
+            ),
+        )
+    }
+
+    @Test
+    fun `history batch stops after transport send failure`() = runBlocking {
         val requested = mutableListOf<Pair<String, Int>>()
         val sessions = listOf(
             RemoteSessionSummary("empty", "空会话", "2026-07-28T00:00:00Z", 0),
+            RemoteSessionSummary("complete", "已完成", "2026-07-28T00:00:00Z", 10),
             RemoteSessionSummary("first", "第一段", "2026-07-28T00:00:00Z", 2),
             RemoteSessionSummary("failed", "发送失败", "2026-07-28T00:00:00Z", 3),
             RemoteSessionSummary("unreachable", "不应请求", "2026-07-28T00:00:00Z", 4),
         )
 
-        requestHistoryBatch(sessions) { sessionId, page ->
-            requested += sessionId to page
-            sessionId != "failed"
-        }
+        requestHistoryBatch(
+            sessions = sessions,
+            startPage = {
+                when (it.sessionId) {
+                    "complete" -> null
+                    "first" -> 2
+                    else -> 1
+                }
+            },
+            requestPage = { sessionId, page ->
+                requested += sessionId to page
+                sessionId != "failed"
+            },
+        )
 
-        assertEquals(listOf("first" to 1, "failed" to 1), requested)
+        assertEquals(listOf("first" to 2, "failed" to 1), requested)
     }
 
     @Test

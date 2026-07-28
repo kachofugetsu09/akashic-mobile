@@ -692,14 +692,23 @@ class LocalDeliveryStore(
                     "Proactive delivery id belongs to a non-proactive history message"
                 }
             }
-            val sourceId = remote.clientMessageId?.let {
-                database.messages().getByClientMessageId(it)?.messageId
+            val existingCanonical = database.messages().get(messageId)
+            val sourceId = if (existingCanonical != null) {
+                require(
+                    existingCanonical.sessionId == canonical.sessionId &&
+                        existingCanonical.role == canonical.role
+                ) { "Canonical message identity belongs to another message" }
+                null
+            } else {
+                remote.clientMessageId?.let {
+                    database.messages().getByClientMessageId(it)?.messageId
+                }
+                    ?: deliveryId?.let(::proactiveMessageId)
+                    ?: transientLocalSourceId(
+                        canonical,
+                        proactive,
+                    )
             }
-                ?: deliveryId?.let(::proactiveMessageId)
-                ?: transientLocalSourceId(
-                    canonical,
-                    proactive,
-                )
             mergeCanonicalMessage(sourceId, canonical)
             upsertMessageAttachments(
                 serverId = serverId,

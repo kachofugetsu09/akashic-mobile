@@ -43,6 +43,10 @@
 
 `runtime-contract.lock.json` 分开记录 capability commit 与实际 provider runtime。CI 拉取精确 revision，在无网络、只读核心源码和临时 workspace/plugin home 中运行 provider 场景，再运行移动端消费者检查。
 
+## 历史同步进度
+
+正常重连时，`RealtimeSession` 以 Room 中已落地且 `serverSeq` 连续的历史投影作为恢复点：本地数量与核心目录一致时不重放，未完成时从首个不完整页继续，并重叠请求该页以保持幂等。投影不连续、数量超过核心目录，或收到 `sync.reset_required` 时从第一页完整重建。核心 SessionDB 仍是权威事实，本地进度只决定可重建投影的读取起点。
+
 ## 主动消息投影身份
 
 核心拥有主动消息的 `delivery_id`。`message.proactive` 实时事件与 `history.page` 中发送成功后的 assistant 消息携带同一个值；Android 先保存实时投影，历史到达后把它迁移到 SessionDB message ID。历史到达前，引用命令携带 `reply_to.delivery_id`；迁移后携带 `reply_to.message_id`。旧核心没有该字段时，客户端只对明确标记为 proactive 的唯一文本与时间候选执行兼容迁移。
