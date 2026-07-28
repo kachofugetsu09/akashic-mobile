@@ -133,6 +133,11 @@ data class MessageEntity(
     val replyPreview: String? = null,
 )
 
+data class HistoryProjectionProgress(
+    val messageCount: Int,
+    val maxServerSeq: Long?,
+)
+
 @Entity(
     tableName = "pending_message_notifications",
     foreignKeys = [

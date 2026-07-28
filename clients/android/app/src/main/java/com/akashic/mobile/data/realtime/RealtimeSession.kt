@@ -9,6 +9,7 @@ import com.akashic.mobile.data.local.AttachmentTransferEntity
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
+import com.akashic.mobile.data.local.HistoryProjectionProgress
 import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.MessageEntity
 import com.akashic.mobile.data.local.MediaAttachmentEntity
@@ -168,13 +169,34 @@ internal fun shouldRefreshSyncDeadline(
 ): Boolean = phaseBeforeFrame == ConnectionPhase.SYNCING &&
     phaseAfterFrame == ConnectionPhase.SYNCING
 
-/** 逐个请求有历史的会话，并在传输失效后停止当前批次。 */
-internal fun requestHistoryBatch(
+internal fun historyStartPage(
+    remoteMessageCount: Int,
+    local: HistoryProjectionProgress,
+    forceReload: Boolean,
+    pageSize: Int,
+): Int? {
+    if (remoteMessageCount <= 0) return null
+    if (forceReload) return 1
+    val contiguous = if (local.messageCount == 0) {
+        local.maxServerSeq == null
+    } else {
+        local.maxServerSeq == local.messageCount.toLong() - 1
+    }
+    if (!contiguous || local.messageCount > remoteMessageCount) return 1
+    if (local.messageCount == remoteMessageCount) return null
+    return local.messageCount / pageSize + 1
+}
+
+/** 从本地连续进度继续历史请求，并在传输失效后停止当前批次。 */
+internal suspend fun requestHistoryBatch(
     sessions: List<RemoteSessionSummary>,
+    startPage: suspend (RemoteSessionSummary) -> Int?,
     requestPage: (String, Int) -> Boolean,
 ) {
     for (session in sessions) {
-        if (session.messageCount > 0 && !requestPage(session.sessionId, 1)) return
+        if (session.messageCount <= 0) continue
+        val page = startPage(session) ?: continue
+        if (!requestPage(session.sessionId, page)) return
     }
 }
 
@@ -1632,9 +1654,21 @@ class RealtimeSession(
     private fun hasPendingSyncCommand(type: String): Boolean =
         pendingSyncCommands.values.any { it.generation == syncGeneration && it.type == type }
 
-    private fun requestAllHistory(envelope: WireEnvelope) {
+    private suspend fun requestAllHistory(envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
-        requestHistoryBatch(payload.items, ::requestHistoryPage)
+        val forceReload = resetRebuildGeneration == syncGeneration
+        requestHistoryBatch(
+            sessions = payload.items,
+            startPage = { session ->
+                historyStartPage(
+                    remoteMessageCount = session.messageCount,
+                    local = database.messages().historyProjectionProgress(session.sessionId),
+                    forceReload = forceReload,
+                    pageSize = HISTORY_PAGE_SIZE,
+                )
+            },
+            requestPage = ::requestHistoryPage,
+        )
     }
 
     private fun applyRemoteSessionList(envelope: WireEnvelope) {
