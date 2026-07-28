@@ -2,6 +2,7 @@ package com.akashic.mobile.data.realtime
 
 import android.os.SystemClock
 import android.util.Base64
+import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -69,6 +70,10 @@ class IsolatedGatewayDeviceTest {
         }
         val result = Json.parseToJsonElement(resultJson).jsonObject
 
+        Log.i(
+            "AkashicDeviceGate",
+            "akasha_https_elapsed_ms=$elapsedMillis response_bytes=${resultJson.toByteArray().size}",
+        )
         assertEquals("akasha.recall-card.v1", result["schema"]?.jsonPrimitive?.content)
         assertEquals(5, result["left"]?.jsonArray?.size)
         assertTrue(resultJson.toByteArray().size < 16 * 1024)
