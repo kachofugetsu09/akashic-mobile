@@ -5,22 +5,30 @@ import android.app.Application
 import android.app.ApplicationExitInfo
 import android.os.Build
 import android.os.Process
+import android.util.AtomicFile
 import androidx.annotation.RequiresApi
 import java.io.File
 import java.io.IOException
+import java.io.Reader
 import kotlin.system.exitProcess
 
 internal object CrashDiagnostics {
     private const val DIAGNOSTICS_DIRECTORY = "diagnostics"
-    private const val LAST_CRASH_FILE = "last-crash.txt"
-    private const val LAST_RUNTIME_ERROR_FILE = "last-runtime-error.txt"
-    private const val EXIT_HISTORY_FILE = "exit-history.txt"
-    private const val MAX_EXIT_REASONS = 8
-    private const val MAX_EXPORTED_SECTION_CHARS = 128 * 1024
+    private const val LAST_INCIDENT_FILE = "last-incident.txt"
+    private val LEGACY_DIAGNOSTIC_FILES = listOf(
+        "last-crash.txt",
+        "last-runtime-error.txt",
+        "exit-history.txt",
+    )
+    private const val MAX_EXPORTED_SECTION_CHARS = 512 * 1024
+    private const val MAX_EXIT_TRACE_CHARS = 512 * 1024
 
-    /** 安装轻量异常记录器，并保存系统最近的进程退出原因。 */
+    /** 安装轻量异常记录器，并把旧版分散诊断收敛为最近一次事故。 */
     fun install(application: Application) {
-        // 1. 先接管未捕获异常，覆盖后续启动阶段
+        // 1. 先迁移旧版诊断，后续所有失败只覆盖同一个原子文件
+        migrateLegacyDiagnostics(application)
+
+        // 2. 接管未捕获异常，覆盖后续启动阶段
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, error ->
             try {
@@ -37,12 +45,9 @@ internal object CrashDiagnostics {
                 }
             }
         }
-
-        // 2. Android 11+ 保存系统判定的退出类型，不读取可能很大的 trace
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) writeExitHistory(application)
     }
 
-    /** 汇总当前构建和已有诊断记录，供用户通过系统分享页主动导出。 */
+    /** 导出最近一次应用事故和最近一次系统退出，不携带历史列表。 */
     fun exportReport(application: Application): String {
         // 1. 始终带上当前构建身份，空报告也能确认测试版本
         val report = StringBuilder()
@@ -55,24 +60,23 @@ internal object CrashDiagnostics {
             .appendLine("android=${Build.VERSION.RELEASE}")
             .appendLine("sdk=${Build.VERSION.SDK_INT}")
 
-        // 2. 私有诊断文件不存在表示尚未观察到对应事件，不伪造崩溃
-        listOf(LAST_CRASH_FILE, LAST_RUNTIME_ERROR_FILE, EXIT_HISTORY_FILE).forEach { name ->
-            report.appendLine().appendLine("===== $name =====")
-            val content = try {
-                diagnosticsDirectory(application).resolve(name).takeIf(File::isFile)?.readText()
-                    ?: "<not recorded>"
-            } catch (_: IOException) {
-                "<read failed>"
-            } catch (_: SecurityException) {
-                "<read denied>"
-            }
-            report.appendLine(content.take(MAX_EXPORTED_SECTION_CHARS))
-        }
+        // 2. 单份日志包含最新应用异常与最新系统退出，用户只需分享这一份
+        report.appendLine().appendLine("===== $LAST_INCIDENT_FILE =====")
+        report.appendLine(readLastIncident(application))
+        report.appendLine("latest_system_exit:")
+        report.appendLine(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                readLatestSystemExit(application)
+            } else {
+                "<unavailable before Android 11>"
+            },
+        )
         return report.toString()
     }
 
     private fun writeLastCrash(application: Application, thread: Thread, error: Throwable) {
-        diagnosticsDirectory(application).resolve(LAST_CRASH_FILE).writeText(
+        writeLastIncident(
+            application,
             formatCrashReport(System.currentTimeMillis(), thread.name, reportIdentity(), error),
         )
     }
@@ -80,7 +84,8 @@ internal object CrashDiagnostics {
     /** 覆盖保存最近一次已处理的功能阻断错误，不把诊断失败带回业务链。 */
     fun recordRuntimeError(application: Application, source: String, context: String, error: Throwable) {
         try {
-            diagnosticsDirectory(application).resolve(LAST_RUNTIME_ERROR_FILE).writeText(
+            writeLastIncident(
+                application,
                 formatRuntimeErrorReport(
                     timestampMillis = System.currentTimeMillis(),
                     threadName = Thread.currentThread().name,
@@ -97,34 +102,114 @@ internal object CrashDiagnostics {
         }
     }
 
-    @RequiresApi(Build.VERSION_CODES.R)
-    private fun writeExitHistory(application: Application) {
+    @Synchronized
+    private fun writeLastIncident(application: Application, report: String) {
+        val target = AtomicFile(diagnosticsDirectory(application).resolve(LAST_INCIDENT_FILE))
+        val output = target.startWrite()
         try {
-            val activityManager = application.getSystemService(ActivityManager::class.java)
-            val exits = activityManager.getHistoricalProcessExitReasons(
-                application.packageName,
-                0,
-                MAX_EXIT_REASONS,
-            )
-            val report = buildString {
-                appendLine("app_version=${BuildConfig.VERSION_NAME}")
-                appendLine("version_code=${BuildConfig.VERSION_CODE}")
-                exits.forEach { exit ->
-                    appendLine("---")
-                    appendLine("timestamp_ms=${exit.timestamp}")
-                    appendLine("reason=${exitReasonName(exit.reason)}")
-                    appendLine("status=${exit.status}")
-                    appendLine("importance=${exit.importance}")
-                    appendLine("description=${exit.description.orEmpty().take(512)}")
-                }
-            }
-            diagnosticsDirectory(application).resolve(EXIT_HISTORY_FILE).writeText(report)
-        } catch (_: IOException) {
-            // 历史退出原因只是诊断投影，写入失败不影响应用正常启动。
-        } catch (_: SecurityException) {
-            // 私有目录不可写时由之后的真实崩溃继续暴露环境问题。
+            output.write(report.toByteArray(Charsets.UTF_8))
+            target.finishWrite(output)
+        } catch (error: IOException) {
+            target.failWrite(output)
+            throw error
         }
     }
+
+    private fun readLastIncident(application: Application): String = try {
+        val incidentFile = diagnosticsDirectory(application).resolve(LAST_INCIDENT_FILE)
+        if (!incidentFile.isFile) {
+            "<not recorded>"
+        } else {
+            val target = AtomicFile(incidentFile)
+            target.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
+                .take(MAX_EXPORTED_SECTION_CHARS)
+        }
+    } catch (_: IOException) {
+        "<read failed>"
+    } catch (_: SecurityException) {
+        "<read denied>"
+    }
+
+    /** 首次升级时保留较新的旧异常，并停止导出三个互相竞争的文件。 */
+    private fun migrateLegacyDiagnostics(application: Application) {
+        try {
+            val directory = diagnosticsDirectory(application)
+            val incidentFile = directory.resolve(LAST_INCIDENT_FILE)
+            val legacyFiles = LEGACY_DIAGNOSTIC_FILES
+                .map(directory::resolve)
+                .filter(File::isFile)
+            if (!incidentFile.isFile) {
+                legacyFiles
+                    .filterNot { it.name == "exit-history.txt" }
+                    .maxByOrNull(::diagnosticTimestamp)
+                    ?.let { latest ->
+                        writeLastIncident(
+                            application,
+                            "incident=legacy_migrated\n" + latest.readText(),
+                        )
+                    }
+            }
+            legacyFiles.forEach(File::delete)
+        } catch (_: IOException) {
+            // 诊断迁移失败不能阻止应用启动，后续新事故仍会尝试覆盖统一文件。
+        } catch (_: SecurityException) {
+            // 私有目录不可写时保留原文件，并继续安装原始崩溃处理器。
+        }
+    }
+
+    private fun diagnosticTimestamp(file: File): Long =
+        file.useLines { lines ->
+            lines.mapNotNull { line ->
+                line.removePrefix("timestamp_ms=")
+                    .takeIf { it.length != line.length }
+                    ?.toLongOrNull()
+            }.firstOrNull()
+        } ?: file.lastModified()
+
+    @RequiresApi(Build.VERSION_CODES.R)
+    private fun readLatestSystemExit(application: Application): String = try {
+        val activityManager = application.getSystemService(ActivityManager::class.java)
+        val exit = activityManager.getHistoricalProcessExitReasons(
+            application.packageName,
+            0,
+            1,
+        ).firstOrNull()
+        if (exit == null) {
+            "<not recorded>"
+        } else {
+            buildString {
+                appendLine("timestamp_ms=${exit.timestamp}")
+                appendLine("reason=${exitReasonName(exit.reason)}")
+                appendLine("status=${exit.status}")
+                appendLine("importance=${exit.importance}")
+                appendLine("description=${exit.description.orEmpty().toDiagnosticLine()}")
+                exit.traceInputStream?.bufferedReader(Charsets.UTF_8)?.use { trace ->
+                    appendLine("trace:")
+                    append(trace.readAtMost(MAX_EXIT_TRACE_CHARS))
+                }
+            }
+        }
+    } catch (_: IOException) {
+        "<read failed>"
+    } catch (_: SecurityException) {
+        "<read denied>"
+    }
+
+    private fun Reader.readAtMost(limit: Int): String {
+        val result = StringBuilder()
+        val buffer = CharArray(8 * 1024)
+        while (result.length < limit) {
+            val count = read(buffer, 0, minOf(buffer.size, limit - result.length))
+            if (count < 0) return result.toString()
+            result.append(buffer, 0, count)
+        }
+        if (read() < 0) return result.toString()
+        val marker = "\n<system_exit_trace_truncated limit=$limit>\n"
+        return result.substring(0, limit - marker.length) + marker
+    }
+
+    private fun String.toDiagnosticLine(): String =
+        replace('\r', ' ').replace('\n', ' ').take(2 * 1024)
 
     private fun diagnosticsDirectory(application: Application): File =
         application.filesDir.resolve(DIAGNOSTICS_DIRECTORY).also { directory ->
