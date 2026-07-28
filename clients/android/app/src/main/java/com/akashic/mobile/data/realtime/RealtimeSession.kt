@@ -29,6 +29,7 @@ import com.akashic.mobile.data.realtime.pluginui.PluginUiAssetStore
 import com.akashic.mobile.data.realtime.pluginui.PluginUiCatalogStore
 import com.akashic.mobile.data.realtime.pluginui.PluginUiResultStore
 import com.akashic.mobile.data.realtime.pluginui.PluginUiCoordinator
+import com.akashic.mobile.data.realtime.pluginui.PluginUiHttpRequest
 import java.time.Instant
 import java.io.IOException
 import java.util.UUID
@@ -37,6 +38,7 @@ import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -47,6 +49,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
@@ -317,10 +320,11 @@ class RealtimeSession(
     private val mutableState = MutableStateFlow(MobileSessionState())
     val state: StateFlow<MobileSessionState> = mutableState.asStateFlow()
     val pluginUi = PluginUiCoordinator(
-        pluginUiAssetStore,
-        pluginUiCatalogStore,
-        pluginUiResultStore,
-        ::sendPluginUiCommand,
+        assetStore = pluginUiAssetStore,
+        catalogStore = pluginUiCatalogStore,
+        resultStore = pluginUiResultStore,
+        startHttpQuery = ::startPluginUiHttpQuery,
+        send = ::sendPluginUiCommand,
     )
     private val started = AtomicBoolean(false)
     private var meteredLargeTransferApproved = false
@@ -744,6 +748,7 @@ class RealtimeSession(
         method: String,
         payloadJson: String,
         cacheMode: String,
+        transportMode: String,
     ) {
         scope.launch {
             mutex.withLock {
@@ -774,7 +779,44 @@ class RealtimeSession(
                     payloadJson = payloadJson,
                     cacheMode = cacheMode,
                     cacheScope = requireNotNull(currentProfile).serverId,
+                    transportMode = transportMode,
                 )
+            }
+        }
+    }
+
+    /** 从当前已认证候选派生 HTTPS origin，并在 realtime mutex 外读取结果。 */
+    private fun startPluginUiHttpQuery(request: PluginUiHttpRequest) {
+        val candidate = requireNotNull(activeCandidate) {
+            "plugin UI HTTPS query 缺少活动连接"
+        }
+        val endpoint = requireNotNull(candidateEndpoints[candidate]) {
+            "plugin UI HTTPS query 缺少活动端点"
+        }
+        scope.launch {
+            val response = try {
+                withContext(Dispatchers.IO) {
+                    socket.executePluginUiHttp(endpoint, request)
+                }
+            } catch (error: IOException) {
+                mutex.withLock {
+                    pluginUi.onHttpQueryFailure(
+                        request.commandId,
+                        "插件 HTTPS 请求失败：${error.message}",
+                    )
+                }
+                return@launch
+            } catch (error: SecurityException) {
+                mutex.withLock {
+                    pluginUi.onHttpQueryFailure(
+                        request.commandId,
+                        "插件 HTTPS 请求未通过安全校验",
+                    )
+                }
+                return@launch
+            }
+            mutex.withLock {
+                pluginUi.onHttpQueryResponse(request.commandId, response)
             }
         }
     }

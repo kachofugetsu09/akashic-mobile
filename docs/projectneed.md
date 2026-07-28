@@ -74,6 +74,12 @@ Room 中从核心重新拉取的会话、消息、turn block 和附件元数据�
 
 移动端插件 UI 资产、catalog 和 result cache 只是带版本或内容身份的消费者缓存。缓存缺失或驱逐必须通过核心重新获取，不能改变插件是否安装或能力是否存在的判断。
 
+### MOB-PLUGIN-003 大型插件查询必须显式选择数据面
+
+插件目录、资源版本、查询授权、取消和实时事件继续使用已认证 WebSocket。只有插件 module 显式声明 HTTPS 时，移动端才把只读查询正文发送到当前活动 endpoint 派生的同源 HTTPS 地址；未声明的插件保持既有 WebSocket 内联查询，不能被客户端静默迁移或 fallback。
+
+HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system trust，拒绝 absolute path、redirect 和超过固定上限的响应。短期 ticket、HTTP response 和 result cache 都是可重建消费者状态，不得提升为服务端插件事实；Native 到 WebView 的 catalog 与 result 使用异步消息桥，不能通过同步 JavaScript 注入大 JSON。
+
 ## 6. 跨仓库兼容性
 
 ### MOB-XREPO-001 兼容证据必须固定且可复现

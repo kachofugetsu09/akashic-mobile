@@ -387,6 +387,7 @@ class MainViewModel(
         method: String,
         payloadJson: String,
         cacheMode: String,
+        transportMode: String,
     ) = container.realtimeSession.queryPluginUi(
         requestId,
         ownerId,
@@ -397,6 +398,7 @@ class MainViewModel(
         method,
         payloadJson,
         cacheMode,
+        transportMode,
     )
 
     fun cancelPluginUiOwner(ownerId: String) =

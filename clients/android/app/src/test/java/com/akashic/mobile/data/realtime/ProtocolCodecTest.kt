@@ -191,6 +191,44 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `round trips plugin https prepare and decodes ready grant`() {
+        val prepare = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "plugin.ui.query.prepare",
+            id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            connectionEpoch = 7,
+            sessionId = "mobile:one",
+            payload = buildJsonObject {
+                put("owner_id", "turn:akasha")
+                put("plugin_id", "akasha")
+                put("plugin_revision", "revision-1")
+                put("method", "recall.current")
+                put("payload", buildJsonObject { put("message_id", "message-446") })
+                put("slot", "turn.after_answer")
+            },
+        )
+        val ready = """
+            {
+              "v": 1,
+              "kind": "reply",
+              "type": "plugin.ui.query.ready",
+              "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              "connection_epoch": 7,
+              "session_id": "mobile:one",
+              "payload": {
+                "path": "/mobile/plugin-ui/v1/query",
+                "ticket": "signed-ticket",
+                "expires_at": "2026-07-28T12:00:30Z"
+              }
+            }
+        """.trimIndent()
+
+        assertEquals(prepare, ProtocolCodec.decode(ProtocolCodec.encode(prepare)))
+        assertEquals("plugin.ui.query.ready", ProtocolCodec.decode(ready).type)
+    }
+
+    @Test
     fun `rejects unsupported version at boundary`() {
         val frame = """{"v":2,"kind":"control","type":"server.challenge","payload":{}}"""
 

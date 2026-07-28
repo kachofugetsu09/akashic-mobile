@@ -24,6 +24,9 @@ class PluginUiCoordinator(
     val assetStore: PluginUiAssetStore,
     private val catalogStore: PluginUiCatalogStore,
     private val resultStore: PluginUiResultStore,
+    private val startHttpQuery: (PluginUiHttpRequest) -> Unit = {
+        error("plugin UI HTTPS 数据面未绑定")
+    },
     private val send: (String, JsonObject, String?, String?) -> String?,
 ) {
     private data class PendingAsset(
@@ -42,6 +45,11 @@ class PluginUiCoordinator(
         val wireOwnerId: String,
         val cacheKey: String?,
         val subscribers: MutableList<QuerySubscriber>,
+        val transportMode: String,
+        val queryPayload: JsonObject,
+        val sessionId: String?,
+        val turnId: String?,
+        var httpStarted: Boolean = false,
     )
 
     private val json = Json { ignoreUnknownKeys = false; explicitNulls = false }
@@ -144,6 +152,7 @@ class PluginUiCoordinator(
         payloadJson: String,
         cacheMode: String,
         cacheScope: String,
+        transportMode: String = "inline",
     ) {
         // 1. WebView 是外部输入边界
         if (requestId.length !in 1..128 || ownerId.length !in 1..128) return
@@ -153,6 +162,10 @@ class PluginUiCoordinator(
         }
         if (cacheMode !in CACHE_MODES) {
             publishResult(PluginUiWebResult(requestId, error = "插件缓存模式无效"))
+            return
+        }
+        if (transportMode !in TRANSPORT_MODES) {
+            publishResult(PluginUiWebResult(requestId, error = "插件传输模式无效"))
             return
         }
         if (cacheMode == "immutable" && !slot.startsWith("turn.")) {
@@ -222,16 +235,17 @@ class PluginUiCoordinator(
         }
 
         // 3. command id 只用于 wire，WebView request id 直接映射回结果
+        val queryPayload = buildJsonObject {
+            put("owner_id", ownerId)
+            put("plugin_id", plugin.id)
+            put("plugin_revision", plugin.revision)
+            put("method", method)
+            put("payload", payload)
+            put("slot", slot)
+        }
         val commandId = send(
-            "plugin.ui.query",
-            buildJsonObject {
-                put("owner_id", ownerId)
-                put("plugin_id", plugin.id)
-                put("plugin_revision", plugin.revision)
-                put("method", method)
-                put("payload", payload)
-                put("slot", slot)
-            },
+            if (transportMode == "https") "plugin.ui.query.prepare" else "plugin.ui.query",
+            queryPayload,
             sessionId,
             turnId,
         )
@@ -243,6 +257,10 @@ class PluginUiCoordinator(
             wireOwnerId = ownerId,
             cacheKey = cacheKey,
             subscribers = mutableListOf(QuerySubscriber(requestId, ownerId)),
+            transportMode = transportMode,
+            queryPayload = queryPayload,
+            sessionId = sessionId,
+            turnId = turnId,
         )
         if (cacheKey != null) pendingByCacheKey[cacheKey] = commandId
     }
@@ -291,9 +309,16 @@ class PluginUiCoordinator(
             return true
         }
         if (ignoredAssetReplies.remove(id)) return true
-        val pendingQuery = pendingQueries.remove(id)
+        val pendingQuery = pendingQueries[id]
         if (pendingQuery != null) {
-            pendingQuery.cacheKey?.let(pendingByCacheKey::remove)
+            if (
+                pendingQuery.transportMode == "https" &&
+                envelope.type == "plugin.ui.query.ready"
+            ) {
+                startPreparedHttpQuery(id, envelope, pendingQuery)
+                return true
+            }
+            completePendingQuery(id, pendingQuery)
             applyQueryReply(envelope, pendingQuery)
             return true
         }
@@ -452,19 +477,109 @@ class PluginUiCoordinator(
             val result = requireNotNull(envelope.payload["result"]?.jsonObject) {
                 "插件查询成功 reply 缺少 result"
             }
-            val resultJson = result.toString()
-            if (pending.cacheKey != null && result.values.any { it !== JsonNull }) {
-                resultStore.store(pending.cacheKey, resultJson)
-            }
-            pending.subscribers.forEach {
-                publishResult(PluginUiWebResult(it.requestId, resultJson = resultJson))
-            }
+            publishQueryResult(pending, result)
             return
         }
-        require(envelope.type == "plugin.ui.query.error") { "插件查询 reply 类型不匹配" }
+        val expectedError = if (pending.transportMode == "https") {
+            "plugin.ui.query.prepare.error"
+        } else {
+            "plugin.ui.query.error"
+        }
+        require(envelope.type == expectedError) { "插件查询 reply 类型不匹配" }
         val message = envelope.payload["message"]?.jsonPrimitive?.content ?: "插件请求失败"
         pending.subscribers.forEach {
             publishResult(PluginUiWebResult(it.requestId, error = message))
+        }
+    }
+
+    private fun startPreparedHttpQuery(
+        commandId: String,
+        envelope: WireEnvelope,
+        pending: PendingQuery,
+    ) {
+        require(!pending.httpStarted) { "插件 HTTPS 查询重复收到 ready" }
+        val grant = ProtocolCodec.decodePayload<PluginUiHttpGrantPayload>(envelope.payload)
+        require(grant.path == PLUGIN_UI_HTTP_PATH) { "插件 HTTPS query path 无效" }
+        require(grant.ticket.length in 1..MAX_HTTP_TICKET_CHARS) { "插件 HTTPS ticket 无效" }
+        require(grant.expiresAt.length in 20..40) { "插件 HTTPS ticket 过期时间无效" }
+        pending.httpStarted = true
+        startHttpQuery(
+            PluginUiHttpRequest(
+                commandId = commandId,
+                path = grant.path,
+                ticket = grant.ticket,
+                body = buildJsonObject {
+                    put("request_id", commandId)
+                    pending.queryPayload.forEach { (key, value) -> put(key, value) }
+                    put("session_id", pending.sessionId)
+                    put("turn_id", pending.turnId)
+                },
+            ),
+        )
+    }
+
+    fun onHttpQueryResponse(commandId: String, response: PluginUiHttpResponse) {
+        val pending = pendingQueries[commandId] ?: return
+        require(pending.transportMode == "https" && pending.httpStarted) {
+            "插件 HTTPS query 完成状态失配"
+        }
+        completePendingQuery(commandId, pending)
+        if (response.statusCode !in 200..299) {
+            val message = try {
+                json.parseToJsonElement(response.body).jsonObject["message"]
+                    ?.jsonPrimitive
+                    ?.content
+            } catch (_: SerializationException) {
+                null
+            } catch (_: IllegalArgumentException) {
+                null
+            } ?: "插件 HTTPS 请求失败（${response.statusCode}）"
+            pending.subscribers.forEach {
+                publishResult(PluginUiWebResult(it.requestId, error = message))
+            }
+            return
+        }
+        val result = try {
+            json.parseToJsonElement(response.body).jsonObject
+        } catch (_: SerializationException) {
+            pending.subscribers.forEach {
+                publishResult(PluginUiWebResult(it.requestId, error = "插件 HTTPS 响应无效"))
+            }
+            return
+        } catch (_: IllegalArgumentException) {
+            pending.subscribers.forEach {
+                publishResult(PluginUiWebResult(it.requestId, error = "插件 HTTPS 响应无效"))
+            }
+            return
+        }
+        publishQueryResult(pending, result)
+    }
+
+    fun onHttpQueryFailure(commandId: String, message: String) {
+        val pending = pendingQueries[commandId] ?: return
+        require(pending.transportMode == "https" && pending.httpStarted) {
+            "插件 HTTPS query 失败状态失配"
+        }
+        completePendingQuery(commandId, pending)
+        pending.subscribers.forEach {
+            publishResult(PluginUiWebResult(it.requestId, error = message))
+        }
+    }
+
+    private fun completePendingQuery(commandId: String, pending: PendingQuery) {
+        check(pendingQueries.remove(commandId) === pending) {
+            "插件 query 完成状态失配"
+        }
+        pending.cacheKey?.let(pendingByCacheKey::remove)
+    }
+
+    private fun publishQueryResult(pending: PendingQuery, result: JsonObject) {
+        val resultJson = result.toString()
+        if (pending.cacheKey != null && result.values.any { it !== JsonNull }) {
+            resultStore.store(pending.cacheKey, resultJson)
+        }
+        pending.subscribers.forEach {
+            publishResult(PluginUiWebResult(it.requestId, resultJson = resultJson))
         }
     }
 
@@ -558,6 +673,8 @@ class PluginUiCoordinator(
         const val MAX_CATALOG_ITEMS = 128
         const val MAX_METHOD_CHARS = 256
         const val MAX_PAYLOAD_BYTES = 64 * 1024
+        const val MAX_HTTP_TICKET_CHARS = 4096
+        const val PLUGIN_UI_HTTP_PATH = "/mobile/plugin-ui/v1/query"
         val SHA256 = Regex("^[0-9a-f]{64}$")
         val PLUGIN_ID = Regex("^[a-zA-Z0-9][a-zA-Z0-9_.@-]{0,128}$")
         val SLOT_NAMES = setOf(
@@ -568,6 +685,7 @@ class PluginUiCoordinator(
             "drawer.panel",
         )
         val CACHE_MODES = setOf("none", "immutable")
+        val TRANSPORT_MODES = setOf("inline", "https")
         val CANCEL_REPLY_TYPES = setOf("plugin.ui.cancel.ok", "plugin.ui.cancel.error")
     }
 }

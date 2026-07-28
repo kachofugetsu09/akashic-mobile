@@ -11,7 +11,7 @@
 ┌──────────────────────── akashic-agent ────────────────────────┐
 │ SessionDB / workspace / Gateway / protocol / plugins / MCP    │
 └──────────────────────────────┬─────────────────────────────────┘
-                               │ WebSocket + fixed protocol
+                               │ WebSocket control + HTTPS query data
                                ▼
 ┌──────────────────────── akashic-mobile ───────────────────────┐
 │ RealtimeSession                                                │
@@ -28,7 +28,7 @@
 | 入口或组件 | 当前职责 | 状态 owner |
 |---|---|---|
 | `App.kt` / `AppContainer` | 组装数据库、文件 store、密钥和 realtime | 移动端 |
-| `RealtimeSession` | 配对、连接、同步、投递、附件和插件 UI 协调 | 移动端消费协议；核心拥有远端事实 |
+| `RealtimeSession` | 配对、连接、同步、投递、附件和插件 UI WebSocket/HTTPS 协调 | 移动端消费协议；核心拥有远端事实 |
 | `AppDatabase` | Room v10 schema 与迁移 | 移动端 |
 | `MobileConnectionService` | 后台连接和持久通知消费 | 移动端 |
 | `protocol/mobile-realtime-v1.json` | 客户端历史协议快照 | 核心 schema 是真源 |

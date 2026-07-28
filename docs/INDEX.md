@@ -16,7 +16,7 @@
 | 任何产品行为或数据语义变更 | `projectneed.md`、相关 `decisions/` |
 | 接手未完成工作 | `NOW.md` |
 | Room、文件、密钥、缓存或删除逻辑 | `design/persistence-state-map.md` |
-| 配对、Gateway、插件 UI 或跨仓库协议 | `design/system-context.md`、`decisions/0002-*`、`decisions/0003-*` |
+| 配对、Gateway、插件 UI 或跨仓库协议 | `design/system-context.md`、`decisions/0002-*`、`decisions/0003-*`、`decisions/0004-*` |
 | PR Review | `templates/review-contract.md`、目标 PR 的相邻 base/head 和累计 head |
 | 实现任务 | `templates/agent-task-contract.md` 与改动路径的真实代码、schema、测试 |
 | 新会话交接 | `templates/context-handoff.yaml` |

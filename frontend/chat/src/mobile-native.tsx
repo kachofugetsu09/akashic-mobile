@@ -286,6 +286,7 @@ interface NativeBridge {
     method: string,
     payloadJson: string,
     cacheMode: string,
+    transportMode: string,
   ): void;
   cancelPluginUiOwner(ownerId: string): void;
 }
@@ -1022,6 +1023,25 @@ function MobileNativeApp() {
         return true;
       },
     };
+    const receivePluginMessage = (event: MessageEvent<unknown>) => {
+      if (typeof event.data !== "string") return;
+      try {
+        const message = requireRecord(JSON.parse(event.data), "pluginMessage");
+        const type = requireString(message.type, "pluginMessage.type");
+        if (type === "plugin.catalog") {
+          window.AkashicMobile?.receivePluginCatalog(message.payload);
+          return;
+        }
+        if (type === "plugin.result") {
+          window.AkashicMobile?.receivePluginUiResult(message.payload);
+          return;
+        }
+        throw new Error(`pluginMessage.type 无效: ${type}`);
+      } catch (error) {
+        console.error("[mobile] rejected native plugin message", error);
+      }
+    };
+    window.addEventListener("message", receivePluginMessage);
     window.AkashicNative?.reportReady();
     requestSnapshot();
     return () => {
@@ -1029,6 +1049,7 @@ function MobileNativeApp() {
       if (patchFrame !== null) cancelAnimationFrame(patchFrame);
       if (requestTimer !== null) window.clearTimeout(requestTimer);
       window.removeEventListener("popstate", handlePopState);
+      window.removeEventListener("message", receivePluginMessage);
       window.history.scrollRestoration = previousScrollRestoration;
       delete window.AkashicMobile;
     };

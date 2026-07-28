@@ -185,6 +185,121 @@ class PluginUiCoordinatorTest {
     }
 
     @Test
+    fun httpsQueryKeepsWebSocketReplySmallAndPublishesHttpResult() = runBlocking {
+        val root = Files.createTempDirectory("plugin-ui-https-query").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val results = PluginUiResultStore(root.resolve("results"))
+            val module = "export default { slots: {} };".toByteArray()
+            assets.store(module.sha256(), "module", module.toString(Charsets.UTF_8), module.size)
+            val sent = mutableListOf<Triple<String, String, JsonObject>>()
+            val started = mutableListOf<PluginUiHttpRequest>()
+            val coordinator = PluginUiCoordinator(
+                assetStore = assets,
+                catalogStore = catalogs,
+                resultStore = results,
+                startHttpQuery = started::add,
+                send = { type, payload, _, _ ->
+                    "command-${sent.size + 1}".also {
+                        sent += Triple(type, it, payload)
+                    }
+                },
+            )
+            coordinator.onConnectionReady("mobile-lab")
+            coordinator.onReply(
+                catalogReply(
+                    sent.single().second,
+                    catalog(
+                        revision = "1".repeat(64),
+                        items = listOf(catalogItem("akasha", module.sha256(), module.size)),
+                    ),
+                ),
+            )
+
+            coordinator.query(
+                "request-https",
+                "owner-akasha",
+                "turn.after_answer",
+                "mobile:one",
+                "turn-one",
+                "akasha",
+                "recall.current",
+                "{\"message_id\":\"message-446\"}",
+                "immutable",
+                "mobile-lab",
+                "https",
+            )
+            val prepare = sent.single { it.first == "plugin.ui.query.prepare" }
+            coordinator.onReply(httpsReady(prepare.second))
+
+            val httpRequest = started.single()
+            assertEquals(prepare.second, httpRequest.commandId)
+            assertEquals("akasha", httpRequest.body["plugin_id"]?.toString()?.trim('"'))
+            assertEquals("mobile:one", httpRequest.body["session_id"]?.toString()?.trim('"'))
+            coordinator.onHttpQueryResponse(
+                prepare.second,
+                PluginUiHttpResponse(
+                    statusCode = 200,
+                    body = """{"schema":"akasha.recall-card.v1","left":[]}""",
+                ),
+            )
+
+            val result = coordinator.results.first()
+            assertEquals("request-https", result.requestId)
+            assertEquals(
+                """{"schema":"akasha.recall-card.v1","left":[]}""",
+                result.resultJson,
+            )
+
+            coordinator.query(
+                "request-invalid",
+                "owner-akasha",
+                "turn.after_answer",
+                "mobile:one",
+                "turn-two",
+                "akasha",
+                "recall.current",
+                "{\"message_id\":\"message-447\"}",
+                "none",
+                "mobile-lab",
+                "https",
+            )
+            val invalidPrepare = sent.last { it.first == "plugin.ui.query.prepare" }
+            coordinator.onReply(httpsReady(invalidPrepare.second))
+            coordinator.onHttpQueryResponse(
+                invalidPrepare.second,
+                PluginUiHttpResponse(statusCode = 200, body = "[]"),
+            )
+            assertEquals("插件 HTTPS 响应无效", coordinator.results.first().error)
+
+            coordinator.query(
+                "request-disconnected",
+                "owner-akasha",
+                "turn.after_answer",
+                "mobile:one",
+                "turn-three",
+                "akasha",
+                "recall.current",
+                "{\"message_id\":\"message-448\"}",
+                "none",
+                "mobile-lab",
+                "https",
+            )
+            val disconnectedPrepare = sent.last { it.first == "plugin.ui.query.prepare" }
+            coordinator.onReply(httpsReady(disconnectedPrepare.second))
+            coordinator.onDisconnected("连接已断开")
+            assertEquals("连接已断开", coordinator.results.first().error)
+            coordinator.onHttpQueryResponse(
+                disconnectedPrepare.second,
+                PluginUiHttpResponse(statusCode = 200, body = """{"left":[]}"""),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun queryRejectsOversizedBoundaryValuesBeforeSendingACommand() = runBlocking {
         val root = Files.createTempDirectory("plugin-ui-query-boundary").toFile()
         try {
@@ -326,6 +441,18 @@ class PluginUiCoordinatorTest {
             put("result", buildJsonObject {
                 put("usage", buildJsonObject { put("output_tokens", 321) })
             })
+        },
+    )
+
+    private fun httpsReady(id: String) = WireEnvelope(
+        v = WIRE_PROTOCOL_VERSION,
+        kind = WireKind.REPLY,
+        type = "plugin.ui.query.ready",
+        id = id,
+        payload = buildJsonObject {
+            put("path", "/mobile/plugin-ui/v1/query")
+            put("ticket", "signed-ticket")
+            put("expires_at", "2026-07-28T12:00:30Z")
         },
     )
 

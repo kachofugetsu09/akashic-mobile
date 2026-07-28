@@ -16,6 +16,9 @@ export interface MobilePluginContext {
   messageId?: string;
   turnId?: string;
   block?: unknown;
+  capabilities: {
+    queryTransports: readonly ("inline" | "https")[];
+  };
   query(
     method: string,
     payload?: Record<string, unknown>,
@@ -25,6 +28,7 @@ export interface MobilePluginContext {
 
 export interface MobilePluginQueryOptions {
   cache?: "none" | "immutable";
+  transport?: "inline" | "https";
 }
 
 export interface MobilePluginRenderer {
@@ -338,7 +342,7 @@ function MountedPlugin({
   pluginId: string;
   pluginRevision: string;
   renderer: MobilePluginRenderer;
-  context: Omit<MobilePluginContext, "query">;
+  context: Omit<MobilePluginContext, "query" | "capabilities">;
 }) {
   const hostRef = React.useRef<HTMLDivElement>(null);
   const ownerIdRef = React.useRef(createOwnerId());
@@ -360,6 +364,9 @@ function MountedPlugin({
         messageId,
         turnId,
         block: stableBlock,
+        capabilities: {
+          queryTransports: ["inline", "https"],
+        },
         query(method, payload = {}, options = {}) {
           const requestId = createRequestId();
           return new Promise((resolve, reject) => {
@@ -414,6 +421,7 @@ function MountedPlugin({
                 method,
                 encoded,
                 options.cache ?? "none",
+                options.transport ?? "inline",
               ),
             };
             try {
