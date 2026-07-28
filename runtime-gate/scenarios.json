@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "profile": "mobile-proactive-reply-v1",
+  "profile": "mobile-runtime-inspection-v1",
   "scenarios": [
     {
       "id": "message-send-idempotency",
@@ -163,6 +163,12 @@
       "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_preserves_mobile_slash_command_for_bus",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
       "consumer_test": "round trips slash command text unchanged"
+    },
+    {
+      "id": "runtime-inspection-lists-and-markdown-detail",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_runtime_document_commands_use_bound_read_service",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/RuntimeInspectionCoordinatorTest.kt",
+      "consumer_test": "refreshProjectsAllListsAndOpensMarkdownDetail"
     }
   ]
 }

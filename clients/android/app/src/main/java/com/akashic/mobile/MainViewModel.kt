@@ -17,6 +17,8 @@ import com.akashic.mobile.data.local.decodeStoredToolBlock
 import com.akashic.mobile.data.realtime.TransferNetworkKind
 import com.akashic.mobile.data.realtime.MobileSessionState
 import com.akashic.mobile.data.realtime.NotificationTargetOpenResult
+import com.akashic.mobile.data.realtime.RuntimeInspectionDetailKind
+import com.akashic.mobile.data.realtime.RuntimeInspectionState
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
@@ -39,6 +41,11 @@ import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.PendingMessageUi
 import com.akashic.mobile.ui.conversation.SessionUi
 import com.akashic.mobile.ui.conversation.TransferStatusUi
+import com.akashic.mobile.ui.conversation.RuntimeDetailUi
+import com.akashic.mobile.ui.conversation.RuntimeDocumentUi
+import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
+import com.akashic.mobile.ui.conversation.RuntimeJobUi
+import com.akashic.mobile.ui.conversation.RuntimeMcpUi
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
@@ -56,6 +63,54 @@ import kotlin.math.ceil
 private const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
 private const val PENDING_NOTIFICATION_TARGET = "pending_notification_target"
 private const val COMPLETED_NOTIFICATION_TARGET = "completed_notification_target"
+
+private fun RuntimeInspectionState.toUi() = RuntimeInspectionUi(
+    refreshing = refreshing,
+    detailLoading = detailLoading,
+    snapshotId = snapshotId,
+    documents = documents.map {
+        RuntimeDocumentUi(
+            id = it.id,
+            title = it.title,
+            relativePath = it.relativePath,
+            description = it.description,
+            available = it.available,
+        )
+    },
+    jobs = jobs.map {
+        RuntimeJobUi(
+            id = it.id,
+            name = it.name,
+            trigger = it.trigger,
+            tier = it.tier,
+            fireAt = it.fireAt,
+            enabled = it.enabled,
+        )
+    },
+    mcpServers = mcpServers.map {
+        RuntimeMcpUi(
+            ownerId = it.ownerId,
+            name = it.name,
+            toolCount = it.toolCount,
+        )
+    },
+    pluginCount = plugins.size,
+    skillCount = skills.size,
+    detail = detail?.let {
+        RuntimeDetailUi(
+            kind = when (it.kind) {
+                RuntimeInspectionDetailKind.DOCUMENT -> "document"
+                RuntimeInspectionDetailKind.MCP -> "mcp"
+                RuntimeInspectionDetailKind.SCHEDULE -> "schedule"
+            },
+            key = it.key,
+            title = it.title,
+            subtitle = it.subtitle,
+            markdown = it.markdown,
+        )
+    },
+    errorMessage = errorMessage,
+)
 
 data class IncomingShareUi(
     val id: String,
@@ -120,6 +175,7 @@ class MainViewModel(
     val sessionState = container.realtimeSession.state
     val pluginUiCatalog = container.realtimeSession.pluginUi.catalog
     val pluginUiResults = container.realtimeSession.pluginUi.results
+    val runtimeInspection = container.realtimeSession.runtimeInspection.state
     val pluginUiAssetStore = container.pluginUiAssetStore
     private val navigationTarget = MutableStateFlow<NavigationTargetUi?>(null)
     private val pendingNotificationTarget = savedStateHandle.getStateFlow<NotificationTargetRequest?>(
@@ -214,7 +270,8 @@ class MainViewModel(
     val conversationState = combine(
         conversationProjection,
         navigationTarget,
-    ) { projection, target ->
+        runtimeInspection,
+    ) { projection, target, runtime ->
         val session = projection.session
         val graph = projection.graph
         val conversations = projection.conversations
@@ -329,6 +386,7 @@ class MainViewModel(
                 session.currentSessionId != null &&
                 !selectedRemoteMissing &&
                 composerAttachments.all { it.state == ComposerAttachmentState.READY },
+            runtimeInspection = runtime.toUi(),
         )
     }.stateIn(
         viewModelScope,
@@ -376,6 +434,19 @@ class MainViewModel(
     )
 
     fun sendCommand(value: String) = container.realtimeSession.sendCommand(value)
+
+    fun refreshRuntimeInspection() = container.realtimeSession.refreshRuntimeInspection()
+
+    fun openRuntimeDocument(documentId: String) =
+        container.realtimeSession.openRuntimeDocument(documentId)
+
+    fun openRuntimeMcp(ownerId: String, serverName: String) =
+        container.realtimeSession.openRuntimeMcp(ownerId, serverName)
+
+    fun openRuntimeJob(jobId: String) = container.realtimeSession.openRuntimeJob(jobId)
+
+    fun clearRuntimeInspectionDetail() =
+        container.realtimeSession.clearRuntimeInspectionDetail()
 
     fun queryPluginUi(
         requestId: String,
