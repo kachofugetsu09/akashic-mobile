@@ -165,6 +165,12 @@
       "consumer_test": "round trips slash command text unchanged"
     },
     {
+      "id": "plugin-query-https-data-plane-is-request-bound",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_plugin_ui_https_data_plane_uses_signed_request_bound_ticket",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/PluginUiCoordinatorTest.kt",
+      "consumer_test": "httpsQueryKeepsWebSocketReplySmallAndPublishesHttpResult"
+    },
+    {
       "id": "runtime-inspection-lists-and-markdown-detail",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_runtime_document_commands_use_bound_read_service",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/RuntimeInspectionCoordinatorTest.kt",

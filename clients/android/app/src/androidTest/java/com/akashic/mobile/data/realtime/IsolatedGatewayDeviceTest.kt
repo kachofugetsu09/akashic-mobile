@@ -1,6 +1,8 @@
 package com.akashic.mobile.data.realtime
 
+import android.os.SystemClock
 import android.util.Base64
+import android.util.Log
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -11,6 +13,10 @@ import java.io.File
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -18,6 +24,62 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class IsolatedGatewayDeviceTest {
+    @Test
+    fun loadsAkashaRecallCardOverHttps() = runBlocking {
+        val arguments = InstrumentationRegistry.getArguments()
+        val offer = String(
+            Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT),
+            Charsets.UTF_8,
+        )
+        val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        withTimeout(TIMEOUT_MILLIS) {
+            session.state.first { it.hasProfile && it.connection.phase == ConnectionPhase.READY }
+        }
+        val plugin = withTimeout(TIMEOUT_MILLIS) {
+            session.pluginUi.catalog.first { catalog ->
+                !catalog.updating && catalog.plugins.any { it.id == "akasha@builtin" }
+            }.plugins.single { it.id == "akasha@builtin" }
+        }
+
+        val requestId = "device-akasha-${SystemClock.elapsedRealtime()}"
+        val startedAt = SystemClock.elapsedRealtime()
+        session.queryPluginUi(
+            requestId = requestId,
+            ownerId = "device:akasha",
+            slot = "turn.before_reasoning",
+            sessionId = sessionId,
+            turnId = null,
+            pluginId = plugin.id,
+            method = "recall.current",
+            payloadJson = """{"message_id":"isolated-assistant"}""",
+            cacheMode = "none",
+            transportMode = "https",
+        )
+        val response = withTimeout(TIMEOUT_MILLIS) {
+            session.pluginUi.results.first { it.requestId == requestId }
+        }
+        val elapsedMillis = SystemClock.elapsedRealtime() - startedAt
+        val resultJson = requireNotNull(response.resultJson) {
+            "Akasha HTTPS query 失败: ${response.error}"
+        }
+        val result = Json.parseToJsonElement(resultJson).jsonObject
+
+        Log.i(
+            "AkashicDeviceGate",
+            "akasha_https_elapsed_ms=$elapsedMillis response_bytes=${resultJson.toByteArray().size}",
+        )
+        assertEquals("akasha.recall-card.v1", result["schema"]?.jsonPrimitive?.content)
+        assertEquals(5, result["left"]?.jsonArray?.size)
+        assertTrue(resultJson.toByteArray().size < 16 * 1024)
+        assertTrue("Akasha 首次 HTTPS 查询耗时 ${elapsedMillis}ms", elapsedMillis < 3_000)
+    }
+
     @Test
     fun pairSendAndReceiveFixedMedia() = runBlocking {
         val arguments = InstrumentationRegistry.getArguments()

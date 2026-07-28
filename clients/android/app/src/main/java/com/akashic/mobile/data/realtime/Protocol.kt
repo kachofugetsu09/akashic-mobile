@@ -407,6 +407,7 @@ object ProtocolCodec {
             "plugin.ui.catalog",
             "plugin.ui.asset.get",
             "plugin.ui.query",
+            "plugin.ui.query.prepare",
             "plugin.ui.cancel",
             "device.update",
             "ping",

@@ -1,6 +1,8 @@
 package com.akashic.mobile.data.realtime.pluginui
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 
 @Serializable
 data class PluginUiWebCatalog(
@@ -31,4 +33,24 @@ data class PluginUiWebResult(
     val requestId: String,
     val resultJson: String? = null,
     val error: String? = null,
+)
+
+@Serializable
+data class PluginUiHttpGrantPayload(
+    val path: String,
+    val ticket: String,
+    @SerialName("expires_at")
+    val expiresAt: String,
+)
+
+data class PluginUiHttpRequest(
+    val commandId: String,
+    val path: String,
+    val ticket: String,
+    val body: JsonObject,
+)
+
+data class PluginUiHttpResponse(
+    val statusCode: Int,
+    val body: String,
 )

@@ -1,8 +1,11 @@
 package com.akashic.mobile.data.realtime
 
 import android.util.Log
+import com.akashic.mobile.data.realtime.pluginui.PluginUiHttpRequest
+import com.akashic.mobile.data.realtime.pluginui.PluginUiHttpResponse
 import com.akashic.mobile.domain.model.EndpointRoute
 import com.akashic.mobile.domain.model.ServerEndpoint
+import java.io.IOException
 import java.net.URI
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledFuture
@@ -11,10 +14,13 @@ import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import kotlinx.serialization.SerializationException
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.Buffer
 import okio.ByteString
 
 data class SocketCandidateId(val generation: Long, val ordinal: Int)
@@ -132,6 +138,54 @@ class RealtimeWebSocketClient(
             current.winner?.let(current.sockets::get)
         } ?: return false
         return socket.send(payload)
+    }
+
+    /** 复用活动端点的 TLS 信任策略执行一次有界插件 HTTPS 查询。 */
+    fun executePluginUiHttp(
+        endpoint: ServerEndpoint,
+        request: PluginUiHttpRequest,
+    ): PluginUiHttpResponse {
+        validateEndpoint(endpoint)
+        require(request.path == PLUGIN_UI_HTTP_PATH) { "Invalid plugin UI HTTP path" }
+        require(request.ticket.length in 1..MAX_PLUGIN_UI_TICKET_CHARS) {
+            "Invalid plugin UI HTTP ticket"
+        }
+        val websocketUri = URI(endpoint.url)
+        val httpScheme = when (requireNotNull(websocketUri.scheme).lowercase()) {
+            "wss" -> "https"
+            "ws" -> "http"
+            else -> error("Validated endpoint scheme changed")
+        }
+        val url = URI(
+            httpScheme,
+            null,
+            websocketUri.host,
+            websocketUri.port,
+            request.path,
+            null,
+            null,
+        ).toString()
+        val call = clientFor(endpoint)
+            .newBuilder()
+            .followRedirects(false)
+            .build()
+            .newCall(
+                Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer ${request.ticket}")
+                    .post(
+                        request.body.toString().toRequestBody(
+                            PLUGIN_UI_JSON_MEDIA_TYPE,
+                        ),
+                    )
+                    .build(),
+            )
+        return call.execute().use { response ->
+            PluginUiHttpResponse(
+                statusCode = response.code,
+                body = readBoundedPluginUiBody(response),
+            )
+        }
     }
 
     fun reject(candidateId: SocketCandidateId, code: Int, reason: String) {
@@ -272,6 +326,32 @@ class RealtimeWebSocketClient(
         return "${endpoint.route}:${uri.host}:${uri.port.takeIf { it > 0 } ?: "default"}"
     }
 
+    private fun readBoundedPluginUiBody(response: Response): String {
+        val body = response.body
+        val declared = body.contentLength()
+        if (declared > MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES) {
+            throw IOException("插件 HTTPS 响应超过 192 KiB")
+        }
+        val source = body.source()
+        val buffer = Buffer()
+        var total = 0L
+        while (true) {
+            val read = source.read(
+                buffer,
+                minOf(
+                    8 * 1024L,
+                    MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES + 1L - total,
+                ),
+            )
+            if (read == -1L) break
+            total += read
+            if (total > MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES) {
+                throw IOException("插件 HTTPS 响应超过 192 KiB")
+            }
+        }
+        return buffer.readString(Charsets.UTF_8)
+    }
+
     private fun envelopeLabel(envelope: WireEnvelope): String =
         "kind=${envelope.kind} type=${envelope.type} id=${envelope.id} epoch=${envelope.connectionEpoch} " +
             "session=${envelope.sessionId} turn=${envelope.turnId} payloadKeys=${envelope.payload.keys}"
@@ -287,5 +367,9 @@ class RealtimeWebSocketClient(
         const val TUNNEL_RACE_DELAY_MILLIS = 750L
         const val CLOSE_REPLACED = 4000
         const val CLOSE_PROTOCOL_ERROR = 4406
+        const val MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES = 192 * 1024L
+        const val MAX_PLUGIN_UI_TICKET_CHARS = 4096
+        const val PLUGIN_UI_HTTP_PATH = "/mobile/plugin-ui/v1/query"
+        val PLUGIN_UI_JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
