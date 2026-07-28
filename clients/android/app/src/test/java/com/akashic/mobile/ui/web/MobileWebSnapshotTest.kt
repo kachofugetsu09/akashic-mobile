@@ -233,7 +233,8 @@ class MobileWebSnapshotTest {
 
         val encoded = Json.encodeToString(snapshot)
 
-        assertEquals(6, snapshot.protocolVersion)
+        assertEquals(7, snapshot.protocolVersion)
+        assertTrue(snapshot.runtimeInspection.documents.isEmpty())
         assertEquals(7, snapshot.projectionGeneration)
         assertEquals(MobileWebConnectionStatus.RECONNECTING, snapshot.connection.status)
         assertTrue(snapshot.sessions.single().isRunning)
@@ -263,7 +264,7 @@ class MobileWebSnapshotTest {
         assertEquals("继续检查草稿", snapshot.composer.draft.text)
         assertEquals("message-1", snapshot.composer.draft.replyToMessageId)
         assertEquals(1_752_681_602_000, snapshot.composer.draft.updatedAt)
-        assertEquals(6, Json.parseToJsonElement(encoded).jsonObject
+        assertEquals(7, Json.parseToJsonElement(encoded).jsonObject
             .getValue("protocolVersion").jsonPrimitive.content.toInt())
         assertTrue(encoded.contains("\"status\":\"reconnecting\""))
         assertTrue(encoded.contains("\"deliveryAction\":\"retry\""))

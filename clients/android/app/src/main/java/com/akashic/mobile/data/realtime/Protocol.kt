@@ -193,6 +193,118 @@ data class RemoteCommandItem(
 )
 
 @Serializable
+data class RuntimeDocumentListPayload(
+    val items: List<RuntimeDocumentSummary>,
+)
+
+@Serializable
+data class RuntimeDocumentSummary(
+    val id: String,
+    val title: String,
+    @SerialName("relative_path") val relativePath: String,
+    val group: String,
+    val description: String,
+    val available: Boolean,
+)
+
+@Serializable
+data class RuntimeDocumentDetail(
+    val id: String,
+    val title: String,
+    @SerialName("relative_path") val relativePath: String,
+    val group: String,
+    val description: String,
+    val available: Boolean,
+    val markdown: String,
+)
+
+@Serializable
+data class SchedulerJobListPayload(
+    val items: List<SchedulerJobSummary>,
+)
+
+@Serializable
+data class SchedulerJobSummary(
+    val id: String,
+    val name: String? = null,
+    val trigger: String,
+    val tier: String,
+    @SerialName("fire_at") val fireAt: String,
+    val timezone: String,
+    val enabled: Boolean,
+    @SerialName("run_count") val runCount: Int,
+)
+
+@Serializable
+data class SchedulerJobDetail(
+    val id: String,
+    val name: String? = null,
+    val trigger: String,
+    val tier: String,
+    @SerialName("fire_at") val fireAt: String,
+    val timezone: String,
+    val enabled: Boolean,
+    @SerialName("run_count") val runCount: Int,
+    val markdown: String,
+)
+
+@Serializable
+data class RuntimeCapabilityListPayload(
+    @SerialName("snapshot_id") val snapshotId: String,
+    val plugins: List<RuntimePluginSummary>,
+    val skills: List<RuntimeSkillSummary>,
+    @SerialName("mcp_servers") val mcpServers: List<RuntimeMcpSummary>,
+)
+
+@Serializable
+data class RuntimePluginSummary(
+    val id: String,
+    val revision: String,
+    @SerialName("generation_id") val generationId: String,
+)
+
+@Serializable
+data class RuntimeSkillSummary(
+    val name: String,
+    @SerialName("display_name") val displayName: String,
+    val description: String,
+    val source: String,
+    @SerialName("source_id") val sourceId: String,
+    val available: Boolean,
+    val missing: String,
+)
+
+@Serializable
+data class RuntimeMcpSummary(
+    @SerialName("owner_id") val ownerId: String,
+    val name: String,
+    @SerialName("tool_count") val toolCount: Int,
+    val tools: List<RuntimeMcpToolSummary>,
+)
+
+@Serializable
+data class RuntimeMcpToolSummary(
+    val name: String,
+    val description: String,
+)
+
+@Serializable
+data class RuntimeMcpDetail(
+    @SerialName("owner_id") val ownerId: String,
+    val name: String,
+    @SerialName("tool_count") val toolCount: Int,
+    val tools: List<RuntimeMcpToolDetail>,
+    val markdown: String,
+)
+
+@Serializable
+data class RuntimeMcpToolDetail(
+    val name: String,
+    val description: String,
+    @SerialName("input_schema") val inputSchema: JsonObject,
+)
+
+@Serializable
 data class MobileUiCatalogPayload(
     @SerialName("catalog_revision") val catalogRevision: String,
     val items: List<MobileUiCatalogItem>,
@@ -286,6 +398,12 @@ object ProtocolCodec {
             "attachment.finish",
             "attachment.download",
             "command.list",
+            "runtime.document.list",
+            "runtime.document.get",
+            "runtime.capability.list",
+            "runtime.mcp.get",
+            "scheduler.job.list",
+            "scheduler.job.get",
             "plugin.ui.catalog",
             "plugin.ui.asset.get",
             "plugin.ui.query",

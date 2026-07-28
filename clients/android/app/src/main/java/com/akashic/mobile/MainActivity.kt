@@ -220,6 +220,12 @@ class MainActivity : ComponentActivity() {
                             onDismissError = viewModel::dismissError,
                             onSend = viewModel::sendMessage,
                             onSendCommand = viewModel::sendCommand,
+                            onRefreshRuntimeInspection = viewModel::refreshRuntimeInspection,
+                            onOpenRuntimeDocument = viewModel::openRuntimeDocument,
+                            onOpenRuntimeMcp = viewModel::openRuntimeMcp,
+                            onOpenRuntimeJob = viewModel::openRuntimeJob,
+                            onClearRuntimeInspectionDetail =
+                                viewModel::clearRuntimeInspectionDetail,
                             onPluginUiQuery = viewModel::queryPluginUi,
                             onPluginUiOwnerCancelled = viewModel::cancelPluginUiOwner,
                             onPluginUiWebViewDisposed = viewModel::disposePluginUiWebView,

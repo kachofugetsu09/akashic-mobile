@@ -24,6 +24,51 @@ data class ConversationUiState(
     val isStopping: Boolean,
     val canStop: Boolean,
     val canSend: Boolean,
+    val runtimeInspection: RuntimeInspectionUi = RuntimeInspectionUi(),
+)
+
+data class RuntimeInspectionUi(
+    val refreshing: Boolean = false,
+    val detailLoading: Boolean = false,
+    val snapshotId: String? = null,
+    val documents: List<RuntimeDocumentUi> = emptyList(),
+    val jobs: List<RuntimeJobUi> = emptyList(),
+    val mcpServers: List<RuntimeMcpUi> = emptyList(),
+    val pluginCount: Int = 0,
+    val skillCount: Int = 0,
+    val detail: RuntimeDetailUi? = null,
+    val errorMessage: String? = null,
+)
+
+data class RuntimeDocumentUi(
+    val id: String,
+    val title: String,
+    val relativePath: String,
+    val description: String,
+    val available: Boolean,
+)
+
+data class RuntimeJobUi(
+    val id: String,
+    val name: String?,
+    val trigger: String,
+    val tier: String,
+    val fireAt: String,
+    val enabled: Boolean,
+)
+
+data class RuntimeMcpUi(
+    val ownerId: String,
+    val name: String,
+    val toolCount: Int,
+)
+
+data class RuntimeDetailUi(
+    val kind: String,
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val markdown: String,
 )
 
 data class TransferStatusUi(

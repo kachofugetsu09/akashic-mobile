@@ -22,6 +22,10 @@ import {
   Copy,
   Download,
   FileText,
+  LibraryBig,
+  BookOpenText,
+  Server,
+  Timer,
   Menu,
   MessageSquarePlus,
   Paperclip,
@@ -54,6 +58,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ChatMessageView } from "./message-view";
+import { MessageResponse } from "@/components/ai-elements/message";
 import {
   MobilePluginDashboard,
   MobilePluginSlot,
@@ -203,7 +208,7 @@ interface MobilePendingMessage {
 }
 
 export interface MobileSnapshot {
-  protocolVersion: 6;
+  protocolVersion: 7;
   connection: {
     label: string;
     status: ConnectionStatus;
@@ -229,6 +234,51 @@ export interface MobileSnapshot {
     canStop: boolean;
     canSend: boolean;
   };
+  runtimeInspection: MobileRuntimeInspection;
+}
+
+interface MobileRuntimeInspection {
+  refreshing: boolean;
+  detailLoading: boolean;
+  snapshotId?: string;
+  documents: MobileRuntimeDocument[];
+  jobs: MobileRuntimeJob[];
+  mcpServers: MobileRuntimeMcp[];
+  pluginCount: number;
+  skillCount: number;
+  detail?: MobileRuntimeDetail;
+  errorMessage?: string;
+}
+
+interface MobileRuntimeDocument {
+  id: string;
+  title: string;
+  relativePath: string;
+  description: string;
+  available: boolean;
+}
+
+interface MobileRuntimeJob {
+  id: string;
+  name?: string;
+  trigger: string;
+  tier: string;
+  fireAt: string;
+  enabled: boolean;
+}
+
+interface MobileRuntimeMcp {
+  ownerId: string;
+  name: string;
+  toolCount: number;
+}
+
+interface MobileRuntimeDetail {
+  kind: "document" | "mcp" | "schedule";
+  key: string;
+  title: string;
+  subtitle: string;
+  markdown: string;
 }
 
 interface NativeBridge {
@@ -275,6 +325,11 @@ interface NativeBridge {
   copyText(text: string): void;
   performActionHaptic(): void;
   sendCommand(command: string): void;
+  refreshRuntimeInspection(): void;
+  openRuntimeDocument(documentId: string): void;
+  openRuntimeMcp(ownerId: string, serverName: string): void;
+  openRuntimeJob(jobId: string): void;
+  clearRuntimeInspectionDetail(): void;
   stopTurn(): void;
   queryPluginUi(
     requestId: string,
@@ -468,11 +523,69 @@ function parseMobileStreamPatch(value: unknown): MobileStreamPatch {
   };
 }
 
+function parseRuntimeInspection(value: unknown): MobileRuntimeInspection {
+  const raw = requireRecord(value, "runtimeInspection");
+  const detail = raw.detail === undefined || raw.detail === null
+    ? undefined
+    : (() => {
+      const item = requireRecord(raw.detail, "runtimeInspection.detail");
+      const kind = requireString(item.kind, "runtimeInspection.detail.kind");
+      if (!["document", "mcp", "schedule"].includes(kind)) {
+        throw new Error(`runtimeInspection.detail.kind 不受支持: ${kind}`);
+      }
+      return {
+        kind: kind as MobileRuntimeDetail["kind"],
+        key: requireString(item.key, "runtimeInspection.detail.key"),
+        title: requireString(item.title, "runtimeInspection.detail.title"),
+        subtitle: requireString(item.subtitle, "runtimeInspection.detail.subtitle"),
+        markdown: requireString(item.markdown, "runtimeInspection.detail.markdown"),
+      };
+    })();
+  return {
+    refreshing: requireBoolean(raw.refreshing, "runtimeInspection.refreshing"),
+    detailLoading: requireBoolean(raw.detailLoading, "runtimeInspection.detailLoading"),
+    snapshotId: optionalString(raw.snapshotId, "runtimeInspection.snapshotId"),
+    documents: requireArray(raw.documents, "runtimeInspection.documents", (value, index) => {
+      const item = requireRecord(value, `runtimeInspection.documents[${index}]`);
+      return {
+        id: requireString(item.id, `runtimeInspection.documents[${index}].id`),
+        title: requireString(item.title, `runtimeInspection.documents[${index}].title`),
+        relativePath: requireString(item.relativePath, `runtimeInspection.documents[${index}].relativePath`),
+        description: requireString(item.description, `runtimeInspection.documents[${index}].description`),
+        available: requireBoolean(item.available, `runtimeInspection.documents[${index}].available`),
+      };
+    }),
+    jobs: requireArray(raw.jobs, "runtimeInspection.jobs", (value, index) => {
+      const item = requireRecord(value, `runtimeInspection.jobs[${index}]`);
+      return {
+        id: requireString(item.id, `runtimeInspection.jobs[${index}].id`),
+        name: optionalString(item.name, `runtimeInspection.jobs[${index}].name`),
+        trigger: requireString(item.trigger, `runtimeInspection.jobs[${index}].trigger`),
+        tier: requireString(item.tier, `runtimeInspection.jobs[${index}].tier`),
+        fireAt: requireString(item.fireAt, `runtimeInspection.jobs[${index}].fireAt`),
+        enabled: requireBoolean(item.enabled, `runtimeInspection.jobs[${index}].enabled`),
+      };
+    }),
+    mcpServers: requireArray(raw.mcpServers, "runtimeInspection.mcpServers", (value, index) => {
+      const item = requireRecord(value, `runtimeInspection.mcpServers[${index}]`);
+      return {
+        ownerId: requireString(item.ownerId, `runtimeInspection.mcpServers[${index}].ownerId`),
+        name: requireString(item.name, `runtimeInspection.mcpServers[${index}].name`),
+        toolCount: requireNonNegativeInteger(item.toolCount, `runtimeInspection.mcpServers[${index}].toolCount`),
+      };
+    }),
+    pluginCount: requireNonNegativeInteger(raw.pluginCount, "runtimeInspection.pluginCount"),
+    skillCount: requireNonNegativeInteger(raw.skillCount, "runtimeInspection.skillCount"),
+    detail,
+    errorMessage: optionalString(raw.errorMessage, "runtimeInspection.errorMessage"),
+  };
+}
+
 /** 在 native 协议边界校验完整快照，并只补齐 Kotlin 明确定义的默认字段。 */
 function parseMobileSnapshot(value: unknown): MobileSnapshot {
   // 1. 校验协议版本与根对象
   const raw = requireRecord(value, "snapshot");
-  if (raw.protocolVersion !== 6) throw new Error(`不支持的移动端协议版本: ${String(raw.protocolVersion)}`);
+  if (raw.protocolVersion !== 7) throw new Error(`不支持的移动端协议版本: ${String(raw.protocolVersion)}`);
   const connection = requireRecord(raw.connection, "connection");
   const status = requireString(connection.status, "connection.status");
   if (!["connecting", "ready", "degraded", "reconnecting", "disconnected"].includes(status)) {
@@ -523,7 +636,7 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
       };
     })();
   return {
-    protocolVersion: 6,
+    protocolVersion: 7,
     connection: {
       label: requireString(connection.label, "connection.label"),
       status: status as ConnectionStatus,
@@ -579,6 +692,7 @@ function parseMobileSnapshot(value: unknown): MobileSnapshot {
       canStop: requireBoolean(composer.canStop, "composer.canStop"),
       canSend: requireBoolean(composer.canSend, "composer.canSend"),
     },
+    runtimeInspection: parseRuntimeInspection(raw.runtimeInspection),
   };
 }
 
@@ -1559,7 +1673,11 @@ function MobileNativeApp() {
           <MobilePluginTopBar
             title={surface.kind === "plugins"
               ? "插件"
-              : pluginDashboards.find((plugin) => plugin.id === surface.pluginId)?.label ?? "插件看板"}
+              : surface.kind === "runtime"
+                ? "知识与运行"
+                : surface.kind === "runtime-detail"
+                  ? snapshot.runtimeInspection.detail?.title ?? "详情"
+                  : pluginDashboards.find((plugin) => plugin.id === surface.pluginId)?.label ?? "插件看板"}
             onBack={() => window.history.back()}
           />
         )}
@@ -1567,6 +1685,11 @@ function MobileNativeApp() {
           open={drawerOpen}
           snapshot={snapshot}
           pluginCount={pluginDashboards.length}
+          onOpenRuntime={() => {
+            window.AkashicNative?.refreshRuntimeInspection();
+            navigateToSurface({ kind: "runtime" });
+            closeDrawer();
+          }}
           onOpenPlugins={() => {
             navigateToSurface({ kind: "plugins" });
             closeDrawer();
@@ -1607,7 +1730,26 @@ function MobileNativeApp() {
           </div>
         ) : null}
 
-        {surface.kind === "plugins" ? (
+        {surface.kind === "runtime" ? (
+          <RuntimeInspectionDirectory
+            inspection={snapshot.runtimeInspection}
+            onRefresh={() => window.AkashicNative?.refreshRuntimeInspection()}
+            onOpenDocument={(documentId) => {
+              window.AkashicNative?.openRuntimeDocument(documentId);
+              navigateToSurface({ kind: "runtime-detail", detailKind: "document", key: documentId });
+            }}
+            onOpenMcp={(ownerId, name) => {
+              window.AkashicNative?.openRuntimeMcp(ownerId, name);
+              navigateToSurface({ kind: "runtime-detail", detailKind: "mcp", key: `${ownerId}/${name}` });
+            }}
+            onOpenJob={(jobId) => {
+              window.AkashicNative?.openRuntimeJob(jobId);
+              navigateToSurface({ kind: "runtime-detail", detailKind: "schedule", key: jobId });
+            }}
+          />
+        ) : surface.kind === "runtime-detail" ? (
+          <RuntimeInspectionDetail inspection={snapshot.runtimeInspection} />
+        ) : surface.kind === "plugins" ? (
           <MobilePluginDirectory
             plugins={pluginDashboards}
             onOpen={(pluginId) => navigateToSurface({ kind: "dashboard", pluginId })}
@@ -2062,6 +2204,7 @@ function MobileDrawer({
   open,
   snapshot,
   pluginCount,
+  onOpenRuntime,
   onOpenPlugins,
   onRestartPairing,
   onClose,
@@ -2069,6 +2212,7 @@ function MobileDrawer({
   open: boolean;
   snapshot: MobileSnapshot;
   pluginCount: number;
+  onOpenRuntime: () => void;
   onOpenPlugins: () => void;
   onRestartPairing: () => void;
   onClose: () => void;
@@ -2081,6 +2225,14 @@ function MobileDrawer({
     <div className={`mobile-drawer-layer ${open ? "open" : ""}`} aria-hidden={!open}>
       <button className="mobile-drawer-scrim" type="button" onClick={onClose} aria-label="关闭会话抽屉" tabIndex={open ? 0 : -1} />
       <aside ref={drawerRef} className="mobile-drawer" role="dialog" aria-modal="true" aria-label="会话列表" tabIndex={-1}>
+        <button className="mobile-runtime-destination" type="button" onClick={onOpenRuntime}>
+          <LibraryBig size={21} aria-hidden="true" />
+          <span>
+            <strong>知识与运行</strong>
+            <small>记忆 · MCP · 定时任务</small>
+          </span>
+          <ChevronRight size={19} aria-hidden="true" />
+        </button>
         <div className="mobile-drawer__heading">会话</div>
         <button className="mobile-plugin-destination" type="button" onClick={onOpenPlugins}>
           <Puzzle size={20} aria-hidden="true" />
@@ -2154,6 +2306,195 @@ function MobileDrawer({
       </aside>
     </div>
   );
+}
+
+function RuntimeInspectionDirectory({
+  inspection,
+  onRefresh,
+  onOpenDocument,
+  onOpenMcp,
+  onOpenJob,
+}: {
+  inspection: MobileRuntimeInspection;
+  onRefresh: () => void;
+  onOpenDocument: (documentId: string) => void;
+  onOpenMcp: (ownerId: string, name: string) => void;
+  onOpenJob: (jobId: string) => void;
+}) {
+  return (
+    <main className="runtime-library">
+      <header className="runtime-library__intro">
+        <span>当前电脑的只读投影</span>
+        <h1>知识与运行</h1>
+        <p>在一个地方查看人格、记忆、连接能力和正在等待的任务。</p>
+        <button type="button" onClick={onRefresh} disabled={inspection.refreshing}>
+          <RefreshCw size={17} className={inspection.refreshing ? "is-spinning" : ""} />
+          {inspection.refreshing ? "正在刷新" : "刷新"}
+        </button>
+      </header>
+
+      {inspection.errorMessage ? (
+        <div className="runtime-library__error" role="alert">
+          <AlertCircle size={18} />
+          <span>{inspection.errorMessage}</span>
+        </div>
+      ) : null}
+
+      <RuntimeSection
+        className="documents"
+        icon={<BookOpenText size={20} />}
+        eyebrow="Knowledge"
+        title="文档"
+        count={inspection.documents.length}
+      >
+        {inspection.documents.map((document) => (
+          <button
+            className="runtime-item"
+            type="button"
+            key={document.id}
+            disabled={!document.available}
+            onClick={() => onOpenDocument(document.id)}
+          >
+            <span>
+              <strong>{document.title}</strong>
+              <small>{document.description}</small>
+              <code>{document.relativePath}</code>
+            </span>
+            <ChevronRight size={18} />
+          </button>
+        ))}
+      </RuntimeSection>
+
+      <RuntimeSection
+        className="mcp"
+        icon={<Server size={20} />}
+        eyebrow="Connections"
+        title="MCP"
+        count={inspection.mcpServers.length}
+        meta={`${inspection.pluginCount} 插件 · ${inspection.skillCount} Skills`}
+      >
+        {inspection.mcpServers.length ? inspection.mcpServers.map((server) => (
+          <button
+            className="runtime-item"
+            type="button"
+            key={`${server.ownerId}/${server.name}`}
+            onClick={() => onOpenMcp(server.ownerId, server.name)}
+          >
+            <span>
+              <strong>{server.name}</strong>
+              <small>{server.toolCount} 个工具 · {server.ownerId}</small>
+            </span>
+            <ChevronRight size={18} />
+          </button>
+        )) : <p className="runtime-empty">当前快照没有 MCP server。</p>}
+      </RuntimeSection>
+
+      <RuntimeSection
+        className="schedules"
+        icon={<Timer size={20} />}
+        eyebrow="Automation"
+        title="定时任务"
+        count={inspection.jobs.length}
+      >
+        {inspection.jobs.length ? inspection.jobs.map((job) => (
+          <button
+            className="runtime-item"
+            type="button"
+            key={job.id}
+            onClick={() => onOpenJob(job.id)}
+          >
+            <span>
+              <strong>{job.name || "未命名定时任务"}</strong>
+              <small>{formatRuntimeFireAt(job.fireAt)} · {job.trigger}/{job.tier}</small>
+            </span>
+            <span className={`runtime-status ${job.enabled ? "enabled" : ""}`}>
+              {job.enabled ? "启用" : "停用"}
+            </span>
+            <ChevronRight size={18} />
+          </button>
+        )) : <p className="runtime-empty">当前没有定时任务。</p>}
+      </RuntimeSection>
+    </main>
+  );
+}
+
+function RuntimeSection({
+  className,
+  icon,
+  eyebrow,
+  title,
+  count,
+  meta,
+  children,
+}: {
+  className: string;
+  icon: ReactNode;
+  eyebrow: string;
+  title: string;
+  count: number;
+  meta?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={`runtime-section ${className}`}>
+      <header>
+        <span className="runtime-section__icon">{icon}</span>
+        <span>
+          <small>{eyebrow}</small>
+          <strong>{title}</strong>
+        </span>
+        <span className="runtime-section__count">{count}</span>
+      </header>
+      {meta ? <p className="runtime-section__meta">{meta}</p> : null}
+      <div className="runtime-section__items">{children}</div>
+    </section>
+  );
+}
+
+function RuntimeInspectionDetail({
+  inspection,
+}: {
+  inspection: MobileRuntimeInspection;
+}) {
+  if (inspection.detailLoading) {
+    return (
+      <main className="runtime-detail runtime-detail--loading">
+        <RefreshCw size={24} className="is-spinning" />
+        <p>正在读取最新内容…</p>
+      </main>
+    );
+  }
+  if (!inspection.detail) {
+    return (
+      <main className="runtime-detail runtime-detail--loading">
+        <AlertCircle size={24} />
+        <p>{inspection.errorMessage || "详情暂时不可用"}</p>
+      </main>
+    );
+  }
+  return (
+    <main className={`runtime-detail ${inspection.detail.kind}`}>
+      <header>
+        <span>{inspection.detail.kind === "document" ? "Markdown" : inspection.detail.kind === "mcp" ? "MCP Server" : "Schedule"}</span>
+        <h1>{inspection.detail.title}</h1>
+        <p>{inspection.detail.subtitle}</p>
+      </header>
+      <article className="runtime-markdown">
+        <MessageResponse>{inspection.detail.markdown}</MessageResponse>
+      </article>
+    </main>
+  );
+}
+
+function formatRuntimeFireAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function UnavailableSessionFooter({ session }: { session: MobileSession }) {
