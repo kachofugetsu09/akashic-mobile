@@ -215,8 +215,7 @@ class LocalDeliveryStore(
         expectedServerId: String?,
         updatedAt: Long,
     ): Boolean = projectionStateMutex.withLock {
-        // 1. 校验当前投影边界；canonical 迁移后的旧 UI 写入已失效
-        require(offsetPx in -10_000..10_000) { "阅读锚点偏移超出范围" }
+        // 1. 校验当前投影身份；长消息顶部可远离视口，不裁切其相对偏移
         val conversation = requireNotNull(database.conversations().get(sessionId)) {
             "阅读位置会话不存在: $sessionId"
         }

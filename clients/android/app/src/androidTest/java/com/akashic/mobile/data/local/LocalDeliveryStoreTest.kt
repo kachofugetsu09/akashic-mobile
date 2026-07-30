@@ -79,6 +79,25 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun tallMessageReadingAnchorPreservesLargeNegativeOffset() = runBlocking {
+        database.messages().upsert(
+            MessageEntity("tall-message", null, "mobile:test", "assistant", "长回复", "complete", 1, 1),
+        )
+
+        assertTrue(store.saveReadingPosition(
+            sessionId = "mobile:test",
+            messageId = "tall-message",
+            offsetPx = -25_000,
+            expectedServerId = "server",
+            updatedAt = 2,
+        ))
+
+        val summary = database.conversations().observeSummaries("server").first().single()
+        assertEquals("tall-message", summary.anchorMessageId)
+        assertEquals(-25_000, summary.anchorOffsetPx)
+    }
+
+    @Test
     fun deliberateConversationEntryClearsAnchorWithoutAdvancingReadWatermark() = runBlocking {
         database.messages().upsert(
             MessageEntity("already-read", null, "mobile:test", "assistant", "已读", "complete", 10, 10),
