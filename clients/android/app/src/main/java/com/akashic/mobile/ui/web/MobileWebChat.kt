@@ -95,6 +95,7 @@ fun MobileWebChat(
     onRestartPairing: () -> Unit,
     onReloadFromServer: () -> Unit,
     onExportDiagnostics: () -> Unit,
+    onOpenSettings: () -> Unit,
     onAttach: () -> Unit,
     onRemoveAttachment: (String) -> Unit,
     onRetryAttachment: (String) -> Unit,
@@ -157,6 +158,7 @@ fun MobileWebChat(
             onRestartPairing = onRestartPairing,
             onReloadFromServer = onReloadFromServer,
             onExportDiagnostics = onExportDiagnostics,
+            onOpenSettings = onOpenSettings,
             onAttach = onAttach,
             onRemoveAttachment = onRemoveAttachment,
             onRetryAttachment = onRetryAttachment,
@@ -371,6 +373,7 @@ private data class MobileWebCallbacks(
     val onRestartPairing: () -> Unit,
     val onReloadFromServer: () -> Unit,
     val onExportDiagnostics: () -> Unit,
+    val onOpenSettings: () -> Unit,
     val onAttach: () -> Unit,
     val onRemoveAttachment: (String) -> Unit,
     val onRetryAttachment: (String) -> Unit,
@@ -460,6 +463,9 @@ private class MobileWebBridge(
 
     @JavascriptInterface
     fun exportDiagnostics() = dispatch { it.onExportDiagnostics() }
+
+    @JavascriptInterface
+    fun openSettings() = dispatch { it.onOpenSettings() }
 
     @JavascriptInterface
     fun chooseAttachments() = dispatch { it.onAttach() }

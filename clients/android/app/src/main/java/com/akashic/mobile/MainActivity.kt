@@ -41,6 +41,7 @@ import androidx.lifecycle.lifecycleScope
 import com.akashic.mobile.ui.design.AkashicTheme
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
 import com.akashic.mobile.ui.pairing.PairingScreen
+import com.akashic.mobile.ui.settings.SettingsScreen
 import com.akashic.mobile.ui.web.MobileWebChat
 import com.akashic.mobile.ui.web.MobileSharedTextDraft
 import com.akashic.mobile.ui.web.openCachedAttachment
@@ -53,9 +54,11 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
     private val notificationsEnabled = mutableStateOf(true)
+    private val settingsOpen = mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        settingsOpen.value = savedInstanceState?.getBoolean(KEY_SETTINGS_OPEN) ?: false
         consumeIncomingShare(intent)
         takeNotificationTarget(intent)?.let(viewModel::acceptNotificationTarget)
         notificationsEnabled.value = NotificationManagerCompat.from(this).areNotificationsEnabled()
@@ -187,6 +190,7 @@ class MainActivity : ComponentActivity() {
                             onRestartPairing = viewModel::restartPairing,
                             onReloadFromServer = viewModel::reloadFromServer,
                             onExportDiagnostics = ::shareDiagnostics,
+                            onOpenSettings = { settingsOpen.value = true },
                             onAttach = { attachmentPicker.launch(arrayOf("*/*")) },
                             onRemoveAttachment = viewModel::removeAttachment,
                             onRetryAttachment = viewModel::retryAttachment,
@@ -259,6 +263,9 @@ class MainActivity : ComponentActivity() {
                             onOpenSettings = ::openNotificationSettings,
                         )
                     }
+                    if (settingsOpen.value) {
+                        SettingsScreen(onBack = { settingsOpen.value = false })
+                    }
                 }
             }
         }
@@ -274,6 +281,12 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         notificationsEnabled.value = NotificationManagerCompat.from(this).areNotificationsEnabled()
+        MobileConnectionService.dismissMessageNotifications(this)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(KEY_SETTINGS_OPEN, settingsOpen.value)
+        super.onSaveInstanceState(outState)
     }
 
     private fun consumeIncomingShare(intent: Intent) {
@@ -344,6 +357,7 @@ class MainActivity : ComponentActivity() {
     private companion object {
         const val PERMISSION_PREFERENCES = "notification_permission"
         const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "requested"
+        const val KEY_SETTINGS_OPEN = "settings_open"
     }
 }
 
