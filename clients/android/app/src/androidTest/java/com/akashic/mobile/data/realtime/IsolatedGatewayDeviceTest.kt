@@ -75,8 +75,8 @@ class IsolatedGatewayDeviceTest {
             "akasha_https_elapsed_ms=$elapsedMillis response_bytes=${resultJson.toByteArray().size}",
         )
         assertEquals("akasha.recall-card.v1", result["schema"]?.jsonPrimitive?.content)
-        assertEquals(5, result["left"]?.jsonArray?.size)
-        assertTrue(resultJson.toByteArray().size < 16 * 1024)
+        assertEquals(40, result["left"]?.jsonArray?.size)
+        assertTrue(resultJson.toByteArray().size < 192 * 1024)
         assertTrue("Akasha 首次 HTTPS 查询耗时 ${elapsedMillis}ms", elapsedMillis < 3_000)
     }
 
