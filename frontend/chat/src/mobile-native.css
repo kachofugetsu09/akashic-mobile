@@ -2652,7 +2652,7 @@ button.tool-step-summary:active {
 .mobile-drawer-layer {
   position: absolute;
   inset: 0;
-  z-index: 60;
+  z-index: 80;
   visibility: hidden;
   pointer-events: none;
   transition-property: visibility;
