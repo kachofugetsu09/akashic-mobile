@@ -16,8 +16,8 @@
 
 ## 仓库边界
 
-- 本仓库拥有 Android 客户端、移动 WebView、客户端协议快照、测试和 release 工具。
-- `akashic-agent` 拥有服务端协议真源、gateway、插件服务和集成环境。
+- 本仓库拥有 Android 客户端、WebView 容器与原生桥、客户端协议快照、测试和 release 工具。
+- `akashic-agent` 拥有共享对话 WebUI 源码、服务端协议真源、gateway、插件服务和集成环境。
 - 客户端必须能够脱离父仓库独立测试和构建。
 - 禁止引入指向开发者本机或父仓库的绝对路径。
 
@@ -29,5 +29,5 @@
 ## 交付
 
 - PR 必须说明前置 PR、行为变化、验证命令和回滚方式。
-- 修改 Android 后运行相关 Gradle 测试；修改移动 Web 后运行 typecheck、lint 和 build。
+- 修改 Android 后运行相关 Gradle 测试；采用新 WebUI 产物时校验固定 source manifest、SHA-256 和 Android 构建。
 - 跨仓库协议与运行时兼容证据必须固定确定 commit、tree 和 digest，不使用浮动分支。

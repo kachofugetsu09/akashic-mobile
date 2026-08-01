@@ -19,7 +19,12 @@
 │   ├─ filesDir attachments / shares / plugin UI cache          │
 │   ├─ DataStore selection and UI settings                      │
 │   ├─ Android Keystore device identity                         │
-│   └─ native shell + mobile WebView                            │
+│   └─ native shell + WebView host/bridge                       │
+└────────────────────────────────────────────────────────────────┘
+                               ▲
+                               │ pinned ZIP + SHA-256 + source manifest
+┌──────────────────────── akashic-agent ────────────────────────┐
+│ frontend/chat shared WebUI source + desktop/mobile entries    │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -34,6 +39,7 @@
 | `protocol/mobile-realtime-v1.json` | 客户端历史协议快照 | 核心 schema 是真源 |
 | `runtime-gate/` | 固定核心组合并验证跨仓库语义 | 移动端维护消费者契约；核心提供 provider 测试 |
 | plugin UI stores | 缓存核心发布的 asset/catalog/result | 核心插件 runtime 是能力真源 |
+| `clients/android/mobile-web` | 固定共享 WebUI ZIP、摘要与来源；Gradle 校验后解包 | `akashic-agent/frontend/chat` 是源码真源；移动端拥有消费锁 |
 
 ## 当前配对行为
 

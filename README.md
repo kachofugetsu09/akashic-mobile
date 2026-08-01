@@ -1,16 +1,15 @@
 # Akashic Mobile
 
-Akashic 的 Android 客户端与移动 WebView runtime。
+Akashic 的 Android 客户端与移动 WebView 容器。共享对话 WebUI 源码位于 `akashic-agent/frontend/chat`；本仓库固定并校验其构建产物。
 
 本仓库可以独立测试、构建和发布 APK；服务端协议真源仍由 `akashic-agent/schema/` 维护。
 
 ## 本地验证
 
 ```bash
-npm ci
-npm run typecheck
-npm run lint
-npm run test:mobile-web-state
+cd clients/android
+./gradlew :app:verifyMobileWebArchive
+cd ../..
 python3 -m unittest discover -s runtime-gate -p 'test_*.py'
 python3 runtime-gate/verify_contract.py --mobile-root .
 cd clients/android
@@ -19,6 +18,8 @@ cd clients/android
 ```
 
 `protocol/source.json` 固定客户端实现对应的历史协议快照；`runtime-gate/` 另外固定实际验收的核心 revision、tree 和 24 个跨仓库语义场景。两者变化时必须重新运行 runtime contract Gate，不能用浮动分支或本机核心 checkout 代替。
+
+`clients/android/mobile-web/source.json` 固定共享 WebUI 的源码 commit/tree，旁边的 ZIP 与 SHA-256 是 Android 的独立构建输入。更新界面时先在 `akasic-agent` 运行 WebUI 类型检查、lint、状态测试和双入口构建，再用干净提交生成新 ZIP，并同步这三个文件。
 
 ## 真实设备 Gate
 

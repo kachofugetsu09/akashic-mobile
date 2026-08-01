@@ -10,7 +10,7 @@
 
 ### MOB-OWN-002 移动端拥有客户端能力
 
-本仓库拥有 Android 客户端、移动 WebView、移动交互、客户端可靠投递状态、设备侧密钥、协议消费实现、测试和发布工具。
+本仓库拥有 Android 客户端、WebView 容器与原生桥、客户端可靠投递状态、设备侧密钥、协议消费实现、测试和发布工具。共享对话 WebUI 源码由 `akashic-agent/frontend/chat` 拥有；本仓库只消费固定来源和摘要的构建产物。
 
 ### MOB-OWN-003 核心补丁必须具有通用理由
 
@@ -98,7 +98,7 @@ HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system t
 
 ### MOB-REPO-001 移动端仓库可独立构建
 
-移动端必须能脱离核心源码 checkout 独立获取依赖、测试、构建和发布。仓库不得依赖开发者本机绝对路径或未固定的父仓库状态。
+移动端必须能脱离核心源码 checkout 独立获取依赖、测试、构建和发布。共享 WebUI 以仓库内固定 ZIP、source manifest 和 SHA-256 作为构建输入；仓库不得依赖开发者本机绝对路径或未固定的父仓库状态。
 
 ### MOB-SEC-001 公共仓库不保存秘密
 
@@ -123,3 +123,7 @@ Android 客户端只从 `kachofugetsu09/akashic-mobile` 的公开 GitHub 稳定 
 ### MOB-UI-001 模态抽屉拥有最高导航层级
 
 会话抽屉打开时位于对话内容、顶栏连接状态和运行状态之上；运行状态使用 Material 3 全圆角胶囊容器，不得穿透抽屉或遮挡抽屉内容。
+
+### MOB-UI-002 共享 WebUI 产物必须固定来源并校验
+
+APK 只能打包由干净 `akashic-agent` commit 构建的共享 WebUI ZIP。产物必须记录 source repository、commit、tree 与资产摘要；Gradle 在解包前校验外部 SHA-256 和内嵌 manifest，不匹配时 fail-loud，不从网络、本机父目录或旧 build cache 回退。

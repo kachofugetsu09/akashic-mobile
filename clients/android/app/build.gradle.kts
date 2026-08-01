@@ -25,20 +25,26 @@ check(Regex("\\.[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*").matches(debugApplicatio
 }
 
 val repositoryRoot = rootProject.projectDir.parentFile.parentFile
+val mobileWebRoot = repositoryRoot.resolve("clients/android/mobile-web")
+val defaultMobileWebArchive = mobileWebRoot.resolve("akashic-mobile-web.zip")
+val defaultMobileWebDigest = mobileWebRoot.resolve("akashic-mobile-web.zip.sha256")
+val defaultMobileWebSource = mobileWebRoot.resolve("source.json")
+val mobileWebArchive = providers.gradleProperty("akashicMobileWebArchive").orNull
+    ?.let(repositoryRoot::resolve)
+    ?: defaultMobileWebArchive
+val mobileWebDigest = providers.gradleProperty("akashicMobileWebDigest").orNull
+    ?.let(repositoryRoot::resolve)
+    ?: defaultMobileWebDigest
 val generatedMobileWebAssets = layout.buildDirectory.dir("generated/mobileWebAssets")
-val buildMobileWeb by tasks.registering(Exec::class) {
-    workingDir = repositoryRoot
-    environment("AKASHIC_MOBILE_WEB_OUT_DIR", generatedMobileWebAssets.get().asFile.absolutePath)
-    commandLine("npm", "run", "build:mobile-web")
-    inputs.file(repositoryRoot.resolve("package.json"))
-    inputs.file(repositoryRoot.resolve("package-lock.json"))
-    inputs.dir(repositoryRoot.resolve("frontend/chat/src"))
-    inputs.file(repositoryRoot.resolve("frontend/chat/mobile.html"))
-    inputs.file(repositoryRoot.resolve("frontend/chat/vite.mobile.config.ts"))
-    inputs.file(repositoryRoot.resolve("frontend/chat/postcss.config.cjs"))
-    inputs.file(repositoryRoot.resolve("frontend/chat/tailwind.config.cjs"))
-    inputs.file(repositoryRoot.resolve("tsconfig.json"))
-    outputs.dir(generatedMobileWebAssets)
+val verifyMobileWebArchive by tasks.registering(VerifyMobileWebArchive::class) {
+    archiveFile.set(mobileWebArchive)
+    digestFile.set(mobileWebDigest)
+    sourceFile.set(defaultMobileWebSource)
+}
+val extractMobileWebAssets by tasks.registering(Sync::class) {
+    dependsOn(verifyMobileWebArchive)
+    from(zipTree(mobileWebArchive))
+    into(generatedMobileWebAssets)
 }
 if (!hasReleaseSigning && gradle.startParameter.taskNames.any { it.contains("release", ignoreCase = true) }) {
     throw GradleException("Release signing environment is required")
@@ -107,7 +113,7 @@ android {
 }
 
 tasks.named("preBuild").configure {
-    dependsOn(buildMobileWeb)
+    dependsOn(extractMobileWebAssets)
 }
 
 kotlin {
