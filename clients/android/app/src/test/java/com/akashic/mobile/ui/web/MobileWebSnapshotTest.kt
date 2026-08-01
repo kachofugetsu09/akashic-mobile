@@ -155,6 +155,34 @@ class MobileWebSnapshotTest {
     }
 
     @Test
+    fun controlStatePatchDoesNotSerializeUnchangedConversationHistory() {
+        val history = List(400) { index ->
+            MessageUi.User(
+                id = "user:$index",
+                sessionId = "mobile:test",
+                text = "历史消息-$index-${"内容".repeat(150)}",
+                deliveryLabel = "已发送",
+                replyable = true,
+                createdAtMillis = index.toLong(),
+                reply = null,
+            )
+        }
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = history,
+        )
+        val after = before.copy(connectionNotice = "消息已缓存")
+
+        val patchJson = Json.encodeToString(after.toMobileWebStatePatch(before))
+        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
+
+        assertTrue(snapshotJson.length > 100_000)
+        assertTrue(patchJson.length * 100 < snapshotJson.length)
+        assertEquals(null, after.copy(projectionGeneration = 10).toMobileWebStatePatch(before))
+    }
+
+    @Test
     fun serializesVersionedConversationSnapshot() {
         val snapshot = ConversationUiState(
             connectionLabel = "正在重连",

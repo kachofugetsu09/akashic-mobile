@@ -48,6 +48,19 @@ data class MobileWebStreamPatch(
 )
 
 @Serializable
+data class MobileWebStatePatch(
+    val protocolVersion: Int,
+    val connection: MobileWebConnection,
+    val sessions: List<MobileWebSession>,
+    val selectedSessionId: String?,
+    val readingPosition: MobileWebReadingPosition?,
+    val navigationTarget: MobileWebNavigationTarget?,
+    val projectionGeneration: Long,
+    val composer: MobileWebComposer,
+    val runtimeInspection: MobileWebRuntimeInspection,
+)
+
+@Serializable
 data class MobileWebConnection(
     val label: String,
     val status: MobileWebConnectionStatus,
@@ -289,6 +302,49 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     ),
     runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
 )
+
+/** Build a control-state patch without serializing the unchanged message graph. */
+fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): MobileWebStatePatch? {
+    if (
+        selectedSessionId != previous.selectedSessionId ||
+        projectionGeneration != previous.projectionGeneration ||
+        messages != previous.messages
+    ) {
+        return null
+    }
+    return MobileWebStatePatch(
+        protocolVersion = 1,
+        connection = MobileWebConnection(
+            label = connectionLabel,
+            status = connectionStatus.toMobileWebStatus(),
+            notice = connectionNotice,
+            error = errorNotice,
+        ),
+        sessions = sessions.map(SessionUi::toMobileWebSession),
+        selectedSessionId = selectedSessionId,
+        readingPosition = readingPosition?.toMobileWebReadingPosition(),
+        navigationTarget = navigationTarget?.toMobileWebNavigationTarget(),
+        projectionGeneration = projectionGeneration,
+        composer = MobileWebComposer(
+            draft = MobileWebComposerDraft(
+                text = composerDraft.text,
+                replyToMessageId = composerDraft.replyToMessageId,
+                updatedAt = composerDraft.updatedAt,
+            ),
+            attachments = attachments.map(ComposerAttachmentUi::toMobileWebAttachment),
+            pendingMessages = pendingMessages.map(PendingMessageUi::toMobileWebPendingMessage),
+            transferStatus = transferStatus?.toMobileWebTransferStatus(),
+            commands = commands.map(CommandUi::toMobileWebCommand),
+            isStreaming = isStreaming,
+            isResyncing = isResyncing,
+            canResync = canResync,
+            isStopping = isStopping,
+            canStop = canStop,
+            canSend = canSend,
+        ),
+        runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
+    )
+}
 
 private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
     MobileWebRuntimeInspection(
