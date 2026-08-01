@@ -387,7 +387,7 @@ private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
         errorMessage = errorMessage,
     )
 
-/** 只为同一 streaming 消息的追加内容生成轻量 WebView patch。 */
+/** 为同一 streaming 消息的局部变化生成轻量 WebView patch。 */
 fun ConversationUiState.toMobileWebStreamPatch(
     previous: ConversationUiState,
 ): MobileWebStreamPatch? {
@@ -400,13 +400,13 @@ fun ConversationUiState.toMobileWebStreamPatch(
         return null
     }
 
-    // 2. 只允许一个现有 streaming assistant message 发生追加
+    // 2. 只允许一个现有 streaming assistant message 发生局部变化
     var changedIndex = -1
     for (index in messages.indices) {
         val before = previous.messages[index]
         val after = messages[index]
         if (before == after) continue
-        if (changedIndex >= 0 || !after.isAppendOnlyStreamUpdate(before)) return null
+        if (changedIndex >= 0 || !after.isSameStreamingTurnUpdate(before)) return null
         changedIndex = index
     }
     if (changedIndex < 0) return null
@@ -421,37 +421,15 @@ fun ConversationUiState.toMobileWebStreamPatch(
     )
 }
 
-private fun MessageUi.isAppendOnlyStreamUpdate(previous: MessageUi): Boolean {
+private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
     if (this !is MessageUi.AssistantTurn || previous !is MessageUi.AssistantTurn) return false
     if (!isStreaming || !previous.isStreaming || id != previous.id) return false
-    if (
-        previous.copy(
-            answer = answer,
-            blocks = blocks,
-            durationSeconds = durationSeconds,
-            updatedAtMillis = updatedAtMillis,
-        ) != this ||
-        !answer.startsWith(previous.answer) ||
-        blocks.size != previous.blocks.size
-    ) {
-        return false
-    }
-
-    var appended = answer.length > previous.answer.length
-    for (index in blocks.indices) {
-        val before = previous.blocks[index]
-        val after = blocks[index]
-        if (before == after) continue
-        if (
-            before.kind != ProcessBlockKind.THINKING ||
-            before.copy(detail = after.detail) != after ||
-            !after.detail.startsWith(before.detail)
-        ) {
-            return false
-        }
-        appended = appended || after.detail.length > before.detail.length
-    }
-    return appended
+    return previous.copy(
+        answer = answer,
+        blocks = blocks,
+        durationSeconds = durationSeconds,
+        updatedAtMillis = updatedAtMillis,
+    ) == this
 }
 
 private fun TransferStatusUi.toMobileWebTransferStatus() = MobileWebTransferStatus(

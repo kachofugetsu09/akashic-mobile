@@ -773,6 +773,13 @@ internal fun mobileNavigationAction(url: String, isMainFrame: Boolean): MobileNa
 
 private data class MobileMediaResource(val path: String, val contentType: String)
 
+/** 把协议 Content-Type 规范为 WebResourceResponse 要求的不带参数 MIME。 */
+internal fun mobileMediaMimeType(contentType: String): String {
+    val mimeType = contentType.substringBefore(';').trim().lowercase()
+    require(MIME_TYPE_PATTERN.matches(mimeType)) { "附件 MIME type 无效: $contentType" }
+    return mimeType
+}
+
 private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
     private val resources = AtomicReference<Map<String, MobileMediaResource>>(emptyMap())
 
@@ -789,7 +796,17 @@ private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
         } catch (_: FileNotFoundException) {
             return null
         }
-        return WebResourceResponse(resource.contentType, null, stream)
+        return WebResourceResponse(
+            resource.contentType,
+            null,
+            200,
+            "OK",
+            mapOf(
+                "Cache-Control" to "no-store",
+                "X-Content-Type-Options" to "nosniff",
+            ),
+            stream,
+        )
     }
 }
 
@@ -802,7 +819,9 @@ private fun ConversationUiState.mediaResources(): Map<String, MobileMediaResourc
             }
         }
         .filter { it.cachePath.isNotBlank() }
-        .associate { it.id to MobileMediaResource(it.cachePath, it.contentType) }
+        .associate { it.id to MobileMediaResource(it.cachePath, mobileMediaMimeType(it.contentType)) }
+
+private val MIME_TYPE_PATTERN = Regex("^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
 
 private fun WebView.pushSnapshot(snapshotJson: String) {
     postMobileMessage("mobile.snapshot", snapshotJson)

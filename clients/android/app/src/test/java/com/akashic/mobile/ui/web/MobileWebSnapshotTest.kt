@@ -69,7 +69,7 @@ class MobileWebSnapshotTest {
     }
 
     @Test
-    fun createsPatchForAppendOnlyThinkingAndRejectsStructuralChange() {
+    fun createsPatchForThinkingAndRejectsCompletedTurn() {
         val thinking = ProcessBlockUi(
             id = "thinking-1",
             kind = ProcessBlockKind.THINKING,
@@ -112,6 +112,59 @@ class MobileWebSnapshotTest {
             appended.toMobileWebStreamPatch(before)?.message?.blocks?.single()?.detail,
         )
         assertEquals(null, completed.toMobileWebStreamPatch(appended))
+    }
+
+    @Test
+    fun createsPatchForToolInsertionAndToolStateChange() {
+        val thinking = ProcessBlockUi(
+            id = "thinking-1",
+            kind = ProcessBlockKind.THINKING,
+            title = "思考",
+            detail = "检查完成",
+            state = ProcessBlockState.COMPLETED,
+        )
+        val tool = ProcessBlockUi(
+            id = "tool-1",
+            kind = ProcessBlockKind.TOOL,
+            title = "读取文件",
+            detail = "读取配置",
+            state = ProcessBlockState.RUNNING,
+        )
+        val message = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = listOf(thinking),
+            answer = "",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = null,
+            createdAtMillis = 1_000,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(message),
+            isStreaming = true,
+        )
+        val running = before.copy(messages = listOf(message.copy(blocks = listOf(thinking, tool))))
+        val finished = running.copy(
+            messages = listOf(
+                message.copy(
+                    blocks = listOf(
+                        thinking,
+                        tool.copy(state = ProcessBlockState.COMPLETED, resultPreview = "完成"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            MobileWebProcessState.RUNNING,
+            running.toMobileWebStreamPatch(before)?.message?.blocks?.last()?.state,
+        )
+        assertEquals(
+            MobileWebProcessState.COMPLETED,
+            finished.toMobileWebStreamPatch(running)?.message?.blocks?.last()?.state,
+        )
     }
 
     @Test
