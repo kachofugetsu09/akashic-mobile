@@ -20,6 +20,10 @@ val debugApplicationIdSuffix = providers
     .gradleProperty("akashicDebugApplicationIdSuffix")
     .orElse(".debug")
     .get()
+val debugAppName = providers
+    .gradleProperty("akashicDebugAppName")
+    .orElse("Akashic Debug")
+    .get()
 check(Regex("\\.[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)*").matches(debugApplicationIdSuffix)) {
     "akashicDebugApplicationIdSuffix must contain dot-prefixed application ID segments"
 }
@@ -79,6 +83,7 @@ android {
         debug {
             applicationIdSuffix = debugApplicationIdSuffix
             versionNameSuffix = "-debug"
+            resValue("string", "app_name", debugAppName)
             buildConfigField("boolean", "ALLOW_INSECURE_WS", "true")
         }
         release {

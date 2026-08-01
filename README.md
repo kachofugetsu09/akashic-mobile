@@ -21,6 +21,20 @@ cd clients/android
 
 `clients/android/mobile-web/source.json` 固定共享 WebUI 的源码 commit/tree，旁边的 ZIP 与 SHA-256 是 Android 的独立构建输入。更新界面时先在 `akasic-agent` 运行 WebUI 类型检查、lint、状态测试和双入口构建，再用干净提交生成新 ZIP，并同步这三个文件。
 
+## WebUI Pilot APK
+
+真机视觉验收使用独立包名和应用名，不覆盖正式 Akashic：
+
+```bash
+cd clients/android
+./gradlew \
+  -PakashicDebugApplicationIdSuffix=.webuipilot \
+  -PakashicDebugAppName='Akashic WebUI Pilot' \
+  :app:assembleDebug
+```
+
+产物仍位于 `app/build/outputs/apk/debug/app-debug.apk`，包名为 `com.akashic.mobile.webuipilot`，使用 Android debug 签名且只用于本地验收。
+
 ## 真实设备 Gate
 
 禁止直接在个人设备上运行 `connectedDebugAndroidTest`。它使用固定包名，不能在安装前证明候选不会覆盖已有应用或测试数据。
