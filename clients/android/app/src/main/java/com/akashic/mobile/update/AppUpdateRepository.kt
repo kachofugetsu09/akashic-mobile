@@ -126,7 +126,7 @@ internal class AppUpdateRepository(
     fun canRequestPackageInstalls(context: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.O || context.packageManager.canRequestPackageInstalls()
 
-    @Throws(ActivityNotFoundException::class, SecurityException::class, IOException::class)
+    @Throws(ActivityNotFoundException::class, SecurityException::class)
     fun openInstallPermissionSettings(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         context.startActivity(
@@ -140,7 +140,7 @@ internal class AppUpdateRepository(
         PendingUpdateStore.loadVerified(context)
     }
 
-    @Throws(ActivityNotFoundException::class, SecurityException::class)
+    @Throws(ActivityNotFoundException::class, SecurityException::class, IOException::class)
     fun launchInstaller(context: Context, apk: File) {
         // Android 系统安装器负责最终签名连续性与用户确认。
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.files", apk)
