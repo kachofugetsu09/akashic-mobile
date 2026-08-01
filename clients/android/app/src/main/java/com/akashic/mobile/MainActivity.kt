@@ -58,6 +58,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        settingsOpen.value = savedInstanceState?.getBoolean(KEY_SETTINGS_OPEN) ?: false
         consumeIncomingShare(intent)
         takeNotificationTarget(intent)?.let(viewModel::acceptNotificationTarget)
         notificationsEnabled.value = NotificationManagerCompat.from(this).areNotificationsEnabled()
@@ -283,6 +284,11 @@ class MainActivity : ComponentActivity() {
         MobileConnectionService.dismissMessageNotifications(this)
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(KEY_SETTINGS_OPEN, settingsOpen.value)
+        super.onSaveInstanceState(outState)
+    }
+
     private fun consumeIncomingShare(intent: Intent) {
         val incoming = try {
             parseIncomingShare(intent)
@@ -351,6 +357,7 @@ class MainActivity : ComponentActivity() {
     private companion object {
         const val PERMISSION_PREFERENCES = "notification_permission"
         const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "requested"
+        const val KEY_SETTINGS_OPEN = "settings_open"
     }
 }
 
