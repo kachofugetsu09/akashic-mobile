@@ -50,6 +50,17 @@ clients/android/scripts/collect-debug-diagnostics.sh
 
 ADB 报告写入 `clients/android/build/reports/debug-diagnostics/<时间戳>/`。Debug 包与正式包数据隔离，需要单独配对。
 
+## Android Release
+
+正式 APK 只发布到本仓库的公开 [GitHub Releases](https://github.com/kachofugetsu09/akashic-mobile/releases)。应用内“设置 → 检查更新”只接受稳定的 `vMAJOR.MINOR.PATCH` Release，以及名称为 `Akashic-Mobile-vMAJOR.MINOR.PATCH.apk` 且带 GitHub SHA-256 摘要的资产。
+
+```bash
+cd clients/android
+./scripts/publish-release.sh 0.8.15
+```
+
+发布脚本会构建并验证签名，上传 APK、R8 mapping 和 `SHA256SUMS`。签名材料仍只从本机凭据或受保护 CI secret 读取，不进入仓库或 Release。
+
 ## 安全边界
 
 - 不提交 APK 签名文件或密码。

@@ -35,6 +35,7 @@ import {
   RotateCcw,
   Search,
   SendHorizontal,
+  Settings,
   Share2,
   Square,
   TimerReset,
@@ -290,6 +291,7 @@ interface NativeBridge {
   restartPairing(): void;
   reloadFromServer(): void;
   exportDiagnostics(): void;
+  openSettings(): void;
   chooseAttachments(): void;
   removeAttachment(attachmentId: string): void;
   retryAttachment(attachmentId: string): void;
@@ -1694,6 +1696,10 @@ function MobileNativeApp() {
             navigateToSurface({ kind: "plugins" });
             closeDrawer();
           }}
+          onOpenSettings={() => {
+            window.AkashicNative?.openSettings();
+            closeDrawer();
+          }}
           onRestartPairing={() => {
             flushMobileComposerBeforePairing(
               flushComposerDraft,
@@ -2206,6 +2212,7 @@ function MobileDrawer({
   pluginCount,
   onOpenRuntime,
   onOpenPlugins,
+  onOpenSettings,
   onRestartPairing,
   onClose,
 }: {
@@ -2214,6 +2221,7 @@ function MobileDrawer({
   pluginCount: number;
   onOpenRuntime: () => void;
   onOpenPlugins: () => void;
+  onOpenSettings: () => void;
   onRestartPairing: () => void;
   onClose: () => void;
 }) {
@@ -2225,6 +2233,9 @@ function MobileDrawer({
     <div className={`mobile-drawer-layer ${open ? "open" : ""}`} aria-hidden={!open}>
       <button className="mobile-drawer-scrim" type="button" onClick={onClose} aria-label="关闭会话抽屉" tabIndex={open ? 0 : -1} />
       <aside ref={drawerRef} className="mobile-drawer" role="dialog" aria-modal="true" aria-label="会话列表" tabIndex={-1}>
+        <button className="mobile-drawer__close" type="button" onClick={onClose} aria-label="关闭会话抽屉">
+          <X size={24} />
+        </button>
         <button className="mobile-runtime-destination" type="button" onClick={onOpenRuntime}>
           <LibraryBig size={21} aria-hidden="true" />
           <span>
@@ -2275,6 +2286,10 @@ function MobileDrawer({
         </nav>
         <MobilePluginSlot name="drawer.panel" sessionId={snapshot.selectedSessionId} />
         <div className="mobile-drawer__actions">
+          <button className="drawer-action" type="button" onClick={onOpenSettings}>
+            <Settings size={18} />
+            <span>设置</span>
+          </button>
           <button className="drawer-action" type="button" onClick={() => {
             window.AkashicNative?.exportDiagnostics();
             onClose();

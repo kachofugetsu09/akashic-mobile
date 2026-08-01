@@ -6,6 +6,9 @@
     <files-path
         name="incoming_shares"
         path="incoming-shares/" />
+    <files-path
+        name="updates"
+        path="updates/" />
     <cache-path
         name="shared_text"
         path="shared-text/" />

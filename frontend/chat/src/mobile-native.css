@@ -758,6 +758,7 @@ button {
 .mobile-icon-button:focus-visible,
 .mobile-send-button:focus-visible,
 .drawer-action:focus-visible,
+.mobile-drawer__close:focus-visible,
 .new-chat-action:focus-visible,
 .command-row:focus-visible,
 .mobile-session-row:focus-visible,
@@ -876,11 +877,14 @@ button {
 
 .agent-task-state {
   display: flex;
-  min-height: 44px;
+  min-height: 32px;
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
+  border-radius: var(--m-shape-full);
+  padding: 0 12px;
   color: var(--m-trace-text);
+  background: var(--m-trace-soft);
   font-size: 0.75rem;
   font-weight: 650;
   font-variant-numeric: tabular-nums;
@@ -2648,7 +2652,7 @@ button.tool-step-summary:active {
 .mobile-drawer-layer {
   position: absolute;
   inset: 0;
-  z-index: 45;
+  z-index: 60;
   visibility: hidden;
   pointer-events: none;
   transition-property: visibility;
@@ -2691,6 +2695,25 @@ button.tool-step-summary:active {
   transition-property: transform;
   transition-duration: 220ms;
   transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+
+.mobile-drawer__close {
+  position: absolute;
+  inset: calc(10px + env(safe-area-inset-top)) auto auto 12px;
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--m-shape-full);
+  padding: 0;
+  color: var(--m-on-surface-variant);
+  background: transparent;
+}
+
+.mobile-drawer__close:active {
+  background: var(--m-surface-container);
+  scale: 0.96;
 }
 
 .mobile-drawer-layer.open .mobile-drawer {

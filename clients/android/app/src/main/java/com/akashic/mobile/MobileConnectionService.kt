@@ -325,8 +325,8 @@ class MobileConnectionService : Service() {
         private const val ACTION_DISCONNECT = "com.akashic.mobile.action.DISCONNECT"
         private const val ACTION_REPLY = "com.akashic.mobile.action.REPLY"
         private const val REMOTE_INPUT_REPLY_KEY = "reply_text"
-        private const val CONNECTION_CHANNEL_ID = "mobile_connection"
-        private const val MESSAGE_CHANNEL_ID = "mobile_messages"
+        internal const val CONNECTION_CHANNEL_ID = "mobile_connection"
+        internal const val MESSAGE_CHANNEL_ID = "mobile_messages"
         private const val CONNECTION_NOTIFICATION_ID = 1_001
         private const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
 
@@ -335,6 +335,14 @@ class MobileConnectionService : Service() {
                 context,
                 Intent(context, MobileConnectionService::class.java).setAction(ACTION_START),
             )
+        }
+
+        /** 应用进入前台时只消费消息通知，保留前台连接服务通知。 */
+        fun dismissMessageNotifications(context: Context) {
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager.activeNotifications
+                .filter { it.notification.channelId == MESSAGE_CHANNEL_ID }
+                .forEach { manager.cancel(it.id) }
         }
 
         fun disconnect(context: Context) {
