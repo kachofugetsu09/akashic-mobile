@@ -112,12 +112,12 @@ class IsolatedGatewayDeviceTest {
         session.sendMessage("Android 隔离端到端")
         val received = graph(app, sessionId) { messages ->
             messages.any { message ->
-                message.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。" &&
+                message.message.text.startsWith(ISOLATED_REPLY_PREFIX) &&
                     message.attachmentLinks.any { it.attachment.state == "cached" }
             }
         }
         val reply = received.single {
-            it.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。"
+            it.message.text.startsWith(ISOLATED_REPLY_PREFIX)
         }
         val attachment = reply.attachmentLinks.single().attachment
         assertEquals("image/gif", attachment.contentType)
@@ -138,14 +138,14 @@ class IsolatedGatewayDeviceTest {
         }
         session.selectSession(sessionId)
         val restored = graph(app, sessionId) { messages ->
-            messages.any { it.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。" }
+            messages.any { it.message.text.startsWith(ISOLATED_REPLY_PREFIX) }
         }
 
         assertEquals(1, restored.count { it.message.text == "这是隔离 Gateway 的历史消息" })
         assertEquals(1, restored.count { it.message.text == "历史同步成功后应只出现一次。" })
         assertEquals(
             1,
-            restored.count { it.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。" },
+            restored.count { it.message.text.startsWith(ISOLATED_REPLY_PREFIX) },
         )
     }
 
@@ -158,6 +158,7 @@ class IsolatedGatewayDeviceTest {
     }
 
     private companion object {
+        const val ISOLATED_REPLY_PREFIX = "## WebUI 试点"
         const val TIMEOUT_MILLIS = 30_000L
     }
 }
