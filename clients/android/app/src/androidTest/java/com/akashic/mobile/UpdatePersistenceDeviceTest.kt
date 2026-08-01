@@ -31,7 +31,7 @@ class UpdatePersistenceDeviceTest {
                 deviceId = "review-device",
                 keyAlias = alias,
                 applicationKeyFingerprint = "review-fingerprint",
-                lanEndpointsJson = "[]",
+                lanEndpointsJson = "[\"ws://127.0.0.1:1\"]",
                 tunnelEndpointsJson = "[]",
                 tlsSpkiPinsJson = "[]",
                 createdAt = System.currentTimeMillis(),
