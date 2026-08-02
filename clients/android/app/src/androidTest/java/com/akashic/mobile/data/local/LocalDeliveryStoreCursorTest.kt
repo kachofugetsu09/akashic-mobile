@@ -29,6 +29,10 @@ class LocalDeliveryStoreCursorTest {
         store = LocalDeliveryStore(
             database,
             MediaCacheStore(context.cacheDir.resolve("cursor-test-${System.nanoTime()}"), database.mediaAttachments()),
+            MessageContentStore(
+                context.cacheDir.resolve("cursor-content-${System.nanoTime()}"),
+                database.messageContentTransfers(),
+            ),
         )
         runBlocking {
             store.savePairedProfile(

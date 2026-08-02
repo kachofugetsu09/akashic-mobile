@@ -418,6 +418,9 @@ interface MessageDao {
     @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE clientMessageId = :clientMessageId")
     suspend fun updateDelivery(clientMessageId: String, state: String, updatedAt: Long): Int
 
+    @Query("UPDATE messages SET text = :text, updatedAt = :updatedAt WHERE messageId = :messageId")
+    suspend fun updateRestoredContent(messageId: String, text: String, updatedAt: Long): Int
+
     @Query(
         """
         UPDATE messages
@@ -464,6 +467,44 @@ interface MessageDao {
         """,
     )
     fun observeMessageGraph(sessionId: String): Flow<List<MessageWithBlocks>>
+}
+
+@Dao
+interface MessageContentTransferDao {
+    @Upsert
+    suspend fun upsert(transfer: MessageContentTransferEntity)
+
+    @Query("SELECT * FROM message_content_transfers WHERE messageId = :messageId")
+    suspend fun get(messageId: String): MessageContentTransferEntity?
+
+    @Query(
+        """
+        SELECT * FROM message_content_transfers
+        WHERE serverId = :serverId AND state IN ('pending', 'downloading')
+        ORDER BY updatedAt, messageId
+        """,
+    )
+    suspend fun pending(serverId: String): List<MessageContentTransferEntity>
+
+    @Query("SELECT * FROM message_content_transfers")
+    suspend fun all(): List<MessageContentTransferEntity>
+
+    @Query(
+        """
+        UPDATE message_content_transfers
+        SET transferredBytes = :transferredBytes, state = :state, updatedAt = :updatedAt
+        WHERE messageId = :messageId
+        """,
+    )
+    suspend fun updateProgress(
+        messageId: String,
+        transferredBytes: Long,
+        state: String,
+        updatedAt: Long,
+    ): Int
+
+    @Query("DELETE FROM message_content_transfers WHERE messageId = :messageId")
+    suspend fun delete(messageId: String): Int
 }
 
 @Dao

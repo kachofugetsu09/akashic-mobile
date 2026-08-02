@@ -31,6 +31,7 @@ class AppDatabaseMigrationTest {
             DATABASE_8_9,
             DATABASE_9_10,
             DATABASE_10_11,
+            DATABASE_11_12,
         )
             .forEach(context::deleteDatabase)
     }
@@ -419,6 +420,42 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate11To12CreatesResumableMessageContentStateWithoutChangingMessages() {
+        helper.createDatabase(DATABASE_11_12, 11).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages VALUES('assistant:long', NULL, 'mobile:test', 'assistant', '正文预览', 'complete', 3, 8, 7, NULL, NULL, NULL, NULL)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_11_12,
+            12,
+            true,
+            AppDatabase.MIGRATION_11_12,
+        ).use { database ->
+            database.execSQL(
+                "INSERT INTO message_content_transfers VALUES('assistant:long', 'server', 'mobile:test', 400000, '${"a".repeat(64)}', 262144, 'downloading', 9)",
+            )
+            database.query("SELECT text FROM messages WHERE messageId = 'assistant:long'").use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("正文预览", cursor.getString(0))
+            }
+            database.query(
+                "SELECT transferredBytes, state FROM message_content_transfers WHERE messageId = 'assistant:long'",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals(262144L, cursor.getLong(0))
+                assertEquals("downloading", cursor.getString(1))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -430,5 +467,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_8_9 = "migration-8-9"
         const val DATABASE_9_10 = "migration-9-10"
         const val DATABASE_10_11 = "migration-10-11"
+        const val DATABASE_11_12 = "migration-11-12"
     }
 }

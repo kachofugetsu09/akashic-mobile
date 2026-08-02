@@ -12,6 +12,7 @@ import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.AttachmentDraftStore
 import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.MediaCacheStore
+import com.akashic.mobile.data.local.MessageContentStore
 import com.akashic.mobile.data.local.IncomingShareStore
 import com.akashic.mobile.data.realtime.DeviceKeyStore
 import com.akashic.mobile.data.realtime.RealtimeSession
@@ -75,7 +76,11 @@ class AppContainer(application: Application) {
     val database = AppDatabase.create(application)
     private val mediaCacheRoot = application.filesDir.resolve("received-attachments")
     val mediaCacheStore = MediaCacheStore(mediaCacheRoot, database.mediaAttachments())
-    val deliveryStore = LocalDeliveryStore(database, mediaCacheStore)
+    val messageContentStore = MessageContentStore(
+        application.filesDir.resolve("message-content-recovery"),
+        database.messageContentTransfers(),
+    )
+    val deliveryStore = LocalDeliveryStore(database, mediaCacheStore, messageContentStore)
     val preferences = AppPreferences(application)
     val attachmentDraftStore = AttachmentDraftStore(
         contentResolver = application.contentResolver,
@@ -102,6 +107,7 @@ class AppContainer(application: Application) {
         deliveryStore = deliveryStore,
         attachmentDrafts = attachmentDraftStore,
         mediaCache = mediaCacheStore,
+        messageContentStore = messageContentStore,
         preferences = preferences,
         deviceKeys = deviceKeyStore,
         transferNetwork = transferNetwork.state,

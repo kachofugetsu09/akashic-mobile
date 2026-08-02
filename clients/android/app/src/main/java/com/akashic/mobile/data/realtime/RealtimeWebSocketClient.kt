@@ -188,6 +188,61 @@ class RealtimeWebSocketClient(
         }
     }
 
+    /** 复用活动端点的 TLS 信任策略读取一个有界、不可变正文 Range。 */
+    fun executeMessageContentHttp(
+        endpoint: ServerEndpoint,
+        request: MessageContentHttpRequest,
+    ): MessageContentHttpResponse {
+        validateEndpoint(endpoint)
+        require(request.path == MESSAGE_CONTENT_HTTP_PATH) { "Invalid message content HTTP path" }
+        require(request.ticket.length in 1..MAX_PLUGIN_UI_TICKET_CHARS) {
+            "Invalid message content HTTP ticket"
+        }
+        require(request.offset in 0 until request.byteLength) { "Invalid message content offset" }
+        val websocketUri = URI(endpoint.url)
+        val httpScheme = when (requireNotNull(websocketUri.scheme).lowercase()) {
+            "wss" -> "https"
+            "ws" -> "http"
+            else -> error("Validated endpoint scheme changed")
+        }
+        val url = URI(
+            httpScheme,
+            null,
+            websocketUri.host,
+            websocketUri.port,
+            request.path,
+            null,
+            null,
+        ).toString()
+        val rangeEnd = minOf(
+            request.byteLength - 1,
+            Math.addExact(request.offset, MAX_MESSAGE_CONTENT_RANGE_BYTES - 1L),
+        )
+        val call = clientFor(endpoint)
+            .newBuilder()
+            .followRedirects(false)
+            .build()
+            .newCall(
+                Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer ${request.ticket}")
+                    .header("Range", "bytes=${request.offset}-$rangeEnd")
+                    .header("If-Range", "\"${request.sha256}\"")
+                    .get()
+                    .build(),
+            )
+        return call.execute().use { response ->
+            MessageContentHttpResponse(
+                statusCode = response.code,
+                body = readBoundedMessageContentBody(response),
+                contentRange = response.header("Content-Range"),
+                etag = response.header("ETag"),
+                contentDigest = response.header("Content-Digest"),
+                representationDigest = response.header("Repr-Digest"),
+            )
+        }
+    }
+
     fun reject(candidateId: SocketCandidateId, code: Int, reason: String) {
         val socket = synchronized(lock) {
             val current = state ?: return
@@ -352,6 +407,29 @@ class RealtimeWebSocketClient(
         return buffer.readString(Charsets.UTF_8)
     }
 
+    private fun readBoundedMessageContentBody(response: Response): ByteArray {
+        val body = response.body
+        val declared = body.contentLength()
+        if (declared > MAX_MESSAGE_CONTENT_RANGE_BYTES) {
+            throw IOException("消息正文 HTTP 分片超过 256 KiB")
+        }
+        val source = body.source()
+        val buffer = Buffer()
+        var total = 0L
+        while (true) {
+            val read = source.read(
+                buffer,
+                minOf(8 * 1024L, MAX_MESSAGE_CONTENT_RANGE_BYTES + 1L - total),
+            )
+            if (read == -1L) break
+            total += read
+            if (total > MAX_MESSAGE_CONTENT_RANGE_BYTES) {
+                throw IOException("消息正文 HTTP 分片超过 256 KiB")
+            }
+        }
+        return buffer.readByteArray()
+    }
+
     private fun envelopeLabel(envelope: WireEnvelope): String =
         "kind=${envelope.kind} type=${envelope.type} id=${envelope.id} epoch=${envelope.connectionEpoch} " +
             "session=${envelope.sessionId} turn=${envelope.turnId} payloadKeys=${envelope.payload.keys}"
@@ -368,8 +446,10 @@ class RealtimeWebSocketClient(
         const val CLOSE_REPLACED = 4000
         const val CLOSE_PROTOCOL_ERROR = 4406
         const val MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES = 192 * 1024L
+        const val MAX_MESSAGE_CONTENT_RANGE_BYTES = 256 * 1024L
         const val MAX_PLUGIN_UI_TICKET_CHARS = 4096
         const val PLUGIN_UI_HTTP_PATH = "/mobile/plugin-ui/v1/query"
+        const val MESSAGE_CONTENT_HTTP_PATH = "/mobile/message-content/v1"
         val PLUGIN_UI_JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }

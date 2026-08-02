@@ -16,6 +16,7 @@
 | 上传附件 | `filesDir/pending-attachments` + Room | 本地未完成工作 | 移动端 | 否 |
 | 待处理系统分享 | `filesDir/incoming-shares` + SharedPreferences | 本地未完成工作 | 移动端 | 否 |
 | 接收附件 | `filesDir/received-attachments` + Room | 可驱逐消费者缓存 | 移动端 | 是，远端仍存在时 |
+| 历史正文续传 | `filesDir/message-content` + Room | 可重建传输状态 | 移动端 | 是，来自核心 SessionDB |
 | 插件 UI 资源 | `filesDir/plugin-ui-cache/*` | 派生消费者缓存 | 核心能力、移动端缓存 owner | 是 |
 | 当前选择和 UI 设置 | Preferences DataStore | 可变本地设置 | 移动端 | 否；可重置但不代表事实删除 |
 | 设备私钥 | Android Keystore | 本地身份秘密 | 操作系统/移动端 | 否 |
@@ -61,6 +62,14 @@
 - 更新：访问时间、下载进度和缓存状态允许原位改变。
 - 物理删除：只有容量驱逐、未引用清理或废弃临时文件清理可以删除；删除后保留足以重新获取的远端身份或 catalog 事实。
 - 恢复：从核心重新下载；核心不可达时表现为缓存不可用，不改写远端事实。
+
+### 历史正文续传
+
+- 增加：`history.page` 携带 `content_ref` 时创建传输记录；HTTPS Range 响应先追加到消息身份对应的私有临时文件。
+- 更新：每段正文落盘并 `fsync` 后才推进 Room 的确认偏移；启动时截断超过确认偏移的尾部。正文未完成时，消息投影保留服务端预览，thinking 与 tool block 按正常历史事务落库。
+- 逻辑失效：完整文件的字节长度、SHA-256 和严格 UTF-8 解码全部通过后，在同一 Room 事务中替换消息正文并删除传输记录。
+- 物理删除：校验成功、服务端投影被明确重载、应用数据被用户清除或无对应传输记录的孤立临时文件才可删除；普通断线和进程退出不得删除已确认片段。
+- 恢复：重新连接后从 Room 确认偏移重新申请短期 ticket 并续传；摘要或响应边界不一致时保留失败状态并暴露错误，不发布部分正文。
 
 ### 配对 profile 与设备密钥
 

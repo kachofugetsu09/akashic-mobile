@@ -63,6 +63,18 @@
       "consumer_test": "historyPageRestoresMessagesThinkingAndTools"
     },
     {
+      "id": "oversized-history-content-uses-bounded-reference",
+      "provider_test": "tests/mobile_realtime/test_message_content_http.py::test_history_externalizes_unicode_content_without_losing_tool_projection",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "historyContentRefRestoresExactBodyWithoutChangingThinkingOrTools"
+    },
+    {
+      "id": "history-content-range-resumes-from-fsynced-offset",
+      "provider_test": "tests/mobile_realtime/test_message_content_http.py::test_http_route_returns_identity_encoded_verified_range_headers",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MessageContentDownloadCoordinatorTest.kt",
+      "consumer_test": "verified range atomically restores unicode content"
+    },
+    {
       "id": "attachment-binary-frame-contract",
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_binary_chunk_round_trip_and_rejects_oversized_header",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TransportAndIdsTest.kt",
