@@ -88,6 +88,7 @@ class IsolatedGatewayDeviceTest {
             Charsets.UTF_8,
         )
         val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val expectedMediaType = arguments.getString("expectedMediaType") ?: "image/gif"
         val app = ApplicationProvider.getApplicationContext<App>()
         val session = app.container.realtimeSession
 
@@ -120,7 +121,7 @@ class IsolatedGatewayDeviceTest {
             it.message.text.startsWith(ISOLATED_REPLY_PREFIX)
         }
         val attachment = reply.attachmentLinks.single().attachment
-        assertEquals("image/gif", attachment.contentType)
+        assertEquals(expectedMediaType, attachment.contentType)
         assertTrue(File(requireNotNull(attachment.cachePath)).isFile)
     }
 
