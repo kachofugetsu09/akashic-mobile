@@ -1693,6 +1693,23 @@ class RealtimeSession(
                     val pending = requireNotNull(pendingSyncCommands.remove(id))
                     require(pending.generation == syncGeneration) { "收到旧 generation 的历史同步错误" }
                     require(envelope.type == "${pending.type}.error") { "历史同步错误类型不匹配" }
+                    val errorCode = envelope.payload["code"]?.jsonPrimitive?.content
+                    if (
+                        pending.type == "history.get" &&
+                        pending.afterSeq != null &&
+                        pending.page != null &&
+                        errorCode in LEGACY_HISTORY_FALLBACK_CODES
+                    ) {
+                        val sessionId = requireNotNull(pending.sessionId)
+                        requestedHistoryCursors.remove(
+                            Triple(syncGeneration, sessionId, pending.afterSeq),
+                        )
+                        requestedHistoryPages.remove(
+                            Triple(syncGeneration, sessionId, pending.page),
+                        )
+                        requestLegacyHistoryPage(sessionId, pending.page)
+                        return
+                    }
                     mutableState.value = mutableState.value.copy(
                         errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "历史同步失败",
                     )
@@ -1942,8 +1959,8 @@ class RealtimeSession(
                 put("content_ref_version", 1)
                 put("after_seq", afterSeq)
                 snapshotMaxSeq?.let { put("snapshot_max_seq", it) }
-                legacyPage?.let { put("page", it) }
             },
+            legacyPage = legacyPage,
         )
     }
 
@@ -1963,6 +1980,7 @@ class RealtimeSession(
         type: String,
         sessionId: String?,
         payload: kotlinx.serialization.json.JsonObject,
+        legacyPage: Int? = null,
     ): Boolean {
         val epoch = requireNotNull(activeEpoch) { "History sync requires an authenticated connection" }
         val candidate = requireNotNull(activeCandidate) { "History sync requires an active endpoint" }
@@ -1971,7 +1989,7 @@ class RealtimeSession(
             generation = syncGeneration,
             type = type,
             sessionId = sessionId,
-            page = payload["page"]?.jsonPrimitive?.longOrNull?.also {
+            page = legacyPage ?: payload["page"]?.jsonPrimitive?.longOrNull?.also {
                 require(it in 1..Int.MAX_VALUE) { "历史同步 page 超出范围" }
             }?.toInt(),
             afterSeq = payload["after_seq"]?.jsonPrimitive?.longOrNull?.also {
@@ -2558,6 +2576,10 @@ class RealtimeSession(
             "proactive",
             "attachments-v1",
             "history-content-range-v1",
+        )
+        val LEGACY_HISTORY_FALLBACK_CODES = setOf(
+            "invalid_payload",
+            "unsupported_content_ref_version",
         )
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
         const val HISTORY_PAGE_SIZE = 10
