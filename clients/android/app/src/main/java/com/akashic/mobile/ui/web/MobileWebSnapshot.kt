@@ -44,7 +44,19 @@ data class MobileWebStreamPatch(
     val projectionGeneration: Long,
     val selectedSessionId: String,
     val messageIndex: Int,
-    val message: MobileWebMessage,
+    val messageId: String,
+    val searchRevision: Long,
+    val durationSeconds: Int? = null,
+    val contentAppend: String? = null,
+    val thinkingAppend: MobileWebThinkingAppend? = null,
+    val message: MobileWebMessage? = null,
+)
+
+@Serializable
+data class MobileWebThinkingAppend(
+    val blockIndex: Int,
+    val blockId: String,
+    val delta: String,
 )
 
 @Serializable
@@ -411,14 +423,34 @@ fun ConversationUiState.toMobileWebStreamPatch(
     }
     if (changedIndex < 0) return null
 
-    // 3. WebView 用 generation、session 和 index 拒绝错代 patch
-    return MobileWebStreamPatch(
-        protocolVersion = 1,
-        projectionGeneration = projectionGeneration,
-        selectedSessionId = selectedSessionId,
-        messageIndex = changedIndex,
-        message = messages[changedIndex].toMobileWebMessage(),
-    )
+    // 3. 追加型更新只跨桥发送新增文字；工具结构变化保留完整消息回退
+    val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
+    val after = messages[changedIndex] as MessageUi.AssistantTurn
+    val append = after.streamAppendFrom(before)
+    return if (append != null) {
+        MobileWebStreamPatch(
+            protocolVersion = 2,
+            projectionGeneration = projectionGeneration,
+            selectedSessionId = selectedSessionId,
+            messageIndex = changedIndex,
+            messageId = after.id,
+            searchRevision = after.updatedAtMillis,
+            durationSeconds = after.durationSeconds,
+            contentAppend = append.content,
+            thinkingAppend = append.thinking,
+        )
+    } else {
+        MobileWebStreamPatch(
+            protocolVersion = 2,
+            projectionGeneration = projectionGeneration,
+            selectedSessionId = selectedSessionId,
+            messageIndex = changedIndex,
+            messageId = after.id,
+            searchRevision = after.updatedAtMillis,
+            durationSeconds = after.durationSeconds,
+            message = after.toMobileWebMessage(),
+        )
+    }
 }
 
 private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
@@ -430,6 +462,46 @@ private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
         durationSeconds = durationSeconds,
         updatedAtMillis = updatedAtMillis,
     ) == this
+}
+
+private data class MobileWebStreamAppend(
+    val content: String?,
+    val thinking: MobileWebThinkingAppend?,
+)
+
+/** 提取同一 streaming turn 相对已投递状态的无损追加量。 */
+private fun MessageUi.AssistantTurn.streamAppendFrom(
+    previous: MessageUi.AssistantTurn,
+): MobileWebStreamAppend? {
+    // 1. 回答与 block 结构必须保持追加语义
+    if (!answer.startsWith(previous.answer) || blocks.size != previous.blocks.size) return null
+    var thinkingAppend: MobileWebThinkingAppend? = null
+    for (index in blocks.indices) {
+        val before = previous.blocks[index]
+        val after = blocks[index]
+        if (before == after) continue
+        if (
+            thinkingAppend != null ||
+            before.kind != ProcessBlockKind.THINKING ||
+            before.copy(detail = after.detail) != after ||
+            !after.detail.startsWith(before.detail)
+        ) {
+            return null
+        }
+        thinkingAppend = MobileWebThinkingAppend(
+            blockIndex = index,
+            blockId = after.id,
+            delta = after.detail.removePrefix(before.detail),
+        )
+    }
+
+    // 2. 纯计时变化没有内容收益，交给完整消息回退
+    val contentAppend = answer.removePrefix(previous.answer).ifEmpty { null }
+    return if (contentAppend != null || thinkingAppend != null) {
+        MobileWebStreamAppend(contentAppend, thinkingAppend)
+    } else {
+        null
+    }
 }
 
 private fun TransferStatusUi.toMobileWebTransferStatus() = MobileWebTransferStatus(
@@ -546,7 +618,7 @@ private fun MessageAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
         MessageAttachmentState.EVICTED -> "evicted"
     },
     contentUrl = if (state == MessageAttachmentState.CACHED) {
-        "https://appassets.androidplatform.net/media/$id"
+        mobileMediaResourceUrl(id, filename)
     } else {
         null
     },

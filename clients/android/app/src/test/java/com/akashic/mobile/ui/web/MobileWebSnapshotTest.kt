@@ -62,10 +62,11 @@ class MobileWebSnapshotTest {
 
         val patch = after.toMobileWebStreamPatch(before)
 
-        assertEquals(1, patch?.protocolVersion)
+        assertEquals(2, patch?.protocolVersion)
         assertEquals(7L, patch?.projectionGeneration)
         assertEquals(0, patch?.messageIndex)
-        assertEquals("正在分析", patch?.message?.content)
+        assertEquals("分析", patch?.contentAppend)
+        assertEquals(null, patch?.message)
     }
 
     @Test
@@ -108,8 +109,8 @@ class MobileWebSnapshotTest {
         )
 
         assertEquals(
-            "先检查调用链",
-            appended.toMobileWebStreamPatch(before)?.message?.blocks?.single()?.detail,
+            "检查调用链",
+            appended.toMobileWebStreamPatch(before)?.thinkingAppend?.delta,
         )
         assertEquals(null, completed.toMobileWebStreamPatch(appended))
     }
@@ -205,6 +206,8 @@ class MobileWebSnapshotTest {
 
         assertTrue(snapshotJson.length > 100_000)
         assertTrue(patchJson.length * 100 < snapshotJson.length)
+        assertTrue(!patchJson.contains("正在检查调用链"))
+        assertTrue(patchJson.contains("检查调用链"))
     }
 
     @Test

@@ -771,7 +771,26 @@ internal fun mobileNavigationAction(url: String, isMainFrame: Boolean): MobileNa
     }
 }
 
-private data class MobileMediaResource(val path: String, val contentType: String)
+internal data class MobileMediaResource(val path: String, val contentType: String)
+
+internal class MobileMediaResourceIndex {
+    private val resources = AtomicReference<Map<String, MobileMediaResource>>(emptyMap())
+
+    fun replace(next: Map<String, MobileMediaResource>) {
+        resources.set(next.toMap())
+    }
+
+    fun resolve(path: String): MobileMediaResource? =
+        resources.get()[path]?.takeIf { File(it.path).isFile }
+}
+
+internal fun mobileMediaResourceKey(attachmentId: String, filename: String): String {
+    val extension = filename.substringAfterLast('.', missingDelimiterValue = "").lowercase()
+    return if (MEDIA_EXTENSION_PATTERN.matches(extension)) "$attachmentId.$extension" else attachmentId
+}
+
+internal fun mobileMediaResourceUrl(attachmentId: String, filename: String): String =
+    "https://appassets.androidplatform.net/media/${mobileMediaResourceKey(attachmentId, filename)}"
 
 /** 把协议 Content-Type 规范为 WebResourceResponse 要求的不带参数 MIME。 */
 internal fun mobileMediaMimeType(contentType: String): String {
@@ -781,16 +800,15 @@ internal fun mobileMediaMimeType(contentType: String): String {
 }
 
 private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
-    private val resources = AtomicReference<Map<String, MobileMediaResource>>(emptyMap())
+    private val index = MobileMediaResourceIndex()
 
     fun replace(next: Map<String, MobileMediaResource>) {
-        resources.set(next.toMap())
+        index.replace(next)
     }
 
     override fun handle(path: String): WebResourceResponse? {
-        val resource = resources.get()[path] ?: return null
+        val resource = index.resolve(path) ?: return null
         val file = File(resource.path)
-        if (!file.isFile) return null
         val stream = try {
             file.inputStream()
         } catch (_: FileNotFoundException) {
@@ -803,6 +821,7 @@ private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
             "OK",
             mapOf(
                 "Cache-Control" to "no-store",
+                "Content-Length" to file.length().toString(),
                 "X-Content-Type-Options" to "nosniff",
             ),
             stream,
@@ -819,9 +838,13 @@ private fun ConversationUiState.mediaResources(): Map<String, MobileMediaResourc
             }
         }
         .filter { it.cachePath.isNotBlank() }
-        .associate { it.id to MobileMediaResource(it.cachePath, mobileMediaMimeType(it.contentType)) }
+        .associate {
+            mobileMediaResourceKey(it.id, it.filename) to
+                MobileMediaResource(it.cachePath, mobileMediaMimeType(it.contentType))
+        }
 
 private val MIME_TYPE_PATTERN = Regex("^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
+private val MEDIA_EXTENSION_PATTERN = Regex("^[a-z0-9]{1,16}$")
 
 private fun WebView.pushSnapshot(snapshotJson: String) {
     postMobileMessage("mobile.snapshot", snapshotJson)
