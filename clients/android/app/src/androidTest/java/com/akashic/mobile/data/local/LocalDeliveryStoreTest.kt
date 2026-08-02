@@ -703,7 +703,11 @@ class LocalDeliveryStoreTest {
         contentStore.append(transfer, content)
         val completed = database.messageContentTransfers().get(messageId)!!
         val restored = contentStore.readVerified(completed)
-        store.commitRestoredMessageContent(completed, restored, 2)
+        store.commitRestoredMessageContent(
+            completed.copy(updatedAt = completed.updatedAt + 1),
+            restored,
+            2,
+        )
         contentStore.delete(completed)
 
         assertEquals(content.toString(Charsets.UTF_8), database.messages().get(messageId)!!.text)

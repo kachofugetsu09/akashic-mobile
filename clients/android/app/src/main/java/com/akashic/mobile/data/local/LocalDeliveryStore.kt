@@ -759,7 +759,14 @@ class LocalDeliveryStore(
         val current = requireNotNull(database.messageContentTransfers().get(transfer.messageId)) {
             "消息正文恢复记录已消失: ${transfer.messageId}"
         }
-        require(current == transfer && current.transferredBytes == current.byteLength) {
+        require(
+            current.messageId == transfer.messageId &&
+                current.serverId == transfer.serverId &&
+                current.sessionId == transfer.sessionId &&
+                current.byteLength == transfer.byteLength &&
+                current.sha256 == transfer.sha256 &&
+                current.transferredBytes == current.byteLength
+        ) {
             "消息正文恢复记录尚未完整"
         }
         val encoded = content.toByteArray(Charsets.UTF_8)
