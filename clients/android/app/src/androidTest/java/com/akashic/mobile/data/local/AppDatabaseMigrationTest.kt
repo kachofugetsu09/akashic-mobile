@@ -428,7 +428,7 @@ class AppDatabaseMigrationTest {
             )
             execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('assistant:long', NULL, 'mobile:test', 'assistant', '正文预览', 'complete', 3, 8, 7, NULL, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('assistant:long', NULL, 'mobile:test', 'assistant', '正文预览', 'complete', 3, 8, 7, NULL, NULL, NULL)",
             )
             close()
         }
