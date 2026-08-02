@@ -114,11 +114,13 @@ internal object FullJitterBackoff {
 internal enum class TerminalProtocolAction {
     FAIL_ACTIVE_COMMAND,
     PRESERVE_OUTBOX,
+    REVOKE_DEVICE,
 }
 
 internal fun terminalProtocolAction(code: Int): TerminalProtocolAction? = when (code) {
     4400 -> TerminalProtocolAction.PRESERVE_OUTBOX
     4406 -> TerminalProtocolAction.PRESERVE_OUTBOX
+    4403 -> TerminalProtocolAction.REVOKE_DEVICE
     4410 -> TerminalProtocolAction.FAIL_ACTIVE_COMMAND
     else -> null
 }
@@ -266,6 +268,8 @@ class RealtimeSession(
     pluginUiAssetStore: PluginUiAssetStore,
     pluginUiCatalogStore: PluginUiCatalogStore,
     pluginUiResultStore: PluginUiResultStore,
+    mobileWebUiStore: MobileWebUiStore,
+    nativeBuild: Int,
     private val scope: CoroutineScope,
     allowInsecureTransport: Boolean,
     private val onRuntimeError: (String, Throwable) -> Unit,
@@ -286,8 +290,27 @@ class RealtimeSession(
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
     private val mutex = Mutex()
+    private lateinit var mobileWebUiOwner: MobileWebUiCoordinator
     private val attachmentOperations = AttachmentOperationOwner()
     private val socket = RealtimeWebSocketClient(this, allowInsecureTransport)
+    internal val mobileWebUi = MobileWebUiCoordinator(
+        store = mobileWebUiStore,
+        scope = scope,
+        nativeBuild = nativeBuild,
+        sendCommand = ::sendMobileWebUiCommand,
+        startHttp = ::startMobileWebUiHttp,
+        onError = { message -> mutableState.value = mutableState.value.copy(errorMessage = message) },
+        onRetryTrigger = { serverId ->
+            scope.launch {
+                mutex.withLock {
+                    if (profile?.serverId == serverId) mobileWebUiOwner.resolve(serverId)
+                }
+            }
+        },
+    )
+    init {
+        mobileWebUiOwner = mobileWebUi
+    }
     private val uploads = AttachmentUploadCoordinator(
         dao = database.attachmentTransfers(),
         sourceFile = attachmentDrafts::fileFor,
@@ -348,6 +371,7 @@ class RealtimeSession(
     private var meteredLargeTransferApproved = false
     private var profile: ServerProfileEntity? = null
     private var pendingPairing: PendingPairing? = null
+    private var deviceRevoked = false
     private var pairingConfirmationGeneration: Long? = null
     private val challengedCandidates = mutableSetOf<SocketCandidateId>()
     private val candidateEndpoints = mutableMapOf<SocketCandidateId, ServerEndpoint>()
@@ -397,6 +421,23 @@ class RealtimeSession(
                     deliveryStore.restoreSelectedSession(it.serverId, settings.currentSessionId)
                 }
                 if (selected != settings.currentSessionId) preferences.selectSession(selected)
+                profile?.let { selectedProfile ->
+                    try {
+                        mobileWebUi.restoreLocal(selectedProfile.serverId)
+                    } catch (error: IOException) {
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = "WebUI 本地缓存恢复失败：${error.message}",
+                        )
+                    } catch (error: SQLiteException) {
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = "WebUI 本地状态数据库暂不可用：${error.message}",
+                        )
+                    } catch (error: SecurityException) {
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = "WebUI 本地缓存无权访问：${error.message}",
+                        )
+                    }
+                }
                 mutableState.value = mutableState.value.copy(
                     initialized = true,
                     hasProfile = profile != null,
@@ -412,12 +453,47 @@ class RealtimeSession(
         }
     }
 
+    /** Recheck the current WebUI release once when the activity returns to foreground. */
+    fun onForeground() {
+        scope.launch {
+            mutex.withLock {
+                val current = profile
+                if (current == null) return@withLock
+                when (mutableState.value.connection.phase) {
+                    ConnectionPhase.AUTHENTICATED,
+                    ConnectionPhase.SYNCING,
+                    ConnectionPhase.READY,
+                    ConnectionPhase.DEGRADED,
+                    -> mobileWebUiOwner.resolve(current.serverId)
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    suspend fun collectMobileWebUiGarbage(serverId: String): MobileWebUiGcReport =
+        mutex.withLock {
+            require(profile?.serverId == serverId) { "WebUI GC 服务端 owner 已变化" }
+            mobileWebUi.collectGarbage(serverId)
+        }
+
+    suspend fun resetMobileWebUi(serverId: String) = mutex.withLock {
+        require(profile?.serverId == serverId) { "WebUI reset 服务端 owner 已变化" }
+        mobileWebUi.resetServer(serverId)
+    }
+
+    suspend fun retryMobileWebUi(serverId: String): Boolean = mutex.withLock {
+        require(profile?.serverId == serverId) { "WebUI retry 服务端 owner 已变化" }
+        mobileWebUi.retryCurrentUi(serverId)
+    }
+
     fun beginPairing(rawQr: String) {
         scope.launch {
             try {
                 mutex.withLock {
                     val qr = PairingQrDecoder.decode(rawQr)
                     check(profile == null) { "Remove the current server before pairing another one" }
+                    deviceRevoked = false
                     val alias = deviceKeys.aliasForServer(qr.serverId)
                     if (!deviceKeys.contains(alias)) deviceKeys.create(alias)
                     val claim = PairingTranscripts.createClaim(
@@ -465,6 +541,7 @@ class RealtimeSession(
                 pendingPairing = null
                 pairingConfirmationGeneration = null
                 profile = null
+                deviceRevoked = false
                 resetGenerationState()
                 networkRecovery.reset()
                 stops.reset()
@@ -948,6 +1025,59 @@ class RealtimeSession(
         }
     }
 
+    /** 从当前已认证端点下载 WebUI manifest/blob，并把结果交回唯一 OTA owner。 */
+    private fun startMobileWebUiHttp(request: MobileWebUiHttpRequest) {
+        val candidate = requireNotNull(activeCandidate) { "WebUI HTTPS 请求缺少活动连接" }
+        val endpoint = requireNotNull(candidateEndpoints[candidate]) { "WebUI HTTPS 请求缺少活动端点" }
+        scope.launch {
+            val response = try {
+                withContext(Dispatchers.IO) {
+                    socket.executeMobileWebUiHttp(endpoint, request)
+                }
+            } catch (error: IOException) {
+                mutex.withLock {
+                    mobileWebUi.onHttpFailure(request.requestId, "WebUI HTTPS 请求失败：${error.message}")
+                }
+                return@launch
+            } catch (error: SecurityException) {
+                mutex.withLock {
+                    mobileWebUi.onHttpFailure(request.requestId, "WebUI HTTPS 请求未通过安全校验")
+                }
+                return@launch
+            }
+            mutex.withLock {
+                try {
+                    mobileWebUi.onHttpResponse(request.requestId, response)
+                } catch (error: IllegalArgumentException) {
+                    mobileWebUi.onOwnerFailure(
+                        request.requestId,
+                        "WebUI HTTP 协议或拒绝状态失败：${error.message}",
+                    )
+                } catch (error: IllegalStateException) {
+                    mobileWebUi.onOwnerFailure(
+                        request.requestId,
+                        "WebUI 下载状态失败：${error.message}",
+                    )
+                } catch (error: IOException) {
+                    mobileWebUi.onOwnerFailure(
+                        request.requestId,
+                        "WebUI 缓存写入失败：${error.message}",
+                    )
+                } catch (error: SQLiteException) {
+                    mobileWebUi.onOwnerFailure(
+                        request.requestId,
+                        "WebUI 缓存数据库暂不可用：${error.message}",
+                    )
+                } catch (error: SecurityException) {
+                    mobileWebUi.onOwnerFailure(
+                        request.requestId,
+                        "WebUI 缓存无权访问：${error.message}",
+                    )
+                }
+            }
+        }
+    }
+
     fun cancelPluginUiOwner(ownerId: String) {
         scope.launch {
             mutex.withLock {
@@ -1379,7 +1509,9 @@ class RealtimeSession(
             mutex.withLock {
                 if (candidateId != activeCandidate) return@withLock
                 val action = terminalProtocolAction(code)
-                if (action != null) {
+                if (action == TerminalProtocolAction.REVOKE_DEVICE) {
+                    handleDeviceRevoked(reason)
+                } else if (action != null) {
                     failProtocolConnection(code, action)
                 } else {
                     scheduleReconnect("连接关闭：$code $reason")
@@ -1392,6 +1524,7 @@ class RealtimeSession(
         Log.e(TAG, "实时连接候选失败: candidate=$candidateId", error)
         scope.launch {
             mutex.withLock {
+                if (deviceRevoked) return@withLock
                 if (candidateId == activeCandidate) scheduleReconnect(error.message ?: "连接失败")
             }
         }
@@ -1566,6 +1699,7 @@ class RealtimeSession(
         )
         armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.SYNC)
         database.outbox().resetInFlight(currentProfile.serverId)
+        mobileWebUi.onAuthenticated(currentProfile.serverId)
     }
 
     private suspend fun handleAuthenticatedFrame(candidateId: SocketCandidateId, envelope: WireEnvelope) {
@@ -1676,6 +1810,7 @@ class RealtimeSession(
                 if (uploads.onReply(envelope)) return
                 if (messageDownloads.onReply(envelope)) return
                 if (pluginUi.onReply(envelope)) return
+                if (mobileWebUi.onReply(envelope)) return
                 if (runtimeInspection.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
                 if (envelope.type == "command.list.ok") {
@@ -1769,10 +1904,22 @@ class RealtimeSession(
                 }
             }
             WireKind.CONTROL -> {
-                require(envelope.type == "plugin.ui.changed") {
-                    "Unexpected authenticated control: ${envelope.type}"
+                when (envelope.type) {
+                    "plugin.ui.changed" -> pluginUi.onCatalogChanged()
+                    MOBILE_WEB_UI_RELEASE_CHANGED -> {
+                        val serverId = requireNotNull(profile).serverId
+                        require(envelope.payload["server_id"]?.jsonPrimitive?.content == serverId) {
+                            "WebUI release hint server_id 不匹配"
+                        }
+                        mobileWebUi.onControlHint(serverId)
+                    }
+                    "device.revoked" -> {
+                        handleDeviceRevoked(
+                            envelope.payload["reason"]?.jsonPrimitive?.content.orEmpty(),
+                        )
+                    }
+                    else -> error("Unexpected authenticated control: ${envelope.type}")
                 }
-                pluginUi.onCatalogChanged()
             }
             else -> error("Unexpected authenticated server frame: ${envelope.kind}")
         }
@@ -2349,7 +2496,15 @@ class RealtimeSession(
     }
 
     private fun scheduleReconnect(message: String) {
+        if (deviceRevoked) {
+            mutableState.value = mutableState.value.copy(
+                connection = mutableState.value.connection.copy(phase = ConnectionPhase.FAILED),
+                errorMessage = "设备配对已撤销：请重新配对",
+            )
+            return
+        }
         cancelPhaseDeadline()
+        mobileWebUi.onDisconnected()
         if (reconnectJob?.isActive == true) return
         val reconnectImmediately = networkRecovery.consume(currentGeneration())
         activeCandidate = null
@@ -2388,9 +2543,46 @@ class RealtimeSession(
         }
     }
 
+    private suspend fun handleDeviceRevoked(reason: String) {
+        deviceRevoked = true
+        reconnectJob?.cancel()
+        reconnectJob = null
+        cancelPhaseDeadline()
+        activeCandidate = null
+        activeEpoch = null
+        ackJob?.cancel()
+        ackJob = null
+        pendingAckCount = 0
+        var revokeError: String? = null
+        try {
+            profile?.serverId?.let { mobileWebUi.revokeServer(it) }
+        } catch (error: IOException) {
+            revokeError = "本地 WebUI 撤销清理失败：${error.message}"
+        } catch (error: SQLiteException) {
+            revokeError = "本地 WebUI 撤销数据库失败：${error.message}"
+        } catch (error: SecurityException) {
+            revokeError = "本地 WebUI 撤销权限失败：${error.message}"
+        }
+        uploads.onDisconnected()
+        downloads.onDisconnected()
+        messageDownloads.onDisconnected()
+        pendingSyncCommands.clear()
+        pendingCommandListId = null
+        pluginUi.onDisconnected("设备配对已撤销")
+        runtimeInspection.onDisconnected()
+        mutableState.value = mutableState.value.copy(
+            connection = mutableState.value.connection.copy(
+                phase = ConnectionPhase.FAILED,
+                lastErrorCode = "device_revoked",
+            ),
+            errorMessage = revokeError ?: "设备配对已撤销：请重新配对${reason.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()}",
+        )
+    }
+
     /** 停止永久协议错误，并按错误类型隔离或保留当前 outbox。 */
     private suspend fun failProtocolConnection(code: Int, action: TerminalProtocolAction) {
         // 1. 收起当前连接态任务
+        mobileWebUi.onDisconnected()
         reconnectJob?.cancel()
         reconnectJob = null
         cancelPhaseDeadline()
@@ -2484,6 +2676,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pluginUi.onDisconnected("连接已重置")
         runtimeInspection.onDisconnected()
+        mobileWebUi.onDisconnected()
     }
 
     private fun publishTurnState() {
@@ -2557,6 +2750,24 @@ class RealtimeSession(
         payload = payload,
     )
 
+    private fun sendMobileWebUiCommand(type: String, payload: kotlinx.serialization.json.JsonObject): String? {
+        val candidate = activeCandidate ?: return null
+        val epoch = activeEpoch ?: return null
+        val commandId = Ulid.next()
+        val sent = socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = type,
+                id = commandId,
+                connectionEpoch = epoch,
+                payload = payload,
+            ),
+        )
+        return commandId.takeIf { sent }
+    }
+
     private var currentGenerationValue = 0L
 
     private fun currentGeneration(): Long = currentGenerationValue
@@ -2577,6 +2788,7 @@ class RealtimeSession(
             "proactive",
             "attachments-v1",
             "history-content-range-v1",
+            MOBILE_WEB_UI_CAPABILITY,
         )
         val LEGACY_HISTORY_FALLBACK_CODES = setOf(
             "invalid_payload",

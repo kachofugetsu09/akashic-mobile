@@ -191,6 +191,42 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `decodes device revoked as authenticated control`() {
+        val frame = """
+            {
+              "v": 1,
+              "kind": "control",
+              "type": "device.revoked",
+              "connection_epoch": 7,
+              "payload": {"reason": "operator revoked"}
+            }
+        """.trimIndent()
+
+        val envelope = ProtocolCodec.decode(frame)
+
+        assertEquals(WireKind.CONTROL, envelope.kind)
+        assertEquals("device.revoked", envelope.type)
+        assertEquals(7L, envelope.connectionEpoch)
+    }
+
+    @Test
+    fun `rejects device revoked durable event`() {
+        val frame = """
+            {
+              "v": 1,
+              "kind": "event",
+              "type": "device.revoked",
+              "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              "event_seq": 8,
+              "connection_epoch": 7,
+              "payload": {"reason": "operator revoked"}
+            }
+        """.trimIndent()
+
+        assertThrows(IllegalArgumentException::class.java) { ProtocolCodec.decode(frame) }
+    }
+
+    @Test
     fun `round trips plugin https prepare and decodes ready grant`() {
         val prepare = WireEnvelope(
             v = WIRE_PROTOCOL_VERSION,

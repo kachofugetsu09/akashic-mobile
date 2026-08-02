@@ -28,6 +28,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -49,15 +50,30 @@ import com.akashic.mobile.ui.web.shareCachedAttachment
 import com.akashic.mobile.ui.web.saveCachedAttachment
 import com.akashic.mobile.ui.web.withCachedAttachment
 import java.io.IOException
+import java.util.UUID
 import kotlinx.coroutines.launch
+
+private val MOBILE_WEB_UI_PROCESS_TOKEN = UUID.randomUUID().toString()
+
+internal fun mobileWebUiSessionStartedForProcess(
+    savedProcessToken: String?,
+    currentProcessToken: String,
+    savedSessionStarted: Boolean,
+): Boolean = savedSessionStarted && savedProcessToken == currentProcessToken
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
     private val notificationsEnabled = mutableStateOf(true)
     private val settingsOpen = mutableStateOf(false)
+    private var leftForeground = false
+    private val mobileWebUiPresentationEpoch = mutableStateOf(0L)
+    private var nativeResultPending = false
+    private var nativeResultReturned = false
+    private var nativeResultResumeObserved = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        mobileWebUiPresentationEpoch.value = savedInstanceState?.getLong(KEY_MOBILE_WEB_UI_EPOCH) ?: 0L
         settingsOpen.value = savedInstanceState?.getBoolean(KEY_SETTINGS_OPEN) ?: false
         consumeIncomingShare(intent)
         takeNotificationTarget(intent)?.let(viewModel::acceptNotificationTarget)
@@ -71,16 +87,21 @@ class MainActivity : ComponentActivity() {
             AkashicTheme {
                 val notificationPermission = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission(),
-                ) { granted -> notificationsEnabled.value = granted }
+                ) { granted ->
+                    markNativeActivityResultReturned()
+                    notificationsEnabled.value = granted
+                }
                 val attachmentPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenMultipleDocuments(),
                 ) { uris ->
+                    markNativeActivityResultReturned()
                     if (uris.isNotEmpty()) viewModel.addAttachments(uris)
                 }
                 val pendingSave = remember { mutableStateOf<MessageAttachmentUi?>(null) }
                 val attachmentSaver = rememberLauncherForActivityResult(
                     ActivityResultContracts.CreateDocument("application/octet-stream"),
                 ) { destination ->
+                    markNativeActivityResultReturned()
                     val attachment = pendingSave.value
                     pendingSave.value = null
                     if (destination != null && attachment != null) {
@@ -112,9 +133,35 @@ class MainActivity : ComponentActivity() {
                 val conversation by viewModel.conversationState.collectAsStateWithLifecycle()
                 val incomingShare by viewModel.incomingShare.collectAsStateWithLifecycle()
                 val pluginUiCatalog by viewModel.pluginUiCatalog.collectAsStateWithLifecycle()
+                val mobileWebUiServing by viewModel.mobileWebUiServing.collectAsStateWithLifecycle()
+                val mobileWebUiReadyGeneration by viewModel.mobileWebUiReadyGeneration.collectAsStateWithLifecycle()
+                val mobileWebUiResetEvent by viewModel.mobileWebUiResetEvent.collectAsStateWithLifecycle()
+                val mobileWebUiWaitForSpace by viewModel.mobileWebUiWaitForSpace.collectAsStateWithLifecycle()
+                val mobileWebUiApplyGeneration = remember { mutableStateOf<String?>(null) }
+                val mobileWebUiSessionStarted = rememberSaveable { mutableStateOf(false) }
+                val mobileWebUiSessionServerId = rememberSaveable { mutableStateOf<String?>(null) }
+                val mobileWebUiSessionProcessToken = rememberSaveable { mutableStateOf<String?>(null) }
+                val processSessionStarted = mobileWebUiSessionStartedForProcess(
+                    savedProcessToken = mobileWebUiSessionProcessToken.value,
+                    currentProcessToken = MOBILE_WEB_UI_PROCESS_TOKEN,
+                    savedSessionStarted = mobileWebUiSessionStarted.value,
+                )
+                LaunchedEffect(Unit) {
+                    if (mobileWebUiSessionProcessToken.value != MOBILE_WEB_UI_PROCESS_TOKEN) {
+                        mobileWebUiSessionProcessToken.value = MOBILE_WEB_UI_PROCESS_TOKEN
+                        mobileWebUiSessionStarted.value = false
+                    }
+                }
+                LaunchedEffect(session.serverId) {
+                    if (mobileWebUiSessionServerId.value != session.serverId) {
+                        mobileWebUiSessionServerId.value = session.serverId
+                        mobileWebUiSessionStarted.value = false
+                    }
+                }
                 LaunchedEffect(Unit) {
                     if (shouldRequestNotificationPermission()) {
                         markNotificationPermissionRequested()
+                        markNativeActivityResultLaunched()
                         notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
                     }
                 }
@@ -184,6 +231,21 @@ class MainActivity : ComponentActivity() {
                             pluginUiCatalog = pluginUiCatalog,
                             pluginUiResults = viewModel.pluginUiResults,
                             pluginUiAssetStore = viewModel.pluginUiAssetStore,
+                            mobileWebUiStore = viewModel.mobileWebUiStore,
+                            mobileWebUiServerId = session.serverId,
+                            mobileWebUiServingGeneration = mobileWebUiServing
+                                ?.takeIf { it.serverId == session.serverId }
+                                ?.generationId,
+                            mobileWebUiReadyGeneration = mobileWebUiReadyGeneration,
+                            mobileWebUiResetEvent = mobileWebUiResetEvent,
+                            mobileWebUiPresentationEpoch = mobileWebUiPresentationEpoch.value,
+                            mobileWebUiSessionStarted = processSessionStarted,
+                            onMobileWebUiSessionStarted = { mobileWebUiSessionStarted.value = true },
+                            onNativeActivityResultLaunched = ::markNativeActivityResultLaunched,
+                            mobileWebUiApplyGeneration = mobileWebUiApplyGeneration.value,
+                            mobileWebUiCanReplaceUi = settingsOpen.value,
+                            onMobileWebUiApplyHandled = { mobileWebUiApplyGeneration.value = null },
+                            mobileWebUiCoordinator = viewModel.mobileWebUiCoordinator,
                             onSelectSession = viewModel::selectSession,
                             onRemoveUnavailableSession = viewModel::removeUnavailableSession,
                             onNewSession = viewModel::createSession,
@@ -264,7 +326,28 @@ class MainActivity : ComponentActivity() {
                         )
                     }
                     if (settingsOpen.value) {
-                        SettingsScreen(onBack = { settingsOpen.value = false })
+                        SettingsScreen(
+                            onBack = { settingsOpen.value = false },
+                            mobileWebUiStore = viewModel.mobileWebUiStore,
+                            mobileWebUiCoordinator = viewModel.mobileWebUiCoordinator,
+                            mobileWebUiServerId = session.serverId,
+                            mobileWebUiReadyGeneration = mobileWebUiReadyGeneration,
+                            mobileWebUiWaitForSpace = mobileWebUiWaitForSpace,
+                            mobileWebUiCanReplaceUi = settingsOpen.value,
+                            onCollectMobileWebUi = viewModel::collectMobileWebUiGarbage,
+                            onResetMobileWebUi = viewModel::resetMobileWebUi,
+                            onRetryMobileWebUi = viewModel::retryMobileWebUi,
+                            onApplyMobileWebUi = {
+                                val generation = mobileWebUiReadyGeneration
+                                if (settingsOpen.value && generation != null) {
+                                    mobileWebUiApplyGeneration.value = generation
+                                    true
+                                } else {
+                                    false
+                                }
+                            },
+                            onNativeActivityResultLaunched = ::markNativeActivityResultLaunched,
+                        )
                     }
                 }
             }
@@ -280,13 +363,29 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (nativeResultPending || nativeResultReturned) {
+            nativeResultResumeObserved = true
+            nativeResultPending = false
+            nativeResultReturned = false
+            leftForeground = false
+        } else if (shouldAdvanceMobileWebUiPresentationEpoch(leftForeground, isChangingConfigurations)) {
+            mobileWebUiPresentationEpoch.value += 1L
+            leftForeground = false
+        }
+        viewModel.onForeground()
         notificationsEnabled.value = NotificationManagerCompat.from(this).areNotificationsEnabled()
         MobileConnectionService.dismissMessageNotifications(this)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putBoolean(KEY_SETTINGS_OPEN, settingsOpen.value)
+        outState.putLong(KEY_MOBILE_WEB_UI_EPOCH, mobileWebUiPresentationEpoch.value)
         super.onSaveInstanceState(outState)
+    }
+
+    override fun onPause() {
+        leftForeground = !isChangingConfigurations
+        super.onPause()
     }
 
     private fun consumeIncomingShare(intent: Intent) {
@@ -332,6 +431,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openNotificationSettings() {
+        markNativeActivityResultLaunched()
         startActivity(
             Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                 data = "package:$packageName".toUri()
@@ -341,6 +441,7 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun shareDiagnostics() {
+        markNativeActivityResultLaunched()
         val report = CrashDiagnostics.exportReport(application)
         startActivity(
             Intent.createChooser(
@@ -354,12 +455,34 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    private fun markNativeActivityResultLaunched() {
+        nativeResultPending = true
+        nativeResultReturned = false
+        nativeResultResumeObserved = false
+    }
+
+    private fun markNativeActivityResultReturned() {
+        if (nativeResultResumeObserved) {
+            nativeResultResumeObserved = false
+            nativeResultReturned = false
+        } else {
+            nativeResultReturned = true
+        }
+    }
+
     private companion object {
         const val PERMISSION_PREFERENCES = "notification_permission"
         const val KEY_NOTIFICATION_PERMISSION_REQUESTED = "requested"
         const val KEY_SETTINGS_OPEN = "settings_open"
+        const val KEY_MOBILE_WEB_UI_EPOCH = "mobile_web_ui_presentation_epoch"
     }
 }
+
+internal fun shouldAdvanceMobileWebUiPresentationEpoch(
+    leftForeground: Boolean,
+    changingConfigurations: Boolean,
+    nativeActivityContinuation: Boolean = false,
+): Boolean = leftForeground && !changingConfigurations && !nativeActivityContinuation
 
 internal data class NotificationTargetRequest(
     val sessionId: String?,

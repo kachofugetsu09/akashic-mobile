@@ -32,6 +32,7 @@ class AppDatabaseMigrationTest {
             DATABASE_9_10,
             DATABASE_10_11,
             DATABASE_11_12,
+            DATABASE_12_13,
         )
             .forEach(context::deleteDatabase)
     }
@@ -456,6 +457,47 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate12To13CreatesWebUiTablesIndexesAndForeignKeys() {
+        helper.createDatabase(DATABASE_12_13, 12).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_12_13,
+            13,
+            true,
+            AppDatabase.MIGRATION_12_13,
+        ).use { database ->
+            listOf("mobile_webui_state", "mobile_webui_generations", "mobile_webui_blobs", "mobile_webui_rejects")
+                .forEach { table ->
+                    database.query(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '$table'",
+                    ).use { cursor ->
+                        check(cursor.moveToFirst())
+                        assertEquals(1, cursor.getInt(0))
+                    }
+                    database.query("PRAGMA foreign_key_list('$table')").use { cursor ->
+                        check(cursor.moveToFirst())
+                        assertEquals("server_profiles", cursor.getString(cursor.getColumnIndexOrThrow("table")))
+                    }
+                }
+            database.query("PRAGMA index_list('mobile_webui_generations')").use { cursor ->
+                var count = 0
+                while (cursor.moveToNext()) count += 1
+                assertEquals(3, count)
+            }
+            database.query("PRAGMA index_list('mobile_webui_blobs')").use { cursor ->
+                var count = 0
+                while (cursor.moveToNext()) count += 1
+                assertEquals(2, count)
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -468,5 +510,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_9_10 = "migration-9-10"
         const val DATABASE_10_11 = "migration-10-11"
         const val DATABASE_11_12 = "migration-11-12"
+        const val DATABASE_12_13 = "migration-12-13"
     }
 }

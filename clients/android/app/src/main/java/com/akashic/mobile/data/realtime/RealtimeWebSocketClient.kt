@@ -243,6 +243,81 @@ class RealtimeWebSocketClient(
         }
     }
 
+    /** 复用当前端点的 TLS 信任策略读取带 digest 路径的 WebUI manifest/blob。 */
+    internal fun executeMobileWebUiHttp(
+        endpoint: ServerEndpoint,
+        request: MobileWebUiHttpRequest,
+    ): MobileWebUiHttpResponse {
+        validateEndpoint(endpoint)
+        require(request.ticket.length in 1..MAX_PLUGIN_UI_TICKET_CHARS) {
+            "Invalid WebUI HTTP ticket"
+        }
+        val isManifest = MOBILE_WEB_UI_MANIFEST_ROUTE.matches(request.path)
+        val blobMatch = MOBILE_WEB_UI_BLOB_ROUTE.matchEntire(request.path)
+        require(isManifest || blobMatch != null) { "Invalid WebUI HTTP path" }
+        if (isManifest) {
+            require(request.blobSha256 == null && request.byteLength == null && request.offset == null) {
+                "Manifest HTTP request must not contain a range"
+            }
+        } else {
+            val digest = requireNotNull(blobMatch).groupValues[1]
+            require(request.blobSha256 == digest) { "WebUI blob path digest mismatch" }
+            val byteLength = requireNotNull(request.byteLength)
+            val offset = requireNotNull(request.offset)
+            require(byteLength in 1..MOBILE_WEB_UI_MAX_FILE_BYTES) { "Invalid WebUI blob length" }
+            require(offset in 0 until byteLength) { "Invalid WebUI blob offset" }
+        }
+        val websocketUri = URI(endpoint.url)
+        val httpScheme = when (requireNotNull(websocketUri.scheme).lowercase()) {
+            "wss" -> "https"
+            "ws" -> "http"
+            else -> error("Validated endpoint scheme changed")
+        }
+        val url = URI(
+            httpScheme,
+            null,
+            websocketUri.host,
+            websocketUri.port,
+            request.path,
+            null,
+            null,
+        ).toString()
+        val builder = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${request.ticket}")
+            .header("Accept-Encoding", "identity")
+            .get()
+        if (!isManifest) {
+            val byteLength = requireNotNull(request.byteLength)
+            val offset = requireNotNull(request.offset)
+            val rangeEnd = minOf(
+                byteLength - 1,
+                Math.addExact(offset, MOBILE_WEB_UI_MAX_FILE_BYTES - 1L),
+            )
+            builder.header("Range", "bytes=$offset-$rangeEnd")
+            builder.header("If-Range", "\"${requireNotNull(request.blobSha256)}\"")
+        }
+        val call = clientFor(endpoint)
+            .newBuilder()
+            .followRedirects(false)
+            .build()
+            .newCall(builder.build())
+        return call.execute().use { response ->
+            MobileWebUiHttpResponse(
+                statusCode = response.code,
+                body = readBoundedMobileWebUiBody(
+                    response,
+                    if (isManifest) MOBILE_WEB_UI_MAX_MANIFEST_BYTES else MOBILE_WEB_UI_MAX_FILE_BYTES,
+                ),
+                contentLength = response.header("Content-Length")?.toLongOrNull(),
+                contentRange = response.header("Content-Range"),
+                etag = response.header("ETag"),
+                contentDigest = response.header("Content-Digest"),
+                representationDigest = response.header("Repr-Digest"),
+            )
+        }
+    }
+
     fun reject(candidateId: SocketCandidateId, code: Int, reason: String) {
         val socket = synchronized(lock) {
             val current = state ?: return
@@ -430,6 +505,22 @@ class RealtimeWebSocketClient(
         return buffer.readByteArray()
     }
 
+    private fun readBoundedMobileWebUiBody(response: Response, limit: Long): ByteArray {
+        val body = response.body
+        val declared = body.contentLength()
+        if (declared > limit) throw IOException("WebUI HTTP 响应超过大小上限")
+        val source = body.source()
+        val buffer = Buffer()
+        var total = 0L
+        while (true) {
+            val read = source.read(buffer, minOf(8 * 1024L, limit + 1L - total))
+            if (read == -1L) break
+            total += read
+            if (total > limit) throw IOException("WebUI HTTP 响应超过大小上限")
+        }
+        return buffer.readByteArray()
+    }
+
     private fun envelopeLabel(envelope: WireEnvelope): String =
         "kind=${envelope.kind} type=${envelope.type} id=${envelope.id} epoch=${envelope.connectionEpoch} " +
             "session=${envelope.sessionId} turn=${envelope.turnId} payloadKeys=${envelope.payload.keys}"
@@ -448,6 +539,8 @@ class RealtimeWebSocketClient(
         const val MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES = 192 * 1024L
         const val MAX_MESSAGE_CONTENT_RANGE_BYTES = 256 * 1024L
         const val MAX_PLUGIN_UI_TICKET_CHARS = 4096
+        val MOBILE_WEB_UI_MANIFEST_ROUTE = Regex("^/mobile/webui/v1/manifest/[0-9a-f]{64}$")
+        val MOBILE_WEB_UI_BLOB_ROUTE = Regex("^/mobile/webui/v1/blob/([0-9a-f]{64})$")
         const val PLUGIN_UI_HTTP_PATH = "/mobile/plugin-ui/v1/query"
         const val MESSAGE_CONTENT_HTTP_PATH = "/mobile/message-content/v1"
         val PLUGIN_UI_JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

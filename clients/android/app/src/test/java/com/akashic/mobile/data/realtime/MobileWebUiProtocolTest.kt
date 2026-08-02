@@ -1,0 +1,234 @@
+package com.akashic.mobile.data.realtime
+
+import java.security.MessageDigest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Test
+
+class MobileWebUiProtocolTest {
+    @Test
+    fun `canonical manifest derives generation and target identity`() {
+        val manifest = validManifest()
+        validateMobileWebUiManifest(manifest)
+        val digest = mobileWebUiManifestDigest(manifest)
+        val target = validTarget(manifest, digest)
+
+        validateMobileWebUiTarget(target, SERVER_ID)
+        validateMobileWebUiManifest(manifest, target)
+        assertEquals(
+            deriveMobileWebUiTargetKey(SERVER_ID, manifest.generationId, digest),
+            target.targetKey,
+        )
+        assertEquals(
+            mobileWebUiSelectionDigest(SERVER_ID, target.targetKey, null),
+            mobileWebUiSelectionDigest(SERVER_ID, target.targetKey, null),
+        )
+    }
+
+    @Test
+    fun `NFC path keeps case while casefold key detects collision`() {
+        val path = "assets/HashABC.WOFF2"
+        assertEquals(path, normalizeMobileWebUiPath(path))
+        assertEquals("assets/hashabc.woff2", mobileWebUiPathKey(path))
+    }
+
+    @Test
+    fun `zero byte file is valid`() {
+        val manifest = validManifest()
+        validateMobileWebUiManifest(manifest)
+        assertEquals(0, manifest.files.single().sizeBytes)
+        assertEquals(0, manifest.unpackedSizeBytes)
+    }
+
+    @Test
+    fun `stable and preview may reference same target`() {
+        val manifest = validManifest()
+        val digest = mobileWebUiManifestDigest(manifest)
+        val target = validTarget(manifest, digest)
+        val view = MobileWebUiReleaseView(
+            serverId = SERVER_ID,
+            releaseEpoch = "00000000-0000-4000-8000-000000000001",
+            sequence = 1,
+            selectionDigest = mobileWebUiSelectionDigest(SERVER_ID, target.targetKey, target.targetKey),
+            stable = target,
+            preview = target,
+        )
+        validateMobileWebUiReleaseView(view, SERVER_ID)
+    }
+
+    @Test
+    fun `unknown manifest fields are rejected`() {
+        val manifest = validManifest()
+        val raw = MOBILE_WEB_UI_JSON.encodeToString(manifest)
+            .removeSuffix("}") + ",\"archive_size_bytes\":1}"
+        assertThrows(kotlinx.serialization.SerializationException::class.java) {
+            MOBILE_WEB_UI_JSON.decodeFromString<MobileWebUiManifest>(raw)
+        }
+    }
+
+    @Test
+    fun `release view requires explicit stable and preview fields`() {
+        val digest = mobileWebUiSelectionDigest(SERVER_ID, null, null)
+        val withoutStable = """
+            {"server_id":"$SERVER_ID","release_epoch":"00000000-0000-4000-8000-000000000001","sequence":1,"selection_digest":"$digest","preview":null}
+        """.trimIndent()
+        val withoutPreview = """
+            {"server_id":"$SERVER_ID","release_epoch":"00000000-0000-4000-8000-000000000001","sequence":1,"selection_digest":"$digest","stable":null}
+        """.trimIndent()
+        assertThrows(kotlinx.serialization.SerializationException::class.java) {
+            MOBILE_WEB_UI_JSON.decodeFromString<MobileWebUiReleaseView>(withoutStable)
+        }
+        assertThrows(kotlinx.serialization.SerializationException::class.java) {
+            MOBILE_WEB_UI_JSON.decodeFromString<MobileWebUiReleaseView>(withoutPreview)
+        }
+    }
+
+    @Test
+    fun `same digest cannot be advertised with two MIME types in one generation`() {
+        val base = validManifest()
+        val duplicateMime = base.copy(
+            generationId = "0".repeat(64),
+            files = listOf(
+                base.files.single().copy(path = "empty.txt", mime = "text/plain"),
+                base.files.single(),
+            ),
+            fileCount = 2,
+        ).let { it.copy(generationId = mobileWebUiGenerationIdentityDigest(it)) }
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiManifest(duplicateMime)
+        }
+    }
+
+    @Test
+    fun `golden suffix MIME mapping matches core`() {
+        val html = "<html/>".toByteArray()
+        val js = "console.log(1)".toByteArray()
+        val css = "body{}".toByteArray()
+        val files = listOf(
+            MobileWebUiManifestFile("app.js", js.sha256(), js.size.toLong(), "text/javascript"),
+            MobileWebUiManifestFile("mobile.html", html.sha256(), html.size.toLong(), "text/html"),
+            MobileWebUiManifestFile("style.css", css.sha256(), css.size.toLong(), "text/css"),
+        )
+        val base = validManifest().copy(
+            files = files,
+            unpackedSizeBytes = files.sumOf { it.sizeBytes },
+            fileCount = files.size,
+            generationId = "0".repeat(64),
+        )
+        validateMobileWebUiManifest(base.copy(generationId = mobileWebUiGenerationIdentityDigest(base)))
+    }
+
+    @Test
+    fun `release epoch and platform tokens are strict ASCII UUID4`() {
+        val manifest = validManifest()
+        val target = validTarget(manifest, mobileWebUiManifestDigest(manifest))
+        val digest = mobileWebUiSelectionDigest(SERVER_ID, target.targetKey, null)
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiReleaseView(
+                MobileWebUiReleaseView(SERVER_ID, "epoch-1", 1, digest, target, null),
+                SERVER_ID,
+            )
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiTarget(target.copy(platforms = listOf("安卓")), SERVER_ID)
+        }
+    }
+
+    @Test
+    fun `content grant rejects malformed or oversized bearer tokens`() {
+        val manifest = validManifest()
+        val target = validTarget(manifest, mobileWebUiManifestDigest(manifest))
+        val valid = MobileWebUiContentGrant(
+            targetKey = target.targetKey,
+            manifestDigest = target.manifestDigest,
+            ticket = "ticket",
+            expiresAt = "2026-08-03T12:00:00Z",
+        )
+        validateMobileWebUiContentGrant(valid, target)
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiContentGrant(valid.copy(ticket = "bad ticket"), target)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiContentGrant(valid.copy(ticket = "x".repeat(4097)), target)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiContentGrant(valid.copy(expiresAt = "not-a-date"), target)
+        }
+    }
+
+    @Test
+    fun `expired grant timestamp remains syntax-valid and server controls expiry`() {
+        val manifest = validManifest()
+        val target = validTarget(manifest, mobileWebUiManifestDigest(manifest))
+        validateMobileWebUiContentGrant(
+            MobileWebUiContentGrant(
+                targetKey = target.targetKey,
+                manifestDigest = target.manifestDigest,
+                ticket = "ticket",
+                expiresAt = "2020-01-01T00:00:00Z",
+            ),
+            target,
+        )
+    }
+
+    private fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")
+        .digest(this).joinToString("") { "%02x".format(it) }
+
+    private fun validManifest(): MobileWebUiManifest {
+        val provisional = MobileWebUiManifest(
+            schemaVersion = MOBILE_WEB_UI_MANIFEST_SCHEMA,
+            generationId = "0".repeat(64),
+            entrypoint = "mobile.html",
+            files = listOf(
+                MobileWebUiManifestFile(
+                    path = "mobile.html",
+                    sha256 = emptyDigest(),
+                    sizeBytes = 0,
+                    mime = "text/html",
+                ),
+            ),
+            bridgeProtocolMin = MOBILE_WEB_UI_BRIDGE_PROTOCOL,
+            bridgeProtocolMax = MOBILE_WEB_UI_BRIDGE_PROTOCOL,
+            snapshotProtocolMin = MOBILE_WEB_UI_SNAPSHOT_PROTOCOL,
+            snapshotProtocolMax = MOBILE_WEB_UI_SNAPSHOT_PROTOCOL,
+            minimumNativeBuild = 45,
+            platforms = listOf("android"),
+            sourceRepository = "https://github.com/kachofugetsu09/akashic-agent",
+            sourceCommit = "a".repeat(40),
+            sourceTree = "b".repeat(40),
+            inputDigest = "c".repeat(64),
+            buildContextDigest = "d".repeat(64),
+            dirtyProvenance = null,
+            reproducible = true,
+            builderIdentity = MobileWebUiBuilderIdentity(
+                nodeVersion = "v22.23.1",
+                npmVersion = "10.9.2",
+                packageLockDigest = "e".repeat(64),
+                buildScriptDigest = "f".repeat(64),
+            ),
+            unpackedSizeBytes = 0,
+            fileCount = 1,
+        )
+        return provisional.copy(generationId = mobileWebUiGenerationIdentityDigest(provisional))
+    }
+
+    private fun validTarget(manifest: MobileWebUiManifest, digest: String) = MobileWebUiTarget(
+        targetKey = deriveMobileWebUiTargetKey(SERVER_ID, manifest.generationId, digest),
+        generationId = manifest.generationId,
+        manifestDigest = digest,
+        manifestSizeBytes = mobileWebUiManifestBytes(manifest).size.toLong(),
+        bridgeProtocolMin = manifest.bridgeProtocolMin,
+        bridgeProtocolMax = manifest.bridgeProtocolMax,
+        snapshotProtocolMin = manifest.snapshotProtocolMin,
+        snapshotProtocolMax = manifest.snapshotProtocolMax,
+        minimumNativeBuild = manifest.minimumNativeBuild,
+        platforms = manifest.platforms,
+    )
+
+    private fun emptyDigest() = MessageDigest.getInstance("SHA-256")
+        .digest(ByteArray(0)).joinToString("") { "%02x".format(it) }
+
+    private companion object {
+        const val SERVER_ID = "server-1"
+    }
+}
