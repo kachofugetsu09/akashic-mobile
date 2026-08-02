@@ -151,7 +151,7 @@ class IsolatedGatewayDeviceTest {
     }
 
     @Test
-    fun oversizedHistorySurvivesProjectionReloadExactly() = runBlocking {
+    fun oversizedHistorySurvivesProjectionReloadExactly() = runBlocking<Unit> {
         val arguments = InstrumentationRegistry.getArguments()
         val offer = String(
             Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT),
