@@ -318,6 +318,7 @@ class RealtimeSession(
         commit = deliveryStore::commitRestoredMessageContent,
         onTransportUnavailable = ::scheduleReconnect,
         onDownloadFailed = { message ->
+            Log.e(TAG, message)
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
     )
