@@ -62,14 +62,15 @@ class MobileWebSnapshotTest {
 
         val patch = after.toMobileWebStreamPatch(before)
 
-        assertEquals(1, patch?.protocolVersion)
+        assertEquals(3, patch?.protocolVersion)
         assertEquals(7L, patch?.projectionGeneration)
         assertEquals(0, patch?.messageIndex)
-        assertEquals("正在分析", patch?.message?.content)
+        assertEquals("分析", patch?.contentAppend)
+        assertEquals(null, patch?.message)
     }
 
     @Test
-    fun createsPatchForAppendOnlyThinkingAndRejectsStructuralChange() {
+    fun createsPatchForThinkingAndCommitsCompletedTurn() {
         val thinking = ProcessBlockUi(
             id = "thinking-1",
             kind = ProcessBlockKind.THINKING,
@@ -108,10 +109,66 @@ class MobileWebSnapshotTest {
         )
 
         assertEquals(
-            "先检查调用链",
-            appended.toMobileWebStreamPatch(before)?.message?.blocks?.single()?.detail,
+            "检查调用链",
+            appended.toMobileWebStreamPatch(before)?.thinkingAppend?.delta,
         )
-        assertEquals(null, completed.toMobileWebStreamPatch(appended))
+        val terminal = completed.toMobileWebStreamPatch(appended)
+        assertEquals(false, terminal?.message?.streaming)
+        assertEquals(false, terminal?.state?.composer?.isStreaming)
+        assertEquals("assistant:turn-1", terminal?.messageId)
+    }
+
+    @Test
+    fun createsPatchForToolInsertionAndToolStateChange() {
+        val thinking = ProcessBlockUi(
+            id = "thinking-1",
+            kind = ProcessBlockKind.THINKING,
+            title = "思考",
+            detail = "检查完成",
+            state = ProcessBlockState.COMPLETED,
+        )
+        val tool = ProcessBlockUi(
+            id = "tool-1",
+            kind = ProcessBlockKind.TOOL,
+            title = "读取文件",
+            detail = "读取配置",
+            state = ProcessBlockState.RUNNING,
+        )
+        val message = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = listOf(thinking),
+            answer = "",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = null,
+            createdAtMillis = 1_000,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(message),
+            isStreaming = true,
+        )
+        val running = before.copy(messages = listOf(message.copy(blocks = listOf(thinking, tool))))
+        val finished = running.copy(
+            messages = listOf(
+                message.copy(
+                    blocks = listOf(
+                        thinking,
+                        tool.copy(state = ProcessBlockState.COMPLETED, resultPreview = "完成"),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            MobileWebProcessState.RUNNING,
+            running.toMobileWebStreamPatch(before)?.message?.blocks?.last()?.state,
+        )
+        assertEquals(
+            MobileWebProcessState.COMPLETED,
+            finished.toMobileWebStreamPatch(running)?.message?.blocks?.last()?.state,
+        )
     }
 
     @Test
@@ -152,6 +209,92 @@ class MobileWebSnapshotTest {
 
         assertTrue(snapshotJson.length > 100_000)
         assertTrue(patchJson.length * 100 < snapshotJson.length)
+        assertTrue(!patchJson.contains("正在检查调用链"))
+        assertTrue(patchJson.contains("检查调用链"))
+    }
+
+    @Test
+    fun terminalPatchDoesNotSerializeConversationHistoryOrRequireStableMessageId() {
+        val history = List(400) { index ->
+            MessageUi.User(
+                id = "user:$index",
+                sessionId = "mobile:test",
+                text = "历史消息-$index-${"内容".repeat(150)}",
+                deliveryLabel = "已发送",
+                replyable = true,
+                createdAtMillis = index.toLong(),
+                reply = null,
+            )
+        }
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在检查调用链",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 2,
+            createdAtMillis = 1_000,
+            updatedAtMillis = 1_200,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = history + streaming,
+            isStreaming = true,
+        )
+        val after = before.copy(
+            sessions = listOf(
+                SessionUi("mobile:test", "会话", "检查完成", 1_300, 0, false, true),
+            ),
+            messages = history + streaming.copy(
+                id = "message:canonical",
+                answer = "检查调用链完成",
+                status = AssistantTurnStatus.COMPLETE,
+                durationSeconds = 3,
+                updatedAtMillis = 1_300,
+            ),
+            isStreaming = false,
+        )
+
+        val patch = after.toMobileWebStreamPatch(before)
+        val patchJson = Json.encodeToString(patch)
+        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
+
+        assertEquals("assistant:turn-1", patch?.messageId)
+        assertEquals("message:canonical", patch?.message?.id)
+        assertEquals(false, patch?.state?.composer?.isStreaming)
+        assertTrue(snapshotJson.length > 100_000)
+        assertTrue(patchJson.length * 100 < snapshotJson.length)
+        assertTrue(!patchJson.contains("历史消息-399"))
+    }
+
+    @Test
+    fun controlStatePatchDoesNotSerializeUnchangedConversationHistory() {
+        val history = List(400) { index ->
+            MessageUi.User(
+                id = "user:$index",
+                sessionId = "mobile:test",
+                text = "历史消息-$index-${"内容".repeat(150)}",
+                deliveryLabel = "已发送",
+                replyable = true,
+                createdAtMillis = index.toLong(),
+                reply = null,
+            )
+        }
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = history,
+        )
+        val after = before.copy(connectionNotice = "消息已缓存")
+
+        val patchJson = Json.encodeToString(after.toMobileWebStatePatch(before))
+        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
+
+        assertTrue(snapshotJson.length > 100_000)
+        assertTrue(patchJson.length * 100 < snapshotJson.length)
+        assertEquals(null, after.copy(projectionGeneration = 10).toMobileWebStatePatch(before))
     }
 
     @Test

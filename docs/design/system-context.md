@@ -11,7 +11,7 @@
 ┌──────────────────────── akashic-agent ────────────────────────┐
 │ SessionDB / workspace / Gateway / protocol / plugins / MCP    │
 └──────────────────────────────┬─────────────────────────────────┘
-                               │ WebSocket control + HTTPS query data
+                               │ WebSocket control + HTTPS bounded data
                                ▼
 ┌──────────────────────── akashic-mobile ───────────────────────┐
 │ RealtimeSession                                                │
@@ -19,7 +19,12 @@
 │   ├─ filesDir attachments / shares / plugin UI cache          │
 │   ├─ DataStore selection and UI settings                      │
 │   ├─ Android Keystore device identity                         │
-│   └─ native shell + mobile WebView                            │
+│   └─ native shell + WebView host/bridge                       │
+└────────────────────────────────────────────────────────────────┘
+                               ▲
+                               │ pinned ZIP + SHA-256 + source manifest
+┌──────────────────────── akashic-agent ────────────────────────┐
+│ frontend/chat shared WebUI source + desktop/mobile entries    │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -29,11 +34,12 @@
 |---|---|---|
 | `App.kt` / `AppContainer` | 组装数据库、文件 store、密钥和 realtime | 移动端 |
 | `RealtimeSession` | 配对、连接、同步、投递、附件和插件 UI WebSocket/HTTPS 协调 | 移动端消费协议；核心拥有远端事实 |
-| `AppDatabase` | Room v10 schema 与迁移 | 移动端 |
+| `AppDatabase` | Room v12 schema 与迁移 | 移动端 |
 | `MobileConnectionService` | 后台连接和持久通知消费 | 移动端 |
 | `protocol/mobile-realtime-v1.json` | 客户端历史协议快照 | 核心 schema 是真源 |
 | `runtime-gate/` | 固定核心组合并验证跨仓库语义 | 移动端维护消费者契约；核心提供 provider 测试 |
 | plugin UI stores | 缓存核心发布的 asset/catalog/result | 核心插件 runtime 是能力真源 |
+| `clients/android/mobile-web` | 固定共享 WebUI ZIP、摘要与来源；Gradle 校验后解包 | `akashic-agent/frontend/chat` 是源码真源；移动端拥有消费锁 |
 
 ## 当前配对行为
 
@@ -45,7 +51,22 @@
 
 ## 历史同步进度
 
-正常重连时，`RealtimeSession` 以 Room 中已落地且 `serverSeq` 连续的历史投影作为恢复点：本地数量与核心目录一致时不重放，未完成时从首个不完整页继续，并重叠请求该页以保持幂等。投影不连续、数量超过核心目录，或收到 `sync.reset_required` 时从第一页完整重建。核心 SessionDB 仍是权威事实，本地进度只决定可重建投影的读取起点。
+正常重连时，`RealtimeSession` 使用服务端冻结的 `snapshot_max_seq` 和 `after_seq` 游标读取历史；同步期间追加的新消息留给下一轮，不改变当前快照。旧核心仍使用 page/page_size 兼容路径。投影不连续、数量异常或收到 `sync.reset_required` 时从头重建。核心 SessionDB 仍是权威事实，本地进度只决定可重建投影的读取起点。
+
+历史消息正文超过 WebSocket 事件预算时，历史页只携带带长度、摘要和预览的 `content_ref`，thinking、tool block、顺序和消息身份仍随历史页落库。客户端通过 WebSocket 申请与当前设备、连接和消息绑定的短期 ticket，再从同源 HTTPS Range route 分段写入私有文件。每段先落盘后推进 Room 偏移，完整摘要与 UTF-8 校验通过后才原子替换预览。
+
+```text
+┌──────────────┐  history.page + content_ref  ┌─────────────────┐
+│ Core SessionDB│ ───────────────────────────▶ │ Room projection │
+└──────┬───────┘                              └────────┬────────┘
+       │ WSS prepare / short ticket                     │ preview + blocks
+       └──────────────────────┐                         │
+                              ▼                         ▼
+                       ┌──────────────┐  verified   ┌──────────────┐
+                       │ HTTPS Range  │ ───────────▶ │ full content │
+                       │ <= 256 KiB   │  fsync/hash │ same message │
+                       └──────────────┘             └──────────────┘
+```
 
 ## 主动消息投影身份
 

@@ -75,8 +75,8 @@ class IsolatedGatewayDeviceTest {
             "akasha_https_elapsed_ms=$elapsedMillis response_bytes=${resultJson.toByteArray().size}",
         )
         assertEquals("akasha.recall-card.v1", result["schema"]?.jsonPrimitive?.content)
-        assertEquals(5, result["left"]?.jsonArray?.size)
-        assertTrue(resultJson.toByteArray().size < 16 * 1024)
+        assertEquals(40, result["left"]?.jsonArray?.size)
+        assertTrue(resultJson.toByteArray().size < 192 * 1024)
         assertTrue("Akasha 首次 HTTPS 查询耗时 ${elapsedMillis}ms", elapsedMillis < 3_000)
     }
 
@@ -88,6 +88,7 @@ class IsolatedGatewayDeviceTest {
             Charsets.UTF_8,
         )
         val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val expectedMediaType = arguments.getString("expectedMediaType") ?: "image/gif"
         val app = ApplicationProvider.getApplicationContext<App>()
         val session = app.container.realtimeSession
 
@@ -112,15 +113,15 @@ class IsolatedGatewayDeviceTest {
         session.sendMessage("Android 隔离端到端")
         val received = graph(app, sessionId) { messages ->
             messages.any { message ->
-                message.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。" &&
+                message.message.text.startsWith(ISOLATED_REPLY_PREFIX) &&
                     message.attachmentLinks.any { it.attachment.state == "cached" }
             }
         }
         val reply = received.single {
-            it.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。"
+            it.message.text.startsWith(ISOLATED_REPLY_PREFIX)
         }
         val attachment = reply.attachmentLinks.single().attachment
-        assertEquals("image/gif", attachment.contentType)
+        assertEquals(expectedMediaType, attachment.contentType)
         assertTrue(File(requireNotNull(attachment.cachePath)).isFile)
     }
 
@@ -138,16 +139,70 @@ class IsolatedGatewayDeviceTest {
         }
         session.selectSession(sessionId)
         val restored = graph(app, sessionId) { messages ->
-            messages.any { it.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。" }
+            messages.any { it.message.text.startsWith(ISOLATED_REPLY_PREFIX) }
         }
 
         assertEquals(1, restored.count { it.message.text == "这是隔离 Gateway 的历史消息" })
         assertEquals(1, restored.count { it.message.text == "历史同步成功后应只出现一次。" })
         assertEquals(
             1,
-            restored.count { it.message.text == "隔离 Gateway 已收到消息，这是固定媒体回复。" },
+            restored.count { it.message.text.startsWith(ISOLATED_REPLY_PREFIX) },
         )
     }
+
+    @Test
+    fun oversizedHistorySurvivesProjectionReloadExactly() = runBlocking<Unit> {
+        val arguments = InstrumentationRegistry.getArguments()
+        val offer = String(
+            Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT),
+            Charsets.UTF_8,
+        )
+        val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+        val expectedContent = "长正文🌙\n".repeat(40_000)
+
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        val ready = withTimeout(TIMEOUT_MILLIS) {
+            session.state.first { it.hasProfile && it.connection.phase == ConnectionPhase.READY }
+        }
+        session.selectSession(sessionId)
+        val initial = graph(app, sessionId) { messages ->
+            messages.any { it.message.text == expectedContent }
+        }.single { it.message.text == expectedContent }
+        val before = historySnapshot(initial)
+        assertEquals(listOf("thinking", "tool", "thinking"), before.blocks.map { it.kind })
+
+        session.reloadFromServer()
+        withTimeout(TIMEOUT_MILLIS) {
+            session.state.first {
+                it.projectionGeneration > ready.projectionGeneration &&
+                    it.connection.phase == ConnectionPhase.READY
+            }
+        }
+        val restored = graph(app, sessionId) { messages ->
+            messages.any { it.message.messageId == before.messageId && it.message.text == expectedContent }
+        }.single { it.message.messageId == before.messageId }
+
+        assertEquals(before, historySnapshot(restored))
+        assertEquals(null, app.container.database.messageContentTransfers().get(before.messageId))
+        Log.i(
+            "AkashicDeviceGate",
+            "history_content_bytes=${expectedContent.toByteArray().size} blocks=${before.blocks.size}",
+        )
+    }
+
+    private fun historySnapshot(message: MessageWithBlocks): HistorySnapshot = HistorySnapshot(
+        messageId = message.message.messageId,
+        role = message.message.role,
+        text = message.message.text,
+        serverSeq = message.message.serverSeq,
+        blocks = message.blocks.sortedBy { it.ordinal }.map {
+            BlockSnapshot(it.ordinal, it.kind, it.status, it.content)
+        },
+    )
 
     private suspend fun graph(
         app: App,
@@ -158,6 +213,22 @@ class IsolatedGatewayDeviceTest {
     }
 
     private companion object {
-        const val TIMEOUT_MILLIS = 30_000L
+        const val ISOLATED_REPLY_PREFIX = "## WebUI 试点"
+        const val TIMEOUT_MILLIS = 60_000L
     }
+
+    private data class HistorySnapshot(
+        val messageId: String,
+        val role: String,
+        val text: String,
+        val serverSeq: Long?,
+        val blocks: List<BlockSnapshot>,
+    )
+
+    private data class BlockSnapshot(
+        val ordinal: Int,
+        val kind: String,
+        val status: String,
+        val content: String,
+    )
 }

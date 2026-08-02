@@ -14,6 +14,7 @@ import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
 import com.akashic.mobile.data.realtime.FinalMessageEvent
 import com.akashic.mobile.data.realtime.proactiveMessageId
 import java.time.Instant
+import java.security.MessageDigest
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -74,6 +75,7 @@ private fun encodeStoredToolBlock(content: StoredToolBlock): String =
 class LocalDeliveryStore(
     private val database: AppDatabase,
     private val mediaCache: MediaCacheStore,
+    private val messageContentStore: MessageContentStore,
 ) {
     private val projectionStateMutex = Mutex()
     private val canonicalMessageAliases = linkedMapOf<String, String>()
@@ -665,17 +667,34 @@ class LocalDeliveryStore(
         payload.items.forEach { remote ->
             require(remote.sessionKey == sessionId) { "History item session mismatch" }
             require(remote.role in setOf("user", "assistant")) { "Unsupported history role: ${remote.role}" }
+            require((remote.content == null) != (remote.contentRef == null)) {
+                "History item must carry exactly one of content or content_ref"
+            }
             val completedAt = Instant.parse(remote.ts).toEpochMilli()
             val duration = remote.extra["turn_duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
             require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
             remote.clientMessageId?.let(::requireFrameId)
             val messageId = remote.id
+            val existingCanonical = database.messages().get(messageId)
+            val restoredContent = remote.contentRef?.let { reference ->
+                require(reference.version == 1 && reference.encoding == "utf-8") {
+                    "Unsupported history content reference"
+                }
+                require(reference.byteLength > 0 && SHA256.matches(reference.sha256.lowercase())) {
+                    "History content reference metadata is invalid"
+                }
+                existingCanonical?.text?.takeIf { local ->
+                    val encoded = local.toByteArray(Charsets.UTF_8)
+                    encoded.size.toLong() == reference.byteLength &&
+                        sha256(encoded) == reference.sha256.lowercase()
+                }
+            }
             val canonical = MessageEntity(
                 messageId = messageId,
                 clientMessageId = remote.clientMessageId,
                 sessionId = sessionId,
                 role = remote.role,
-                text = remote.content,
+                text = remote.content ?: restoredContent ?: remote.contentRef!!.preview,
                 deliveryState = "complete",
                 createdAt = (completedAt - duration).coerceAtMost(completedAt),
                 updatedAt = completedAt,
@@ -691,7 +710,6 @@ class LocalDeliveryStore(
                     "Proactive delivery id belongs to a non-proactive history message"
                 }
             }
-            val existingCanonical = database.messages().get(messageId)
             val sourceId = if (existingCanonical != null) {
                 require(
                     existingCanonical.sessionId == canonical.sessionId &&
@@ -703,12 +721,21 @@ class LocalDeliveryStore(
                     database.messages().getByClientMessageId(it)?.messageId
                 }
                     ?: deliveryId?.let(::proactiveMessageId)
-                    ?: transientLocalSourceId(
-                        canonical,
-                        proactive,
-                    )
+                    ?: if (remote.content != null) {
+                        transientLocalSourceId(canonical, proactive)
+                    } else {
+                        null
+                    }
             }
             mergeCanonicalMessage(sourceId, canonical)
+            reconcileMessageContentTransfer(
+                serverId = serverId,
+                sessionId = sessionId,
+                messageId = messageId,
+                reference = remote.contentRef,
+                alreadyRestored = restoredContent != null,
+                updatedAt = completedAt,
+            )
             upsertMessageAttachments(
                 serverId = serverId,
                 sessionId = sessionId,
@@ -721,6 +748,88 @@ class LocalDeliveryStore(
                 database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
             }
         }
+    }
+
+    /** 把摘要一致的完整正文与恢复任务在一个 Room 事务中提交。 */
+    suspend fun commitRestoredMessageContent(
+        transfer: MessageContentTransferEntity,
+        content: String,
+        updatedAt: Long,
+    ) = database.withTransaction {
+        val current = requireNotNull(database.messageContentTransfers().get(transfer.messageId)) {
+            "消息正文恢复记录已消失: ${transfer.messageId}"
+        }
+        require(
+            current.messageId == transfer.messageId &&
+                current.serverId == transfer.serverId &&
+                current.sessionId == transfer.sessionId &&
+                current.byteLength == transfer.byteLength &&
+                current.sha256 == transfer.sha256 &&
+                current.transferredBytes == current.byteLength
+        ) {
+            "消息正文恢复记录尚未完整"
+        }
+        val encoded = content.toByteArray(Charsets.UTF_8)
+        require(
+            encoded.size.toLong() == current.byteLength && sha256(encoded) == current.sha256
+        ) { "消息正文恢复内容与 manifest 不一致" }
+        check(database.messages().updateRestoredContent(current.messageId, content, updatedAt) == 1) {
+            "消息正文投影已消失: ${current.messageId}"
+        }
+        check(database.messageContentTransfers().delete(current.messageId) == 1) {
+            "消息正文恢复记录提交时已消失: ${current.messageId}"
+        }
+    }
+
+    private suspend fun reconcileMessageContentTransfer(
+        serverId: String,
+        sessionId: String,
+        messageId: String,
+        reference: com.akashic.mobile.data.realtime.MessageContentRef?,
+        alreadyRestored: Boolean,
+        updatedAt: Long,
+    ) {
+        val dao = database.messageContentTransfers()
+        val existing = dao.get(messageId)
+        if (reference == null || alreadyRestored) {
+            if (existing != null) {
+                messageContentStore.delete(existing)
+                check(dao.delete(messageId) == 1) { "消息正文恢复记录已消失: $messageId" }
+            }
+            return
+        }
+        val sha256 = reference.sha256.lowercase()
+        if (existing != null) {
+            require(
+                existing.serverId == serverId &&
+                    existing.sessionId == sessionId &&
+                    existing.byteLength == reference.byteLength &&
+                    existing.sha256 == sha256
+            ) { "History content reference changed for an existing message" }
+            if (existing.state == "failed") {
+                check(
+                    dao.updateProgress(
+                        messageId,
+                        existing.transferredBytes,
+                        if (existing.transferredBytes == 0L) "pending" else "downloading",
+                        updatedAt,
+                    ) == 1,
+                ) { "消息正文恢复记录已消失: $messageId" }
+            }
+            return
+        }
+        dao.upsert(
+            MessageContentTransferEntity(
+                messageId = messageId,
+                serverId = serverId,
+                sessionId = sessionId,
+                byteLength = reference.byteLength,
+                sha256 = sha256,
+                transferredBytes = 0,
+                state = "pending",
+                updatedAt = updatedAt,
+            ),
+        )
     }
 
     /** 仅在唯一匹配时把本地临时消息迁移到服务端 canonical identity。 */
@@ -1222,6 +1331,10 @@ class LocalDeliveryStore(
     private fun payloadLong(envelope: WireEnvelope, key: String): Long? =
         envelope.payload[key]?.jsonPrimitive?.longOrNull
 
+    private fun sha256(content: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(content)
+        .joinToString("") { "%02x".format(it) }
+
     private companion object {
         const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
         const val AUTO_DOWNLOAD_LIMIT_BYTES = 10L * 1024 * 1024
@@ -1234,6 +1347,7 @@ class LocalDeliveryStore(
         )
         val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
+        val SHA256 = Regex("^[0-9a-f]{64}$")
         val FRAME_ID = Regex(
             "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
                 "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",

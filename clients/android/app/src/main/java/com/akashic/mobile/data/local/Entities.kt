@@ -133,6 +133,35 @@ data class MessageEntity(
     val replyPreview: String? = null,
 )
 
+@Entity(
+    tableName = "message_content_transfers",
+    foreignKeys = [
+        ForeignKey(
+            entity = MessageEntity::class,
+            parentColumns = ["messageId"],
+            childColumns = ["messageId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = ServerProfileEntity::class,
+            parentColumns = ["serverId"],
+            childColumns = ["serverId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("serverId"), Index("sessionId"), Index("state")],
+)
+data class MessageContentTransferEntity(
+    @PrimaryKey val messageId: String,
+    val serverId: String,
+    val sessionId: String,
+    val byteLength: Long,
+    val sha256: String,
+    val transferredBytes: Long,
+    val state: String,
+    val updatedAt: Long,
+)
+
 data class HistoryProjectionProgress(
     val messageCount: Int,
     val maxServerSeq: Long?,

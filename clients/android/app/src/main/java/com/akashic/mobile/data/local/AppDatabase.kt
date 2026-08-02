@@ -22,8 +22,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ComposerDraftEntity::class,
         PendingMessageNotificationEntity::class,
         PendingTurnStopEntity::class,
+        MessageContentTransferEntity::class,
     ],
-    version = 11,
+    version = 12,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -49,6 +50,8 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun pendingTurnStops(): PendingTurnStopDao
 
+    abstract fun messageContentTransfers(): MessageContentTransferDao
+
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
             context.applicationContext,
@@ -65,6 +68,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_8_9,
             MIGRATION_9_10,
             MIGRATION_10_11,
+            MIGRATION_11_12,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -330,6 +334,37 @@ abstract class AppDatabase : RoomDatabase() {
                             AND `messageId` LIKE 'assistant:%'
                       )
                     """.trimIndent(),
+                )
+            }
+        }
+
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_content_transfers` (
+                        `messageId` TEXT NOT NULL,
+                        `serverId` TEXT NOT NULL,
+                        `sessionId` TEXT NOT NULL,
+                        `byteLength` INTEGER NOT NULL,
+                        `sha256` TEXT NOT NULL,
+                        `transferredBytes` INTEGER NOT NULL,
+                        `state` TEXT NOT NULL,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`messageId`),
+                        FOREIGN KEY(`messageId`) REFERENCES `messages`(`messageId`) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_message_content_transfers_serverId` ON `message_content_transfers` (`serverId`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_message_content_transfers_sessionId` ON `message_content_transfers` (`sessionId`)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_message_content_transfers_state` ON `message_content_transfers` (`state`)",
                 )
             }
         }

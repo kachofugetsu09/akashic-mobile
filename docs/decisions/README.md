@@ -6,5 +6,7 @@
 | 0002 | accepted | 核心与移动端按状态 owner 分仓 |
 | 0003 | accepted | 跨仓库兼容使用固定 Runtime Contract |
 | 0004 | accepted | 插件查询控制面与数据面显式分离 |
+| 0005 | accepted | 共享 WebUI 源码由核心仓库统一维护 |
+| 0006 | accepted | 超长历史正文使用已认证的同源 HTTPS Range 恢复 |
 
 新决策使用四位递增编号。修正旧决定时保留原记录，并在原记录和新记录中互相链接。

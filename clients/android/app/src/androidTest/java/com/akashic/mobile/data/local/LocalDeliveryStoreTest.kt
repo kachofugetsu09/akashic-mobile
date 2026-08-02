@@ -10,6 +10,7 @@ import com.akashic.mobile.data.realtime.AttachmentDownloadCoordinator
 import com.akashic.mobile.data.realtime.MessageSendPayload
 import com.akashic.mobile.data.realtime.ProtocolCodec
 import java.time.Instant
+import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.buildJsonArray
@@ -30,6 +31,7 @@ import org.junit.Assert.assertTrue
 class LocalDeliveryStoreTest {
     private lateinit var database: AppDatabase
     private lateinit var mediaCache: MediaCacheStore
+    private lateinit var contentStore: MessageContentStore
     private lateinit var store: LocalDeliveryStore
 
     @Before
@@ -42,7 +44,17 @@ class LocalDeliveryStoreTest {
             ApplicationProvider.getApplicationContext<Context>().cacheDir.resolve("media-${System.nanoTime()}"),
             database.mediaAttachments(),
         )
-        store = LocalDeliveryStore(database, mediaCache)
+        contentStore = MessageContentStore(
+            ApplicationProvider.getApplicationContext<Context>().cacheDir.resolve(
+                "message-content-${System.nanoTime()}",
+            ),
+            database.messageContentTransfers(),
+        )
+        store = LocalDeliveryStore(
+            database,
+            mediaCache,
+            contentStore,
+        )
         store.savePairedProfile(
             ServerProfileEntity("server", "server", "device", "alias", "pin", "[]", "[]", "[]", 1),
             RealtimeCursorEntity("device", "server", 0, 0, 1),
@@ -628,6 +640,132 @@ class LocalDeliveryStoreTest {
             listOf("历史思考"),
             database.messages().getBlocks("mobile:test:history:canonical").map { it.content },
         )
+    }
+
+    @Test
+    fun historyContentRefRestoresExactBodyWithoutChangingThinkingOrTools() = runBlocking {
+        val messageId = "mobile:test:history:large"
+        val content = ("长正文🌙\n".repeat(40_000)).toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(content)
+            .joinToString("") { "%02x".format(it) }
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page_size", 10)
+                put("content_ref_version", 1)
+                put("after_seq", -1)
+                put("next_after_seq", 0)
+                put("snapshot_max_seq", 0)
+                put("has_more", false)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", messageId)
+                        put("session_key", "mobile:test")
+                        put("seq", 0)
+                        put("role", "assistant")
+                        put("content_ref", buildJsonObject {
+                            put("version", 1)
+                            put("encoding", "utf-8")
+                            put("byte_length", content.size)
+                            put("sha256", digest)
+                            put("preview", "长正文🌙")
+                        })
+                        put("tool_chain", buildJsonArray {
+                            add(buildJsonObject {
+                                put("reasoning_content", "先核对远端权威正文")
+                                put("calls", buildJsonArray {
+                                    add(buildJsonObject {
+                                        put("call_id", "call-1")
+                                        put("name", "shell")
+                                        put("status", "success")
+                                        put("description", "检查一致性")
+                                        put("result_preview", "一致")
+                                    })
+                                })
+                            })
+                        })
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-08-02T00:00:00Z")
+                    })
+                })
+            }),
+            1,
+        )
+
+        assertEquals("长正文🌙", database.messages().get(messageId)!!.text)
+        assertEquals(
+            listOf("thinking", "tool"),
+            database.messages().getBlocks(messageId).map { it.kind },
+        )
+        val transfer = database.messageContentTransfers().get(messageId)!!
+        contentStore.append(transfer, content)
+        val completed = database.messageContentTransfers().get(messageId)!!
+        val restored = contentStore.readVerified(completed)
+        store.commitRestoredMessageContent(
+            completed.copy(updatedAt = completed.updatedAt + 1),
+            restored,
+            2,
+        )
+        contentStore.delete(completed)
+
+        assertEquals(content.toString(Charsets.UTF_8), database.messages().get(messageId)!!.text)
+        assertEquals(null, database.messageContentTransfers().get(messageId))
+        assertEquals(
+            listOf("先核对远端权威正文", "shell"),
+            database.messages().getBlocks(messageId).map {
+                if (it.kind == "thinking") it.content else decodeStoredToolBlock(it.content).name
+            },
+        )
+    }
+
+    @Test
+    fun repeatedHistoryManifestRequeuesFailedContentTransfer() = runBlocking {
+        val messageId = "mobile:test:history:retry"
+        val content = "完整正文".toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(content)
+            .joinToString("") { "%02x".format(it) }
+        val payload = buildJsonObject {
+            put("total", 1)
+            put("page_size", 10)
+            put("content_ref_version", 1)
+            put("after_seq", -1)
+            put("next_after_seq", 0)
+            put("snapshot_max_seq", 0)
+            put("has_more", false)
+            put("items", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", messageId)
+                    put("session_key", "mobile:test")
+                    put("seq", 0)
+                    put("role", "assistant")
+                    put("content_ref", buildJsonObject {
+                        put("version", 1)
+                        put("encoding", "utf-8")
+                        put("byte_length", content.size)
+                        put("sha256", digest)
+                        put("preview", "完整")
+                    })
+                    put("tool_chain", buildJsonArray {})
+                    put("extra", buildJsonObject {})
+                    put("ts", "2026-08-02T00:00:00Z")
+                })
+            })
+        }
+        store.applyEvent("server", "device", event(1, "history.page", payload), 1)
+        check(
+            database.messageContentTransfers().updateProgress(
+                messageId,
+                0,
+                "failed",
+                2,
+            ) == 1,
+        )
+
+        store.applyEvent("server", "device", event(2, "history.page", payload), 3)
+
+        assertEquals("pending", database.messageContentTransfers().get(messageId)!!.state)
     }
 
     @Test

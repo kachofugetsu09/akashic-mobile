@@ -3,6 +3,7 @@
 - 状态：accepted
 - 日期：2026-07-18
 - 关联：`MOB-OWN-001`、`MOB-OWN-002`、`MOB-DATA-001`
+- 部分勘误：[0005](0005-shared-webui-source-lives-in-core-repository.md) 调整共享 WebUI 源码位置，不改变原生状态 owner
 
 ## 问题
 

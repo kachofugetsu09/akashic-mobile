@@ -7,6 +7,8 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.webkit.JavascriptInterface
+import android.net.Uri
+import android.webkit.WebMessage
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebChromeClient
@@ -71,6 +73,9 @@ import org.json.JSONObject
 private const val MOBILE_WEB_URL = "https://appassets.androidplatform.net/assets/mobile.html"
 private const val MOBILE_WEB_LOG_TAG = "AkashicMobileWeb"
 private const val MOBILE_WEB_RENDER_DEADLINE_MILLIS = 10_000L
+private val MOBILE_WEB_ORIGIN: Uri by lazy(LazyThreadSafetyMode.NONE) {
+    Uri.parse("https://appassets.androidplatform.net")
+}
 
 data class MobileSharedTextDraft(
     val id: String,
@@ -200,7 +205,7 @@ fun MobileWebChat(
             WebView(context).apply {
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = false
-                settings.cacheMode = WebSettings.LOAD_NO_CACHE
+                settings.cacheMode = WebSettings.LOAD_DEFAULT
                 settings.allowFileAccess = false
                 settings.allowContentAccess = false
                 settings.mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
@@ -766,25 +771,61 @@ internal fun mobileNavigationAction(url: String, isMainFrame: Boolean): MobileNa
     }
 }
 
-private data class MobileMediaResource(val path: String, val contentType: String)
+internal data class MobileMediaResource(val path: String, val contentType: String)
 
-private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
+internal class MobileMediaResourceIndex {
     private val resources = AtomicReference<Map<String, MobileMediaResource>>(emptyMap())
 
     fun replace(next: Map<String, MobileMediaResource>) {
         resources.set(next.toMap())
     }
 
+    fun resolve(path: String): MobileMediaResource? =
+        resources.get()[path]?.takeIf { File(it.path).isFile }
+}
+
+internal fun mobileMediaResourceKey(attachmentId: String, filename: String): String {
+    val extension = filename.substringAfterLast('.', missingDelimiterValue = "").lowercase()
+    return if (MEDIA_EXTENSION_PATTERN.matches(extension)) "$attachmentId.$extension" else attachmentId
+}
+
+internal fun mobileMediaResourceUrl(attachmentId: String, filename: String): String =
+    "https://appassets.androidplatform.net/media/${mobileMediaResourceKey(attachmentId, filename)}"
+
+/** 把协议 Content-Type 规范为 WebResourceResponse 要求的不带参数 MIME。 */
+internal fun mobileMediaMimeType(contentType: String): String {
+    val mimeType = contentType.substringBefore(';').trim().lowercase()
+    require(MIME_TYPE_PATTERN.matches(mimeType)) { "附件 MIME type 无效: $contentType" }
+    return mimeType
+}
+
+private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
+    private val index = MobileMediaResourceIndex()
+
+    fun replace(next: Map<String, MobileMediaResource>) {
+        index.replace(next)
+    }
+
     override fun handle(path: String): WebResourceResponse? {
-        val resource = resources.get()[path] ?: return null
+        val resource = index.resolve(path) ?: return null
         val file = File(resource.path)
-        if (!file.isFile) return null
         val stream = try {
             file.inputStream()
         } catch (_: FileNotFoundException) {
             return null
         }
-        return WebResourceResponse(resource.contentType, null, stream)
+        return WebResourceResponse(
+            resource.contentType,
+            null,
+            200,
+            "OK",
+            mapOf(
+                "Cache-Control" to "no-store",
+                "Content-Length" to file.length().toString(),
+                "X-Content-Type-Options" to "nosniff",
+            ),
+            stream,
+        )
     }
 }
 
@@ -797,18 +838,30 @@ private fun ConversationUiState.mediaResources(): Map<String, MobileMediaResourc
             }
         }
         .filter { it.cachePath.isNotBlank() }
-        .associate { it.id to MobileMediaResource(it.cachePath, it.contentType) }
+        .associate {
+            mobileMediaResourceKey(it.id, it.filename) to
+                MobileMediaResource(it.cachePath, mobileMediaMimeType(it.contentType))
+        }
+
+private val MIME_TYPE_PATTERN = Regex("^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$")
+private val MEDIA_EXTENSION_PATTERN = Regex("^[a-z0-9]{1,16}$")
 
 private fun WebView.pushSnapshot(snapshotJson: String) {
-    evaluateJavascript(
-        """(() => { if (!window.AkashicMobile?.receiveSnapshot) return 'missing'; window.AkashicMobile.receiveSnapshot($snapshotJson); return 'delivered'; })()""",
-    ) { result -> Log.d(MOBILE_WEB_LOG_TAG, "snapshot push: $result") }
+    postMobileMessage("mobile.snapshot", snapshotJson)
 }
 
 private fun WebView.pushStreamPatch(patchJson: String) {
-    evaluateJavascript(
-        """(() => { if (!window.AkashicMobile?.receiveStreamPatch) return 'missing'; window.AkashicMobile.receiveStreamPatch($patchJson); return 'delivered'; })()""",
-    ) { result -> Log.d(MOBILE_WEB_LOG_TAG, "stream patch push: $result") }
+    postMobileMessage("mobile.stream-patch", patchJson)
+}
+
+private fun WebView.pushStatePatch(patchJson: String) {
+    postMobileMessage("mobile.state-patch", patchJson)
+}
+
+/** Send native state through the asynchronous origin-bound message channel. */
+private fun WebView.postMobileMessage(type: String, payloadJson: String) {
+    val envelope = """{"type":${JSONObject.quote(type)},"payload":$payloadJson}"""
+    postWebMessage(WebMessage(envelope), MOBILE_WEB_ORIGIN)
 }
 
 private fun WebView.pushSharedTextDraft(draft: MobileSharedTextDraft) {
@@ -837,19 +890,28 @@ private class MobileSnapshotPump(
                 while (true) {
                     latest = states.tryReceive().getOrNull() ?: break
                 }
-                val patch = deliveredState
-                    ?.takeUnless { forceFullSnapshot.get() }
+                val forceSnapshot = forceFullSnapshot.getAndSet(false)
+                if (!forceSnapshot && deliveredState == latest) continue
+                val streamPatch = deliveredState
+                    ?.takeUnless { forceSnapshot }
                     ?.let(latest::toMobileWebStreamPatch)
-                val payload = if (patch == null) {
-                    forceFullSnapshot.set(false)
-                    mediaRegistry.replace(latest.mediaResources())
-                    json.encodeToString(latest.toMobileWebSnapshot())
-                } else {
-                    json.encodeToString(patch)
+                val statePatch = deliveredState
+                    ?.takeUnless { forceSnapshot || streamPatch != null }
+                    ?.let(latest::toMobileWebStatePatch)
+                val payload = when {
+                    streamPatch != null -> json.encodeToString(streamPatch)
+                    statePatch != null -> json.encodeToString(statePatch)
+                    else -> {
+                        mediaRegistry.replace(latest.mediaResources())
+                        json.encodeToString(latest.toMobileWebSnapshot())
+                    }
                 }
                 withContext(Dispatchers.Main.immediate) {
-                    if (patch == null) webView.pushSnapshot(payload)
-                    else webView.pushStreamPatch(payload)
+                    when {
+                        streamPatch != null -> webView.pushStreamPatch(payload)
+                        statePatch != null -> webView.pushStatePatch(payload)
+                        else -> webView.pushSnapshot(payload)
+                    }
                 }
                 deliveredState = latest
             }

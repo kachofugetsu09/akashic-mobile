@@ -9,6 +9,7 @@ import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.ConversationEntity
 import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.MediaCacheStore
+import com.akashic.mobile.data.local.MessageContentStore
 import com.akashic.mobile.data.local.MessageEntity
 import com.akashic.mobile.data.local.NotificationTargetProjection
 import com.akashic.mobile.data.local.ServerProfileEntity
@@ -35,6 +36,10 @@ class NotificationNavigationTest {
             MediaCacheStore(
                 context.cacheDir.resolve("notification-navigation-${System.nanoTime()}"),
                 database.mediaAttachments(),
+            ),
+            MessageContentStore(
+                context.cacheDir.resolve("notification-content-${System.nanoTime()}"),
+                database.messageContentTransfers(),
             ),
         )
         database.serverProfiles().upsert(profile("server-a"))

@@ -44,7 +44,33 @@ data class MobileWebStreamPatch(
     val projectionGeneration: Long,
     val selectedSessionId: String,
     val messageIndex: Int,
-    val message: MobileWebMessage,
+    val messageId: String,
+    val searchRevision: Long,
+    val durationSeconds: Int? = null,
+    val contentAppend: String? = null,
+    val thinkingAppend: MobileWebThinkingAppend? = null,
+    val message: MobileWebMessage? = null,
+    val state: MobileWebStatePatch? = null,
+)
+
+@Serializable
+data class MobileWebThinkingAppend(
+    val blockIndex: Int,
+    val blockId: String,
+    val delta: String,
+)
+
+@Serializable
+data class MobileWebStatePatch(
+    val protocolVersion: Int,
+    val connection: MobileWebConnection,
+    val sessions: List<MobileWebSession>,
+    val selectedSessionId: String?,
+    val readingPosition: MobileWebReadingPosition?,
+    val navigationTarget: MobileWebNavigationTarget?,
+    val projectionGeneration: Long,
+    val composer: MobileWebComposer,
+    val runtimeInspection: MobileWebRuntimeInspection,
 )
 
 @Serializable
@@ -290,6 +316,49 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
 )
 
+/** Build a control-state patch without serializing the unchanged message graph. */
+fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): MobileWebStatePatch? {
+    if (
+        selectedSessionId != previous.selectedSessionId ||
+        projectionGeneration != previous.projectionGeneration ||
+        messages != previous.messages
+    ) {
+        return null
+    }
+    return MobileWebStatePatch(
+        protocolVersion = 1,
+        connection = MobileWebConnection(
+            label = connectionLabel,
+            status = connectionStatus.toMobileWebStatus(),
+            notice = connectionNotice,
+            error = errorNotice,
+        ),
+        sessions = sessions.map(SessionUi::toMobileWebSession),
+        selectedSessionId = selectedSessionId,
+        readingPosition = readingPosition?.toMobileWebReadingPosition(),
+        navigationTarget = navigationTarget?.toMobileWebNavigationTarget(),
+        projectionGeneration = projectionGeneration,
+        composer = MobileWebComposer(
+            draft = MobileWebComposerDraft(
+                text = composerDraft.text,
+                replyToMessageId = composerDraft.replyToMessageId,
+                updatedAt = composerDraft.updatedAt,
+            ),
+            attachments = attachments.map(ComposerAttachmentUi::toMobileWebAttachment),
+            pendingMessages = pendingMessages.map(PendingMessageUi::toMobileWebPendingMessage),
+            transferStatus = transferStatus?.toMobileWebTransferStatus(),
+            commands = commands.map(CommandUi::toMobileWebCommand),
+            isStreaming = isStreaming,
+            isResyncing = isResyncing,
+            canResync = canResync,
+            isStopping = isStopping,
+            canStop = canStop,
+            canSend = canSend,
+        ),
+        runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
+    )
+}
+
 private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
     MobileWebRuntimeInspection(
         refreshing = refreshing,
@@ -331,71 +400,130 @@ private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
         errorMessage = errorMessage,
     )
 
-/** 只为同一 streaming 消息的追加内容生成轻量 WebView patch。 */
+/** 为同一助手 turn 的流式或终态变化生成轻量 WebView patch。 */
 fun ConversationUiState.toMobileWebStreamPatch(
     previous: ConversationUiState,
 ): MobileWebStreamPatch? {
-    // 1. patch 只跳过会话摘要变化，其余 UI 状态必须保持逐项相同
+    // 1. 消息投影必须仍属于同一会话 generation
     if (
-        previous.copy(sessions = sessions, messages = messages) != this ||
         selectedSessionId == null ||
+        selectedSessionId != previous.selectedSessionId ||
+        projectionGeneration != previous.projectionGeneration ||
         messages.size != previous.messages.size
     ) {
         return null
     }
 
-    // 2. 只允许一个现有 streaming assistant message 发生追加
+    // 2. 只允许一个现有 streaming assistant message 发生局部变化
     var changedIndex = -1
     for (index in messages.indices) {
         val before = previous.messages[index]
         val after = messages[index]
         if (before == after) continue
-        if (changedIndex >= 0 || !after.isAppendOnlyStreamUpdate(before)) return null
+        if (changedIndex >= 0 || !after.isSameStreamingTurnUpdate(before)) return null
         changedIndex = index
     }
     if (changedIndex < 0) return null
 
-    // 3. WebView 用 generation、session 和 index 拒绝错代 patch
-    return MobileWebStreamPatch(
-        protocolVersion = 1,
-        projectionGeneration = projectionGeneration,
-        selectedSessionId = selectedSessionId,
-        messageIndex = changedIndex,
-        message = messages[changedIndex].toMobileWebMessage(),
-    )
+    // 3. 执行中只允许会话摘要变化；终态随消息一起提交完整控制状态
+    val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
+    val after = messages[changedIndex] as MessageUi.AssistantTurn
+    val terminalState = if (after.isStreaming) {
+        if (previous.copy(sessions = sessions, messages = messages) != this) return null
+        null
+    } else {
+        copy(messages = previous.messages).toMobileWebStatePatch(previous) ?: return null
+    }
+
+    // 4. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
+    val append = after.streamAppendFrom(before)
+    return if (after.isStreaming && append != null) {
+        MobileWebStreamPatch(
+            protocolVersion = 3,
+            projectionGeneration = projectionGeneration,
+            selectedSessionId = selectedSessionId,
+            messageIndex = changedIndex,
+            messageId = before.id,
+            searchRevision = after.updatedAtMillis,
+            durationSeconds = after.durationSeconds,
+            contentAppend = append.content,
+            thinkingAppend = append.thinking,
+        )
+    } else {
+        MobileWebStreamPatch(
+            protocolVersion = 3,
+            projectionGeneration = projectionGeneration,
+            selectedSessionId = selectedSessionId,
+            messageIndex = changedIndex,
+            messageId = before.id,
+            searchRevision = after.updatedAtMillis,
+            durationSeconds = after.durationSeconds,
+            message = after.toMobileWebMessage(),
+            state = terminalState,
+        )
+    }
 }
 
-private fun MessageUi.isAppendOnlyStreamUpdate(previous: MessageUi): Boolean {
+private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
     if (this !is MessageUi.AssistantTurn || previous !is MessageUi.AssistantTurn) return false
-    if (!isStreaming || !previous.isStreaming || id != previous.id) return false
     if (
-        previous.copy(
-            answer = answer,
-            blocks = blocks,
-            durationSeconds = durationSeconds,
-            updatedAtMillis = updatedAtMillis,
-        ) != this ||
-        !answer.startsWith(previous.answer) ||
-        blocks.size != previous.blocks.size
+        !previous.isStreaming ||
+        sessionId != previous.sessionId ||
+        createdAtMillis != previous.createdAtMillis ||
+        (isStreaming && id != previous.id)
     ) {
         return false
     }
+    return previous.copy(
+        id = id,
+        intro = intro,
+        answer = answer,
+        blocks = blocks,
+        status = status,
+        durationSeconds = durationSeconds,
+        attachments = attachments,
+        updatedAtMillis = updatedAtMillis,
+    ) == this
+}
 
-    var appended = answer.length > previous.answer.length
+private data class MobileWebStreamAppend(
+    val content: String?,
+    val thinking: MobileWebThinkingAppend?,
+)
+
+/** 提取同一 streaming turn 相对已投递状态的无损追加量。 */
+private fun MessageUi.AssistantTurn.streamAppendFrom(
+    previous: MessageUi.AssistantTurn,
+): MobileWebStreamAppend? {
+    // 1. 回答与 block 结构必须保持追加语义
+    if (!answer.startsWith(previous.answer) || blocks.size != previous.blocks.size) return null
+    var thinkingAppend: MobileWebThinkingAppend? = null
     for (index in blocks.indices) {
         val before = previous.blocks[index]
         val after = blocks[index]
         if (before == after) continue
         if (
+            thinkingAppend != null ||
             before.kind != ProcessBlockKind.THINKING ||
             before.copy(detail = after.detail) != after ||
             !after.detail.startsWith(before.detail)
         ) {
-            return false
+            return null
         }
-        appended = appended || after.detail.length > before.detail.length
+        thinkingAppend = MobileWebThinkingAppend(
+            blockIndex = index,
+            blockId = after.id,
+            delta = after.detail.removePrefix(before.detail),
+        )
     }
-    return appended
+
+    // 2. 纯计时变化没有内容收益，交给完整消息回退
+    val contentAppend = answer.removePrefix(previous.answer).ifEmpty { null }
+    return if (contentAppend != null || thinkingAppend != null) {
+        MobileWebStreamAppend(contentAppend, thinkingAppend)
+    } else {
+        null
+    }
 }
 
 private fun TransferStatusUi.toMobileWebTransferStatus() = MobileWebTransferStatus(
@@ -512,7 +640,7 @@ private fun MessageAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
         MessageAttachmentState.EVICTED -> "evicted"
     },
     contentUrl = if (state == MessageAttachmentState.CACHED) {
-        "https://appassets.androidplatform.net/media/$id"
+        mobileMediaResourceUrl(id, filename)
     } else {
         null
     },

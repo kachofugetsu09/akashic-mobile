@@ -349,8 +349,22 @@ data class RemoteSessionSummary(
 data class HistoryPagePayload(
     val items: List<RemoteHistoryMessage>,
     val total: Int,
-    val page: Int,
+    val page: Int? = null,
     @SerialName("page_size") val pageSize: Int,
+    @SerialName("content_ref_version") val contentRefVersion: Int? = null,
+    @SerialName("after_seq") val afterSeq: Long? = null,
+    @SerialName("next_after_seq") val nextAfterSeq: Long? = null,
+    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
+    @SerialName("has_more") val hasMore: Boolean? = null,
+)
+
+@Serializable
+data class MessageContentRef(
+    val version: Int,
+    val encoding: String,
+    @SerialName("byte_length") val byteLength: Long,
+    val sha256: String,
+    val preview: String,
 )
 
 @Serializable
@@ -359,7 +373,8 @@ data class RemoteHistoryMessage(
     @SerialName("session_key") val sessionKey: String,
     val seq: Int,
     val role: String,
-    val content: String,
+    val content: String? = null,
+    @SerialName("content_ref") val contentRef: MessageContentRef? = null,
     @SerialName("tool_chain") val toolChain: JsonElement? = null,
     val extra: JsonObject,
     val ts: String,
@@ -368,6 +383,23 @@ data class RemoteHistoryMessage(
     @SerialName("reply_role") val replyRole: String? = null,
     @SerialName("reply_preview") val replyPreview: String? = null,
     val attachments: List<AttachmentDescriptor> = emptyList(),
+)
+
+@Serializable
+data class MessageContentPreparePayload(
+    @SerialName("message_id") val messageId: String,
+    @SerialName("byte_length") val byteLength: Long,
+    val sha256: String,
+)
+
+@Serializable
+data class MessageContentGrantPayload(
+    @SerialName("message_id") val messageId: String,
+    @SerialName("byte_length") val byteLength: Long,
+    val sha256: String,
+    val path: String,
+    val ticket: String,
+    @SerialName("expires_at") val expiresAt: String,
 )
 
 @Serializable
@@ -392,6 +424,7 @@ object ProtocolCodec {
             "session.create",
             "session.open",
             "history.get",
+            "message.content.prepare",
             "message.send",
             "turn.stop",
             "attachment.begin",

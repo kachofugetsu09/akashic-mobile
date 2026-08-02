@@ -41,10 +41,9 @@ Read → Ownership → Isolate → Contract → Implement → Verify → Review 
 先运行与改动直接相关的最小验证。按影响范围选择仓库已有验证：
 
 ```bash
-npm ci
-npm run typecheck
-npm run lint
-npm run test:mobile-web-state
+cd clients/android
+./gradlew :app:verifyMobileWebArchive
+cd ../..
 python3 -m unittest discover -s runtime-gate -p 'test_*.py'
 python3 runtime-gate/verify_contract.py --mobile-root .
 cd clients/android
