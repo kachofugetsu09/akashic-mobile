@@ -50,6 +50,7 @@ data class MobileWebStreamPatch(
     val contentAppend: String? = null,
     val thinkingAppend: MobileWebThinkingAppend? = null,
     val message: MobileWebMessage? = null,
+    val state: MobileWebStatePatch? = null,
 )
 
 @Serializable
@@ -399,14 +400,15 @@ private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
         errorMessage = errorMessage,
     )
 
-/** 为同一 streaming 消息的局部变化生成轻量 WebView patch。 */
+/** 为同一助手 turn 的流式或终态变化生成轻量 WebView patch。 */
 fun ConversationUiState.toMobileWebStreamPatch(
     previous: ConversationUiState,
 ): MobileWebStreamPatch? {
-    // 1. patch 只跳过会话摘要变化，其余 UI 状态必须保持逐项相同
+    // 1. 消息投影必须仍属于同一会话 generation
     if (
-        previous.copy(sessions = sessions, messages = messages) != this ||
         selectedSessionId == null ||
+        selectedSessionId != previous.selectedSessionId ||
+        projectionGeneration != previous.projectionGeneration ||
         messages.size != previous.messages.size
     ) {
         return null
@@ -423,17 +425,25 @@ fun ConversationUiState.toMobileWebStreamPatch(
     }
     if (changedIndex < 0) return null
 
-    // 3. 追加型更新只跨桥发送新增文字；工具结构变化保留完整消息回退
+    // 3. 执行中只允许会话摘要变化；终态随消息一起提交完整控制状态
     val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
     val after = messages[changedIndex] as MessageUi.AssistantTurn
+    val terminalState = if (after.isStreaming) {
+        if (previous.copy(sessions = sessions, messages = messages) != this) return null
+        null
+    } else {
+        copy(messages = previous.messages).toMobileWebStatePatch(previous) ?: return null
+    }
+
+    // 4. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
     val append = after.streamAppendFrom(before)
-    return if (append != null) {
+    return if (after.isStreaming && append != null) {
         MobileWebStreamPatch(
-            protocolVersion = 2,
+            protocolVersion = 3,
             projectionGeneration = projectionGeneration,
             selectedSessionId = selectedSessionId,
             messageIndex = changedIndex,
-            messageId = after.id,
+            messageId = before.id,
             searchRevision = after.updatedAtMillis,
             durationSeconds = after.durationSeconds,
             contentAppend = append.content,
@@ -441,25 +451,37 @@ fun ConversationUiState.toMobileWebStreamPatch(
         )
     } else {
         MobileWebStreamPatch(
-            protocolVersion = 2,
+            protocolVersion = 3,
             projectionGeneration = projectionGeneration,
             selectedSessionId = selectedSessionId,
             messageIndex = changedIndex,
-            messageId = after.id,
+            messageId = before.id,
             searchRevision = after.updatedAtMillis,
             durationSeconds = after.durationSeconds,
             message = after.toMobileWebMessage(),
+            state = terminalState,
         )
     }
 }
 
 private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
     if (this !is MessageUi.AssistantTurn || previous !is MessageUi.AssistantTurn) return false
-    if (!isStreaming || !previous.isStreaming || id != previous.id) return false
+    if (
+        !previous.isStreaming ||
+        sessionId != previous.sessionId ||
+        createdAtMillis != previous.createdAtMillis ||
+        (isStreaming && id != previous.id)
+    ) {
+        return false
+    }
     return previous.copy(
+        id = id,
+        intro = intro,
         answer = answer,
         blocks = blocks,
+        status = status,
         durationSeconds = durationSeconds,
+        attachments = attachments,
         updatedAtMillis = updatedAtMillis,
     ) == this
 }

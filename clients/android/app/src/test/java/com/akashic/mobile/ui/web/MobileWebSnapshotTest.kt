@@ -62,7 +62,7 @@ class MobileWebSnapshotTest {
 
         val patch = after.toMobileWebStreamPatch(before)
 
-        assertEquals(2, patch?.protocolVersion)
+        assertEquals(3, patch?.protocolVersion)
         assertEquals(7L, patch?.projectionGeneration)
         assertEquals(0, patch?.messageIndex)
         assertEquals("分析", patch?.contentAppend)
@@ -70,7 +70,7 @@ class MobileWebSnapshotTest {
     }
 
     @Test
-    fun createsPatchForThinkingAndRejectsCompletedTurn() {
+    fun createsPatchForThinkingAndCommitsCompletedTurn() {
         val thinking = ProcessBlockUi(
             id = "thinking-1",
             kind = ProcessBlockKind.THINKING,
@@ -112,7 +112,10 @@ class MobileWebSnapshotTest {
             "检查调用链",
             appended.toMobileWebStreamPatch(before)?.thinkingAppend?.delta,
         )
-        assertEquals(null, completed.toMobileWebStreamPatch(appended))
+        val terminal = completed.toMobileWebStreamPatch(appended)
+        assertEquals(false, terminal?.message?.streaming)
+        assertEquals(false, terminal?.state?.composer?.isStreaming)
+        assertEquals("assistant:turn-1", terminal?.messageId)
     }
 
     @Test
@@ -208,6 +211,62 @@ class MobileWebSnapshotTest {
         assertTrue(patchJson.length * 100 < snapshotJson.length)
         assertTrue(!patchJson.contains("正在检查调用链"))
         assertTrue(patchJson.contains("检查调用链"))
+    }
+
+    @Test
+    fun terminalPatchDoesNotSerializeConversationHistoryOrRequireStableMessageId() {
+        val history = List(400) { index ->
+            MessageUi.User(
+                id = "user:$index",
+                sessionId = "mobile:test",
+                text = "历史消息-$index-${"内容".repeat(150)}",
+                deliveryLabel = "已发送",
+                replyable = true,
+                createdAtMillis = index.toLong(),
+                reply = null,
+            )
+        }
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在检查调用链",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 2,
+            createdAtMillis = 1_000,
+            updatedAtMillis = 1_200,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = history + streaming,
+            isStreaming = true,
+        )
+        val after = before.copy(
+            sessions = listOf(
+                SessionUi("mobile:test", "会话", "检查完成", 1_300, 0, false, true),
+            ),
+            messages = history + streaming.copy(
+                id = "message:canonical",
+                answer = "检查调用链完成",
+                status = AssistantTurnStatus.COMPLETE,
+                durationSeconds = 3,
+                updatedAtMillis = 1_300,
+            ),
+            isStreaming = false,
+        )
+
+        val patch = after.toMobileWebStreamPatch(before)
+        val patchJson = Json.encodeToString(patch)
+        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
+
+        assertEquals("assistant:turn-1", patch?.messageId)
+        assertEquals("message:canonical", patch?.message?.id)
+        assertEquals(false, patch?.state?.composer?.isStreaming)
+        assertTrue(snapshotJson.length > 100_000)
+        assertTrue(patchJson.length * 100 < snapshotJson.length)
+        assertTrue(!patchJson.contains("历史消息-399"))
     }
 
     @Test

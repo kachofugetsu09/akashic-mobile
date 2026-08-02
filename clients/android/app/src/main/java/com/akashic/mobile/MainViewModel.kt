@@ -52,6 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -183,6 +184,8 @@ class MainViewModel(
         null,
     )
     private val incomingShareQueue = MutableStateFlow<List<QueuedIncomingShare>>(emptyList())
+    private var projectedSessionId: String? = null
+    private val messageProjectionCache = mutableMapOf<String, CachedMessageProjection>()
     val incomingShare = incomingShareQueue.map { queue ->
         queue.firstOrNull()?.let { share ->
             IncomingShareUi(
@@ -250,7 +253,10 @@ class MainViewModel(
     private val conversationProjection = sessionState.flatMapLatest { state ->
         val serverId = state.serverId
         val sessionId = state.currentSessionId
-        val graph = sessionId?.let(container.database.messages()::observeMessageGraph) ?: flowOf(emptyList())
+        val graph = sessionId
+            ?.let(container.database.messages()::observeMessageGraph)
+            ?.distinctUntilChanged()
+            ?: flowOf(emptyList())
         val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
         val composer = if (serverId == null || sessionId == null) {
             flowOf(ComposerLocalState(emptyList(), null))
@@ -278,8 +284,7 @@ class MainViewModel(
         val composerLocal = projection.composer
         val attachments = composerLocal.attachments
         val draft = composerLocal.draft
-        val scopedGraph = graph.filter { it.message.sessionId == session.currentSessionId }
-        val messages = scopedGraph.map(::toMessageUi)
+        val messages = projectMessages(session.currentSessionId, graph)
         val connection = connectionPresentation(session.connection, session.errorMessage)
         val composerAttachments = attachments.map { attachment ->
             val waitingForConnection = session.connection.phase != ConnectionPhase.READY &&
@@ -373,7 +378,7 @@ class MainViewModel(
             attachments = composerAttachments,
             transferStatus = transferStatus,
             commands = session.commands.map { CommandUi(it.command, it.description) },
-            isStreaming = scopedGraph.any { it.message.deliveryState == "streaming" },
+            isStreaming = messages.any { it is MessageUi.AssistantTurn && it.isStreaming },
             isResyncing = session.connection.phase == ConnectionPhase.SYNCING,
             canResync = session.connection.phase == ConnectionPhase.READY &&
                 session.activeTurnId == null &&
@@ -800,6 +805,32 @@ class MainViewModel(
 
     fun reloadFromServer() = container.realtimeSession.reloadFromServer()
 
+    /** Reuse immutable UI rows when Room re-emits an unchanged conversation history. */
+    private fun projectMessages(sessionId: String?, graph: List<MessageWithBlocks>): List<MessageUi> {
+        // 1. A session switch establishes a new cache ownership boundary.
+        if (projectedSessionId != sessionId) {
+            projectedSessionId = sessionId
+            messageProjectionCache.clear()
+        }
+
+        // 2. Rebuild only rows whose Room graph actually changed.
+        val liveIds = mutableSetOf<String>()
+        val projected = graph.mapNotNull { source ->
+            if (source.message.sessionId != sessionId) return@mapNotNull null
+            val messageId = source.message.messageId
+            liveIds += messageId
+            val cached = messageProjectionCache[messageId]
+            if (cached?.source == source) return@mapNotNull cached.message
+            toMessageUi(source).also { message ->
+                messageProjectionCache[messageId] = CachedMessageProjection(source, message)
+            }
+        }
+
+        // 3. Remove identities no longer owned by the selected conversation.
+        messageProjectionCache.keys.retainAll(liveIds)
+        return projected
+    }
+
     private fun toMessageUi(graph: MessageWithBlocks): MessageUi {
         val message = graph.message
         if (message.role == "user") {
@@ -876,6 +907,11 @@ class MainViewModel(
         )
     }
 }
+
+private data class CachedMessageProjection(
+    val source: MessageWithBlocks,
+    val message: MessageUi,
+)
 
 internal fun List<MessageAttachmentWithMedia>.toMessageAttachmentUi(): List<MessageAttachmentUi> =
     sortedBy { it.link.ordinal }.map { relation ->
