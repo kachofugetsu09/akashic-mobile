@@ -150,6 +150,60 @@ class IsolatedGatewayDeviceTest {
         )
     }
 
+    @Test
+    fun oversizedHistorySurvivesProjectionReloadExactly() = runBlocking {
+        val arguments = InstrumentationRegistry.getArguments()
+        val offer = String(
+            Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT),
+            Charsets.UTF_8,
+        )
+        val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+        val expectedContent = "长正文🌙\n".repeat(40_000)
+
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        val ready = withTimeout(TIMEOUT_MILLIS) {
+            session.state.first { it.hasProfile && it.connection.phase == ConnectionPhase.READY }
+        }
+        session.selectSession(sessionId)
+        val initial = graph(app, sessionId) { messages ->
+            messages.any { it.message.text == expectedContent }
+        }.single { it.message.text == expectedContent }
+        val before = historySnapshot(initial)
+        assertEquals(listOf("thinking", "tool", "thinking"), before.blocks.map { it.kind })
+
+        session.reloadFromServer()
+        withTimeout(TIMEOUT_MILLIS) {
+            session.state.first {
+                it.projectionGeneration > ready.projectionGeneration &&
+                    it.connection.phase == ConnectionPhase.READY
+            }
+        }
+        val restored = graph(app, sessionId) { messages ->
+            messages.any { it.message.messageId == before.messageId && it.message.text == expectedContent }
+        }.single { it.message.messageId == before.messageId }
+
+        assertEquals(before, historySnapshot(restored))
+        assertEquals(null, app.container.database.messageContentTransfers().get(before.messageId))
+        Log.i(
+            "AkashicDeviceGate",
+            "history_content_bytes=${expectedContent.toByteArray().size} blocks=${before.blocks.size}",
+        )
+    }
+
+    private fun historySnapshot(message: MessageWithBlocks): HistorySnapshot = HistorySnapshot(
+        messageId = message.message.messageId,
+        role = message.message.role,
+        text = message.message.text,
+        serverSeq = message.message.serverSeq,
+        blocks = message.blocks.sortedBy { it.ordinal }.map {
+            BlockSnapshot(it.ordinal, it.kind, it.status, it.content)
+        },
+    )
+
     private suspend fun graph(
         app: App,
         sessionId: String,
@@ -160,6 +214,21 @@ class IsolatedGatewayDeviceTest {
 
     private companion object {
         const val ISOLATED_REPLY_PREFIX = "## WebUI 试点"
-        const val TIMEOUT_MILLIS = 30_000L
+        const val TIMEOUT_MILLIS = 60_000L
     }
+
+    private data class HistorySnapshot(
+        val messageId: String,
+        val role: String,
+        val text: String,
+        val serverSeq: Long?,
+        val blocks: List<BlockSnapshot>,
+    )
+
+    private data class BlockSnapshot(
+        val ordinal: Int,
+        val kind: String,
+        val status: String,
+        val content: String,
+    )
 }
