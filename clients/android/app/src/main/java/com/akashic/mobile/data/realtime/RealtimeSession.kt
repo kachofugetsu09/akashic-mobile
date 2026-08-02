@@ -490,6 +490,9 @@ class RealtimeSession(
                 check(!mutableState.value.hasActiveAttachmentDownload) {
                     "History reload cannot interrupt an attachment download"
                 }
+                check(!messageDownloads.hasActiveDownload()) {
+                    "History reload cannot interrupt a message content download"
+                }
                 mutableState.value = mutableState.value.copy(
                     connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
                     errorMessage = null,
@@ -502,6 +505,7 @@ class RealtimeSession(
                         serverId = currentProfile.serverId,
                         preservedSessionId = mutableState.value.currentSessionId,
                     )
+                    messageContentStore.reconcile()
                     cleanupHandled = true
                     null
                 } catch (error: IOException) {

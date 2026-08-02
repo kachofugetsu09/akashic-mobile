@@ -57,6 +57,8 @@ class MessageContentDownloadCoordinator(
         active = null
     }
 
+    fun hasActiveDownload(): Boolean = active != null
+
     suspend fun resumeIfIdle(currentServerId: String) {
         if (serverId == currentServerId && active == null) startNext()
     }
