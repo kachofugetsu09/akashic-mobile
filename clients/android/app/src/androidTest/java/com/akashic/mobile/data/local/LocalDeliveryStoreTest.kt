@@ -721,6 +721,54 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun repeatedHistoryManifestRequeuesFailedContentTransfer() = runBlocking {
+        val messageId = "mobile:test:history:retry"
+        val content = "完整正文".toByteArray(Charsets.UTF_8)
+        val digest = MessageDigest.getInstance("SHA-256").digest(content)
+            .joinToString("") { "%02x".format(it) }
+        val payload = buildJsonObject {
+            put("total", 1)
+            put("page_size", 10)
+            put("content_ref_version", 1)
+            put("after_seq", -1)
+            put("next_after_seq", 0)
+            put("snapshot_max_seq", 0)
+            put("has_more", false)
+            put("items", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", messageId)
+                    put("session_key", "mobile:test")
+                    put("seq", 0)
+                    put("role", "assistant")
+                    put("content_ref", buildJsonObject {
+                        put("version", 1)
+                        put("encoding", "utf-8")
+                        put("byte_length", content.size)
+                        put("sha256", digest)
+                        put("preview", "完整")
+                    })
+                    put("tool_chain", buildJsonArray {})
+                    put("extra", buildJsonObject {})
+                    put("ts", "2026-08-02T00:00:00Z")
+                })
+            })
+        }
+        store.applyEvent("server", "device", event(1, "history.page", payload), 1)
+        check(
+            database.messageContentTransfers().updateProgress(
+                messageId,
+                0,
+                "failed",
+                2,
+            ) == 1,
+        )
+
+        store.applyEvent("server", "device", event(2, "history.page", payload), 3)
+
+        assertEquals("pending", database.messageContentTransfers().get(messageId)!!.state)
+    }
+
+    @Test
     fun historyRepairsRepeatedEphemeralAssistantsByCompletionTime() = runBlocking {
         val firstCompletedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
         val secondCompletedAt = Instant.parse("2026-07-14T16:10:05Z").toEpochMilli()

@@ -806,6 +806,16 @@ class LocalDeliveryStore(
                     existing.byteLength == reference.byteLength &&
                     existing.sha256 == sha256
             ) { "History content reference changed for an existing message" }
+            if (existing.state == "failed") {
+                check(
+                    dao.updateProgress(
+                        messageId,
+                        existing.transferredBytes,
+                        if (existing.transferredBytes == 0L) "pending" else "downloading",
+                        updatedAt,
+                    ) == 1,
+                ) { "消息正文恢复记录已消失: $messageId" }
+            }
             return
         }
         dao.upsert(
