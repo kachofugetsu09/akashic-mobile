@@ -62,8 +62,8 @@ android {
         applicationId = "com.akashic.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 42
-        versionName = "0.8.15-shared-webui-dogfood.7"
+        versionCode = 43
+        versionName = "0.8.15-shared-webui-dogfood.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
