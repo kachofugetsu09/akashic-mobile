@@ -172,6 +172,16 @@ internal fun <T> mobileWebUiDispatchPluginQuery(
     )
 }
 
+internal fun mobileWebUiLeaseGenerationCurrent(
+    candidate: Boolean,
+    expectedGeneration: String,
+    generationRef: String?,
+): Boolean = if (!candidate && expectedGeneration == MOBILE_WEB_EMBEDDED_GENERATION) {
+    generationRef == null
+} else {
+    generationRef == expectedGeneration
+}
+
 internal fun mobileWebUiLeaseCallbackAllowed(
     callbackView: Any,
     currentView: Any?,
@@ -867,9 +877,18 @@ internal fun MobileWebChat(
                             activeAttempt?.serverId == mobileWebUiServerId &&
                                 activeAttempt?.generationId == leaseGeneration &&
                                 activeAttempt?.nonce == leaseNonce &&
-                                generationRef.get() == leaseGeneration
+                                mobileWebUiLeaseGenerationCurrent(
+                                    candidate = true,
+                                    expectedGeneration = leaseGeneration,
+                                    generationRef = generationRef.get(),
+                                )
                         } else {
-                            activeAttempt == null && generationRef.get() == leaseGeneration
+                            activeAttempt == null &&
+                                mobileWebUiLeaseGenerationCurrent(
+                                    candidate = false,
+                                    expectedGeneration = leaseGeneration,
+                                    generationRef = generationRef.get(),
+                                )
                         }
                         return mobileWebUiLeaseCallbackAllowed(
                             callbackView,

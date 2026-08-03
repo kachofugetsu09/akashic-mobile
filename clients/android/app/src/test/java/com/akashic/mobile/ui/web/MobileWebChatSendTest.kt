@@ -7,6 +7,17 @@ import org.junit.Test
 
 class MobileWebChatSendTest {
     @Test
+    fun leaseGenerationSeparatesEmbeddedBaselineFromRemoteServing() {
+        assertTrue(mobileWebUiLeaseGenerationCurrent(false, "embedded", null))
+        assertFalse(mobileWebUiLeaseGenerationCurrent(false, "embedded", "embedded"))
+        assertFalse(mobileWebUiLeaseGenerationCurrent(false, "embedded", "stale"))
+        assertTrue(mobileWebUiLeaseGenerationCurrent(false, "generation-a", "generation-a"))
+        assertFalse(mobileWebUiLeaseGenerationCurrent(false, "generation-a", "generation-b"))
+        assertTrue(mobileWebUiLeaseGenerationCurrent(true, "generation-a", "generation-a"))
+        assertFalse(mobileWebUiLeaseGenerationCurrent(true, "generation-a", null))
+    }
+
+    @Test
     fun candidatePluginQueryReportsErrorWithoutRunningWork() {
         val errors = mutableListOf<Pair<String, String>>()
         var dispatchCount = 0
