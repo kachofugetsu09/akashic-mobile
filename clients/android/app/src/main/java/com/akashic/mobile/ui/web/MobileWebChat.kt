@@ -857,8 +857,6 @@ internal fun MobileWebChat(
                         MOBILE_WEB_COMMITTED_NONCE
                     }
                     val candidate = leaseAttempt != null
-                    val leaseServerId = mobileWebUiServerId
-                    val leasePresentationEpoch = mobileWebUiPresentationEpoch
                     lateinit var currentWebView: WebView
                     lateinit var healthGate: MobileWebUiHealthGate
                     val newWebView = WebView(context)
@@ -866,17 +864,12 @@ internal fun MobileWebChat(
                     currentWebView = newWebView
                     fun leaseStillCurrent(callbackView: WebView = currentWebView): Boolean {
                         val leaseStateCurrent = if (candidate) {
-                            latestMobileWebUiServerId == leaseServerId &&
-                                latestMobileWebUiPresentationEpoch == leasePresentationEpoch &&
-                                activeAttempt?.serverId == leaseServerId &&
+                            activeAttempt?.serverId == mobileWebUiServerId &&
                                 activeAttempt?.generationId == leaseGeneration &&
                                 activeAttempt?.nonce == leaseNonce &&
                                 generationRef.get() == leaseGeneration
                         } else {
-                            latestMobileWebUiServerId == leaseServerId &&
-                                latestMobileWebUiPresentationEpoch == leasePresentationEpoch &&
-                                activeAttempt == null &&
-                                generationRef.get() == leaseGeneration
+                            activeAttempt == null && generationRef.get() == leaseGeneration
                         }
                         return mobileWebUiLeaseCallbackAllowed(
                             callbackView,
