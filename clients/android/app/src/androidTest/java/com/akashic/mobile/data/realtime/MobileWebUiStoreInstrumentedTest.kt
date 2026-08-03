@@ -625,6 +625,166 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun localGarbageCollectionAccountsForRetainedPrefixBeforeAdmission() = runBlocking {
+        val oldTarget = prepareHealthyGeneration(store)
+        store.clearServingToBaseline(SERVER_ID)
+        val content = "gc-retained-prefix".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(content)
+        val prefix = content.copyOf(content.size / 2)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(prefix)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
+        )
+        val oldGeneration = requireNotNull(database.mobileWebUi().getGeneration(SERVER_ID, oldTarget.generationId))
+        val oldDirectory = requireNotNull(root.resolve(serverHash()).resolve(oldGeneration.manifestPath).parentFile)
+        val oldBlob = root.resolve(serverHash()).resolve("blobs").resolve(emptyDigest())
+        val oldBytes = oldDirectory.walkTopDown().filter(File::isFile).sumOf(File::length) + oldBlob.length()
+        val currentBytes = root.resolve(serverHash()).walkTopDown().filter(File::isFile).sumOf(File::length)
+        val budget = currentBytes - oldBytes + (content.size - prefix.size)
+
+        val report = store.collectGarbage(SERVER_ID, maxBytes = budget)
+
+        assertTrue(report.removedGenerations > 0)
+        assertFalse(oldDirectory.exists())
+        assertEquals(1, report.removedBlobs)
+        val admission = store.prepareDownloadSpace(
+            SERVER_ID,
+            manifest,
+            serverBudgetBytes = budget,
+            globalBudgetBytes = budget,
+        )
+        assertTrue(admission.allowed)
+        assertEquals((content.size - prefix.size).toLong(), admission.requiredBytes)
+        assertTrue(admission.serverBytes + admission.requiredBytes <= budget)
+    }
+
+    @Test
+    fun globalGarbageUsesRetainedPartialInPhysicalBudget() = runBlocking {
+        val content = "global-retained-prefix".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(content)
+        val prefix = content.copyOf(content.size / 2)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(prefix)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
+        )
+
+        val serverB = "server-2"
+        val oldContent = "global-old-generation-content".toByteArray()
+        val oldManifest = manifestWithFile(oldContent)
+        val oldTarget = targetFor(oldManifest, serverB)
+        store.commitManifest(serverB, oldTarget, mobileWebUiManifestBytes(oldManifest))
+        store.setDesired(serverB, releaseView(serverB, oldTarget), oldTarget)
+        store.appendBlob(serverB, contentDigest(oldContent), oldContent.size.toLong(), 0, oldContent)
+        assertTrue(store.openAttempt(serverB, oldTarget.generationId, "global-old", FINGERPRINT))
+        store.commitHealthy(serverB, oldTarget.generationId, "global-old")
+        store.clearServingToBaseline(serverB)
+        store.setDesired(serverB, releaseView(serverB, null), null)
+
+        val oldGeneration = requireNotNull(database.mobileWebUi().getGeneration(serverB, oldTarget.generationId))
+        val oldDirectory = requireNotNull(root.resolve(serverHash(serverB)).resolve(oldGeneration.manifestPath).parentFile)
+        val oldBlob = root.resolve(serverHash(serverB)).resolve("blobs").resolve(contentDigest(oldContent))
+        val oldBytes = oldDirectory.walkTopDown().filter(File::isFile).sumOf(File::length) + oldBlob.length()
+        val currentBytes = root.walkTopDown().filter(File::isFile).sumOf(File::length)
+        val remaining = content.size - prefix.size
+        val budget = currentBytes - oldBytes + remaining
+
+        val report = store.collectGlobalGarbage(maxBytes = budget)
+
+        assertTrue(report.removedGenerations > 0)
+        assertTrue(report.removedBlobs > 0)
+        assertFalse(oldDirectory.exists())
+        assertFalse(oldBlob.exists())
+        assertTrue(root.walkTopDown().filter(File::isFile).sumOf(File::length) <= budget)
+        val admission = store.prepareDownloadSpace(
+            SERVER_ID,
+            manifest,
+            serverBudgetBytes = Long.MAX_VALUE,
+            globalBudgetBytes = budget,
+        )
+        assertTrue(admission.allowed)
+        assertEquals(remaining.toLong(), admission.requiredBytes)
+    }
+
+    @Test
+    fun malformedPartialMetadataIsRemovedAndRequiresFullSpace() = runBlocking {
+        val content = "malformed-partial".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(content)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(content.copyOf(content.size / 2))
+        partialDirectory.resolve("$digest.meta").writeText("{malformed")
+
+        val admission = store.prepareDownloadSpace(SERVER_ID, manifest, serverBudgetBytes = 1)
+
+        assertFalse(admission.allowed)
+        assertEquals(content.size.toLong(), admission.requiredBytes)
+        assertFalse(partialDirectory.resolve("$digest.part").exists())
+        assertFalse(partialDirectory.resolve("$digest.meta").exists())
+    }
+
+    @Test
+    fun duplicatePartialMetadataKeyIsRemovedAndRequiresFullSpace() = runBlocking {
+        val content = "duplicate-partial".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(content)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(content.copyOf(content.size / 2))
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"sha256\":\"$digest\",\"bytes\":${content.size}}",
+        )
+
+        val admission = store.prepareDownloadSpace(SERVER_ID, manifest, serverBudgetBytes = 1)
+
+        assertFalse(admission.allowed)
+        assertEquals(content.size.toLong(), admission.requiredBytes)
+        assertFalse(partialDirectory.resolve("$digest.part").exists())
+        assertFalse(partialDirectory.resolve("$digest.meta").exists())
+    }
+
+    @Test
+    fun partialMetadataSizeMismatchIsRemovedAndRequiresFullSpace() = runBlocking {
+        val content = "mismatched-partial".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(content)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(content.copyOf(content.size / 2))
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${content.size + 1}}",
+        )
+
+        val admission = store.prepareDownloadSpace(SERVER_ID, manifest, serverBudgetBytes = 1)
+
+        assertFalse(admission.allowed)
+        assertEquals(content.size.toLong(), admission.requiredBytes)
+        assertFalse(partialDirectory.resolve("$digest.part").exists())
+        assertFalse(partialDirectory.resolve("$digest.meta").exists())
+    }
+
+    @Test
     fun duplicateDigestCountsOnceForDownloadSpaceAdmission() = runBlocking {
         val content = "space-test".toByteArray()
         val manifest = manifestWithDuplicateFile(content)
@@ -1309,8 +1469,8 @@ class MobileWebUiStoreInstrumentedTest {
     private fun emptyDigest(): String = MessageDigest.getInstance("SHA-256")
         .digest(ByteArray(0)).joinToString("") { "%02x".format(it) }
 
-    private fun serverHash(): String = MessageDigest.getInstance("SHA-256")
-        .digest(SERVER_ID.toByteArray())
+    private fun serverHash(serverId: String = SERVER_ID): String = MessageDigest.getInstance("SHA-256")
+        .digest(serverId.toByteArray())
         .joinToString("") { "%02x".format(it) }
 
     private companion object {

@@ -318,10 +318,14 @@ class MobileWebUiStore(
             state?.attemptingGenerationId,
         )
         val partialRemovedBytes = reconcilePartials(serverId, state ?: baselineState(serverId))
+        val retainedPartialBytes = serverDirectory(serverId).resolve("partials")
+            .walkTopDown()
+            .filter(File::isFile)
+            .sumOf(File::length)
         val generations = dao.listGenerations(serverId).sortedByDescending { it.lastUsedAt }.toMutableList()
         var totalBytes = generations.sumOf { generationDirectoryBytes(serverId, it.generationId) } +
             dao.listBlobs(serverId).sumOf { blobFile(serverId, it.sha256).length() } +
-            orphanGenerations.remainingBytes
+            retainedPartialBytes + orphanGenerations.remainingBytes
         var removedGenerations = orphanGenerations.removedGenerations
         var removedBytes = partialRemovedBytes + orphanBlobs.removedBytes + orphanGenerations.removedBytes
         var blockedGenerations = orphanGenerations.blockedGenerations
@@ -1063,9 +1067,9 @@ class MobileWebUiStore(
             dao.getGeneration(serverId, generationId)?.let { generation ->
                 try {
                     val manifest = readVerifiedManifestMetadata(serverId, generation)
-                    manifest.files.map { it.sha256 }.toSet()
+                    manifest.files.associate { it.sha256 to it.sizeBytes }
                 } catch (_: IllegalArgumentException) {
-                    emptySet()
+                    emptyMap()
                 }
             }
         }.orEmpty()
@@ -1077,12 +1081,10 @@ class MobileWebUiStore(
             .forEach { metadata ->
                 val digest = metadata.name.removeSuffix(".meta")
                 val part = metadata.resolveSibling("$digest.part")
-                val metadataValue = try {
-                    MOBILE_WEB_UI_JSON.decodeFromString<BlobPartMetadata>(metadata.readText())
-                } catch (_: IllegalArgumentException) {
-                    null
-                }
-                if (metadataValue == null || metadataValue.sha256 != digest || digest !in keep ||
+                val expectedBytes = keep[digest]
+                val metadataValue = tryReadBlobPartMetadata(metadata)
+                if (metadataValue == null || metadataValue.sha256 != digest || expectedBytes == null ||
+                    metadataValue.bytes != expectedBytes ||
                     metadataValue.bytes !in 0..MOBILE_WEB_UI_MAX_FILE_BYTES ||
                     (part.exists() && !part.isFile) || part.length() > metadataValue.bytes ||
                     (part.isFile && part.length() == metadataValue.bytes && part.sha256() != digest)
@@ -1210,7 +1212,7 @@ class MobileWebUiStore(
         val metadata = blobPartMetadata(serverId, sha256)
         val part = blobPart(serverId, sha256)
         if (!metadata.isFile || !part.isFile) return 0L
-        val stored = MOBILE_WEB_UI_JSON.decodeFromString<BlobPartMetadata>(metadata.readText())
+        val stored = readBlobPartMetadata(metadata)
         if (stored.sha256 != sha256 || stored.bytes != bytes) return 0L
         val length = part.length()
         if (length !in 0L..bytes) return 0L
@@ -1528,7 +1530,7 @@ class MobileWebUiStore(
         val part = blobPart(serverId, sha256)
         val metadata = blobPartMetadata(serverId, sha256)
         if (metadata.isFile) {
-            val stored = MOBILE_WEB_UI_JSON.decodeFromString<BlobPartMetadata>(metadata.readText())
+            val stored = readBlobPartMetadata(metadata)
             if (stored.sha256 != sha256 || stored.bytes != bytes || part.length() > bytes) {
                 deletePart(part, metadata)
             } else if (part.isFile && part.length() == bytes) {
@@ -1725,6 +1727,19 @@ class MobileWebUiStore(
 
     private fun relativePath(serverId: String, file: File): String =
         file.canonicalFile.relativeTo(serverDirectory(serverId).canonicalFile).path
+
+    private fun readBlobPartMetadata(metadata: File): BlobPartMetadata {
+        require(metadata.isFile) { "WebUI partial metadata 不存在" }
+        val text = metadata.readText()
+        requireNoDuplicateJsonKeys(text)
+        return MOBILE_WEB_UI_JSON.decodeFromString<BlobPartMetadata>(text)
+    }
+
+    private fun tryReadBlobPartMetadata(metadata: File): BlobPartMetadata? = try {
+        readBlobPartMetadata(metadata)
+    } catch (_: IllegalArgumentException) {
+        null
+    }
 
     private fun deletePart(part: File, metadata: File) {
         if (part.exists() && !deletePartialFile(part)) throw IOException("无法删除 WebUI partial: $part")
