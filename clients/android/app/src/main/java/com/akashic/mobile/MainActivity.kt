@@ -365,6 +365,7 @@ class MainActivity : ComponentActivity() {
                     } else if (pairingRecoveryNoticeVisible(
                             required = pairingRecoveryRequired,
                             dismissed = pairingRecoveryNoticeDismissed.value,
+                            hasProfile = session.hasProfile,
                         )
                     ) {
                         PairingRecoveryNotice(
@@ -650,5 +651,8 @@ internal fun notificationPermissionNoticeVisible(
     dismissed: Boolean,
 ): Boolean = !notificationsEnabled && permissionRequested && !dismissed
 
-internal fun pairingRecoveryNoticeVisible(required: Boolean, dismissed: Boolean): Boolean =
-    required && !dismissed
+internal fun pairingRecoveryNoticeVisible(
+    required: Boolean,
+    dismissed: Boolean,
+    hasProfile: Boolean,
+): Boolean = required && hasProfile && !dismissed

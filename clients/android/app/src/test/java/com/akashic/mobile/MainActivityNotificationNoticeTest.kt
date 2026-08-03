@@ -43,8 +43,37 @@ class MainActivityNotificationNoticeTest {
 
     @Test
     fun pairingRecoveryNoticeHasPriorityAndCanBeDismissedForOneState() {
-        assertTrue(pairingRecoveryNoticeVisible(required = true, dismissed = false))
-        assertFalse(pairingRecoveryNoticeVisible(required = true, dismissed = true))
-        assertFalse(pairingRecoveryNoticeVisible(required = false, dismissed = false))
+        assertTrue(
+            pairingRecoveryNoticeVisible(
+                required = true,
+                dismissed = false,
+                hasProfile = true,
+            ),
+        )
+        assertFalse(
+            pairingRecoveryNoticeVisible(
+                required = true,
+                dismissed = true,
+                hasProfile = true,
+            ),
+        )
+        assertFalse(
+            pairingRecoveryNoticeVisible(
+                required = false,
+                dismissed = false,
+                hasProfile = true,
+            ),
+        )
+    }
+
+    @Test
+    fun pairingRecoveryNoticeHidesAfterRePairingStarts() {
+        assertFalse(
+            pairingRecoveryNoticeVisible(
+                required = true,
+                dismissed = false,
+                hasProfile = false,
+            ),
+        )
     }
 }
