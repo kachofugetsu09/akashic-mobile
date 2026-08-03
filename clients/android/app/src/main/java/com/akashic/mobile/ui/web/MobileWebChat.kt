@@ -121,6 +121,34 @@ private data class MobileWebUiRendererFailure(
     val atMillis: Long,
 )
 
+/** 在 lease 与 bridge admission 边界上调度发送，并保证每个请求只有一次回执。 */
+internal fun <T> mobileWebUiDispatchSend(
+    requestId: String,
+    isLeaseCurrent: () -> Boolean,
+    dispatch: (((T) -> Unit), () -> Unit) -> Unit,
+    work: (T, (Boolean) -> Unit) -> Unit,
+    report: (String, Boolean) -> Unit,
+) {
+    val reported = AtomicBoolean(false)
+    fun reportOnce(accepted: Boolean) {
+        // 1. 过期 lease 的异步成功不能越过新 lease；统一降为失败回执
+        val result = accepted && isLeaseCurrent()
+        if (reported.compareAndSet(false, true)) report(requestId, result)
+    }
+
+    // 2. 发送入口本身已过期时，直接显式回执，不执行任何副作用
+    if (!isLeaseCurrent()) {
+        reportOnce(false)
+        return
+    }
+
+    // 3. 由 bridge admission 决定执行或拒绝；两条路径都必须收敛到一次回执
+    dispatch(
+        { context -> work(context, ::reportOnce) },
+        { reportOnce(false) },
+    )
+}
+
 internal fun mobileWebUiLeaseCallbackAllowed(
     callbackView: Any,
     currentView: Any?,
@@ -806,16 +834,26 @@ internal fun MobileWebChat(
                         MOBILE_WEB_COMMITTED_NONCE
                     }
                     val candidate = leaseAttempt != null
+                    val leaseServerId = mobileWebUiServerId
+                    val leasePresentationEpoch = mobileWebUiPresentationEpoch
                     lateinit var currentWebView: WebView
                     lateinit var healthGate: MobileWebUiHealthGate
+                    val newWebView = WebView(context)
+                    val newPluginUiBridge = PluginUiWebBridge(newWebView)
+                    currentWebView = newWebView
                     fun leaseStillCurrent(callbackView: WebView = currentWebView): Boolean {
                         val leaseStateCurrent = if (candidate) {
-                            activeAttempt?.serverId == mobileWebUiServerId &&
+                            latestMobileWebUiServerId == leaseServerId &&
+                                latestMobileWebUiPresentationEpoch == leasePresentationEpoch &&
+                                activeAttempt?.serverId == leaseServerId &&
                                 activeAttempt?.generationId == leaseGeneration &&
                                 activeAttempt?.nonce == leaseNonce &&
                                 generationRef.get() == leaseGeneration
                         } else {
-                            activeAttempt == null && generationRef.get() == leaseGeneration
+                            latestMobileWebUiServerId == leaseServerId &&
+                                latestMobileWebUiPresentationEpoch == leasePresentationEpoch &&
+                                activeAttempt == null &&
+                                generationRef.get() == leaseGeneration
                         }
                         return mobileWebUiLeaseCallbackAllowed(
                             callbackView,
@@ -824,6 +862,7 @@ internal fun MobileWebChat(
                         )
                     }
                     val bridge = MobileWebBridge(
+                        callbackView = newWebView,
                         isLeaseCurrent = { leaseStillCurrent() },
                         dispatchInternal = { work ->
                             if (leaseStillCurrent() &&
@@ -836,6 +875,46 @@ internal fun MobileWebChat(
                                         work(callbacks)
                                     }
                                 }
+                            }
+                        },
+                        dispatchSend = { work, onRejected ->
+                            if (leaseStillCurrent() &&
+                                (admissionRef.get() || generationRef.get() == null)
+                            ) {
+                                if (!currentWebView.post {
+                                        if (leaseStillCurrent() &&
+                                            (admissionRef.get() || generationRef.get() == null)
+                                        ) {
+                                            work(callbacks)
+                                        } else {
+                                            onRejected()
+                                        }
+                                    }
+                                ) {
+                                    onRejected()
+                                }
+                            } else {
+                                onRejected()
+                            }
+                        },
+                        dispatchPluginUi = { work, onRejected ->
+                            if (leaseStillCurrent() &&
+                                (admissionRef.get() || generationRef.get() == null)
+                            ) {
+                                if (!currentWebView.post {
+                                        if (leaseStillCurrent() &&
+                                            (admissionRef.get() || generationRef.get() == null)
+                                        ) {
+                                            work(callbacks)
+                                        } else {
+                                            onRejected()
+                                        }
+                                    }
+                                ) {
+                                    onRejected()
+                                }
+                            } else {
+                                onRejected()
                             }
                         },
                         requestSnapshot = {
@@ -903,21 +982,24 @@ internal fun MobileWebChat(
                             }
                         },
                         setWebHistoryActive = { active -> currentWebView.post { webHistoryActive = active } },
-                        reportSendResult = { requestId, accepted ->
-                            if (admissionRef.get() || generationRef.get() == null) {
-                                currentWebView.post {
-                                    if (!leaseStillCurrent()) return@post
-                                    currentWebView.evaluateJavascript(
-                                        "window.AkashicMobile?.receiveSendResult(" +
-                                            "${JSONObject.quote(requestId)},$accepted)",
-                                        null,
-                                    )
-                                }
+                        reportSendResult = { callbackView, requestId, accepted ->
+                            callbackView.post {
+                                val result = accepted &&
+                                    leaseStillCurrent(callbackView) &&
+                                    (admissionRef.get() || generationRef.get() == null)
+                                callbackView.evaluateJavascript(
+                                    "window.AkashicMobile?.receiveSendResult(" +
+                                        "${JSONObject.quote(requestId)},$result)",
+                                    null,
+                                )
                             }
                         },
+                        reportPluginUiError = { requestId, message ->
+                            newPluginUiBridge.publishResult(
+                                PluginUiWebResult(requestId, error = message),
+                            )
+                        },
                     )
-                    val newWebView = WebView(context)
-                    currentWebView = newWebView
                     healthGate = MobileWebUiHealthGate(
                         webView = newWebView,
                         enabled = candidate,
@@ -1109,7 +1191,6 @@ internal fun MobileWebChat(
                             mediaRegistry,
                             onFirstSnapshot = { healthGate.markSnapshot() },
                         )
-                        val newPluginUiBridge = PluginUiWebBridge(this)
                         snapshotPump = newSnapshotPump
                         pluginUiBridge = newPluginUiBridge
                         activeHealthGate = healthGate
@@ -1263,15 +1344,19 @@ private data class MobileWebCallbacks(
 
 @Keep
 private class MobileWebBridge(
+    private val callbackView: WebView,
     private val isLeaseCurrent: () -> Boolean,
     private val dispatchInternal: ((MobileWebCallbacks) -> Unit) -> Unit,
+    private val dispatchSend: (((MobileWebCallbacks) -> Unit), () -> Unit) -> Unit,
+    private val dispatchPluginUi: (((MobileWebCallbacks) -> Unit), () -> Unit) -> Unit,
     private val requestSnapshot: () -> Unit,
     private val reportHealthy: () -> Unit,
     private val copyText: (String) -> Unit,
     private val shareText: (String, String) -> Unit,
     private val performActionHaptic: () -> Unit,
     private val setWebHistoryActive: (Boolean) -> Unit,
-    private val reportSendResult: (String, Boolean) -> Unit,
+    private val reportSendResult: (WebView, String, Boolean) -> Unit,
+    private val reportPluginUiError: (String, String) -> Unit,
 ) {
     private fun runIfLeaseCurrent(action: () -> Unit) {
         if (isLeaseCurrent()) action()
@@ -1374,6 +1459,10 @@ private class MobileWebBridge(
 
     fun dismissError() = dispatch { it.onDismissError() }
 
+    fun rejectSendMessage(requestId: String) {
+        reportSendResult(callbackView, requestId, false)
+    }
+
     fun sendMessage(
         requestId: String,
         sessionId: String,
@@ -1381,35 +1470,42 @@ private class MobileWebBridge(
         replyToMessageId: String,
         attachmentIdsJson: String,
         sentDraftRevision: String,
-    ) = dispatch {
-        val attachmentIds = try {
-            Json.decodeFromString<List<String>>(attachmentIdsJson)
-        } catch (_: SerializationException) {
-            reportSendResult(requestId, false)
-            return@dispatch
-        }
-        if (attachmentIds.distinct().size != attachmentIds.size) {
-            reportSendResult(requestId, false)
-            return@dispatch
-        }
-        val revision = sentDraftRevision.toLongOrNull()
-        if (
-            sessionId.isBlank() ||
-            revision == null ||
-            revision !in 1..MOBILE_WEB_MAX_SAFE_INTEGER
-        ) {
-            reportSendResult(requestId, false)
-            return@dispatch
-        }
-        it.onSend(
-            sessionId,
-            text,
-            replyToMessageId.ifBlank { null },
-            attachmentIds,
-            revision,
-        ) { accepted ->
-            if (isLeaseCurrent()) reportSendResult(requestId, accepted)
-        }
+    ) {
+        mobileWebUiDispatchSend(
+            requestId = requestId,
+            isLeaseCurrent = isLeaseCurrent,
+            dispatch = dispatchSend,
+            work = { callbacks, report ->
+                val attachmentIds = try {
+                    Json.decodeFromString<List<String>>(attachmentIdsJson)
+                } catch (_: SerializationException) {
+                    report(false)
+                    return@mobileWebUiDispatchSend
+                }
+                if (attachmentIds.distinct().size != attachmentIds.size) {
+                    report(false)
+                    return@mobileWebUiDispatchSend
+                }
+                val revision = sentDraftRevision.toLongOrNull()
+                if (
+                    sessionId.isBlank() ||
+                    revision == null ||
+                    revision !in 1..MOBILE_WEB_MAX_SAFE_INTEGER
+                ) {
+                    report(false)
+                    return@mobileWebUiDispatchSend
+                }
+                callbacks.onSend(
+                    sessionId,
+                    text,
+                    replyToMessageId.ifBlank { null },
+                    attachmentIds,
+                    revision,
+                    report,
+                )
+            },
+            report = { id, accepted -> reportSendResult(callbackView, id, accepted) },
+        )
     }
 
     fun copyText(text: String) = runIfLeaseCurrent { copyText.invoke(text) }
@@ -1439,6 +1535,10 @@ private class MobileWebBridge(
         it.onClearRuntimeInspectionDetail()
     }
 
+    fun rejectPluginUiQuery(requestId: String) {
+        reportPluginUiError(requestId, "插件界面当前不可用")
+    }
+
     fun queryPluginUi(
         requestId: String,
         ownerId: String,
@@ -1450,18 +1550,27 @@ private class MobileWebBridge(
         payloadJson: String,
         cacheMode: String,
         transportMode: String,
-    ) = dispatch {
-        it.onPluginUiQuery(
-            requestId,
-            ownerId,
-            slot,
-            sessionId,
-            turnId,
-            pluginId,
-            method,
-            payloadJson,
-            cacheMode,
-            transportMode,
+    ) {
+        if (!isLeaseCurrent()) {
+            rejectPluginUiQuery(requestId)
+            return
+        }
+        dispatchPluginUi(
+            { callbacks ->
+                callbacks.onPluginUiQuery(
+                    requestId,
+                    ownerId,
+                    slot,
+                    sessionId,
+                    turnId,
+                    pluginId,
+                    method,
+                    payloadJson,
+                    cacheMode,
+                    transportMode,
+                )
+            },
+            { rejectPluginUiQuery(requestId) },
         )
     }
 
@@ -1592,11 +1701,22 @@ private class MobileWebTransportListener(
         if (envelope.v != 1 || envelope.generationId != expectedGeneration || envelope.nonce != expectedNonce) {
             return
         }
-        if (!mobileWebUiTransportMethodAllowed(envelope.method, candidate)) {
+        if (!mobileWebUiTransportMethodAllowed(envelope.method, candidate) &&
+            envelope.method !in setOf("sendMessage", "queryPluginUi")
+        ) {
             return
         }
-        if (!validateMobileWebTransportArgs(envelope.method, envelope.args)) return
-        if (!isLeaseCurrent(view)) return
+        if (!validateMobileWebTransportArgs(envelope.method, envelope.args)) {
+            if (envelope.method == "sendMessage" || envelope.method == "queryPluginUi") {
+                val requestId = (envelope.args.firstOrNull() as? JsonPrimitive)?.contentOrNull
+                if (requestId != null) {
+                    if (envelope.method == "sendMessage") bridge.rejectSendMessage(requestId)
+                    else bridge.rejectPluginUiQuery(requestId)
+                }
+            }
+            return
+        }
+        if (!isLeaseCurrent(view) && envelope.method !in setOf("sendMessage", "queryPluginUi")) return
         try {
             dispatchMobileWebTransport(view, bridge, envelope)
         } catch (_: IllegalArgumentException) {
