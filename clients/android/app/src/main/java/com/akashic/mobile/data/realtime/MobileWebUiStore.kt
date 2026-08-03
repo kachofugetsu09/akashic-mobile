@@ -1513,6 +1513,13 @@ class MobileWebUiStore(
             val stored = MOBILE_WEB_UI_JSON.decodeFromString<BlobPartMetadata>(metadata.readText())
             if (stored.sha256 != sha256 || stored.bytes != bytes || part.length() > bytes) {
                 deletePart(part, metadata)
+            } else if (part.isFile && part.length() == bytes) {
+                // 1. 重启发现完整 partial 时先验摘要，再原子发布并登记 Room owner。
+                if (part.sha256() == sha256) {
+                    publishBlob(serverId, sha256, bytes)
+                    return 0L
+                }
+                deletePart(part, metadata)
             }
         } else if (part.exists()) {
             deletePart(part, metadata)

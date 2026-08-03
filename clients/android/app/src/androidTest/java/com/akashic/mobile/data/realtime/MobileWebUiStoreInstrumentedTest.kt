@@ -349,6 +349,44 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun completePartialIsVerifiedAndPublishedAfterRestart() = runBlocking {
+        val content = "crash-safe-part".toByteArray()
+        val digest = contentDigest(content)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(content)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
+        )
+
+        assertEquals(0L, store.blobOffset(SERVER_ID, digest, content.size.toLong()))
+        assertTrue(store.hasBlob(SERVER_ID, digest, content.size.toLong()))
+        assertNotNull(database.mobileWebUi().getBlob(SERVER_ID, digest))
+        assertFalse(partialDirectory.resolve("$digest.part").exists())
+        assertFalse(partialDirectory.resolve("$digest.meta").exists())
+    }
+
+    @Test
+    fun corruptCompletePartialIsDiscardedAndRecreatedAtZero() = runBlocking {
+        val expected = "crash-safe-part".toByteArray()
+        val corrupt = "crash-safe-data".toByteArray()
+        assertEquals(expected.size, corrupt.size)
+        val digest = contentDigest(expected)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(corrupt)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${expected.size}}",
+        )
+
+        assertEquals(0L, store.blobOffset(SERVER_ID, digest, expected.size.toLong()))
+        assertFalse(store.hasBlob(SERVER_ID, digest, expected.size.toLong()))
+        assertTrue(partialDirectory.resolve("$digest.meta").isFile)
+        assertFalse(partialDirectory.resolve("$digest.part").exists())
+        assertNull(database.mobileWebUi().getBlob(SERVER_ID, digest))
+    }
+
+    @Test
     fun garbageCollectionRemovesOrphanGenerationWithoutRoomOwner() = runBlocking {
         prepareHealthyGeneration(store)
         val orphan = root.resolve(serverHash()).resolve("generations").resolve("orphan-generation")

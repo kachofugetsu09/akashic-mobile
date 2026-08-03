@@ -809,6 +809,11 @@ internal class MobileWebUiCoordinator(
                 continue
             }
             val offset = store.blobOffset(context.serverId, file.sha256, file.sizeBytes)
+            // 1. blobOffset 可能在重启恢复完整 partial；重新读 verified owner，禁止发送 offset==size。
+            if (store.hasBlob(context.serverId, file.sha256, file.sizeBytes)) {
+                context.fileIndex += 1
+                continue
+            }
             val grant = requireNotNull(context.grant) { "WebUI blob 下载缺少 ticket" }
             val requestId = UUID.randomUUID().toString()
             pendingHttp = PendingHttp(
