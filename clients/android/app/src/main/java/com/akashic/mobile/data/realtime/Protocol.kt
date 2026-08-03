@@ -12,6 +12,130 @@ import kotlinx.serialization.json.decodeFromJsonElement
 const val WIRE_PROTOCOL_VERSION = 1
 const val MAX_JSON_FRAME_BYTES = 256 * 1024
 
+/** 在 kotlinx.serialization 静默保留最后一个值前拒绝重复对象成员。 */
+internal fun requireNoDuplicateJsonKeys(text: String) {
+    JsonDuplicateKeyScanner(text).scan()
+}
+
+private class JsonDuplicateKeyScanner(private val text: String) {
+    private var index = 0
+
+    fun scan() {
+        skipWhitespace()
+        parseValue()
+        skipWhitespace()
+        require(index == text.length) { "JSON trailing data" }
+    }
+
+    private fun parseValue() {
+        skipWhitespace()
+        require(index < text.length) { "JSON value is missing" }
+        when (text[index]) {
+            '{' -> parseObject()
+            '[' -> parseArray()
+            '"' -> parseString()
+            't' -> parseLiteral("true")
+            'f' -> parseLiteral("false")
+            'n' -> parseLiteral("null")
+            '-', in '0'..'9' -> parseNumber()
+            else -> throw IllegalArgumentException("JSON value is invalid")
+        }
+    }
+
+    private fun parseObject() {
+        index += 1
+        skipWhitespace()
+        val keys = HashSet<String>()
+        if (take('}')) return
+        while (true) {
+            skipWhitespace()
+            val key = parseString()
+            require(keys.add(key)) { "JSON duplicate object key: $key" }
+            skipWhitespace()
+            require(take(':')) { "JSON object colon is missing" }
+            parseValue()
+            skipWhitespace()
+            if (take('}')) return
+            require(take(',')) { "JSON object comma is missing" }
+        }
+    }
+
+    private fun parseArray() {
+        index += 1
+        skipWhitespace()
+        if (take(']')) return
+        while (true) {
+            parseValue()
+            skipWhitespace()
+            if (take(']')) return
+            require(take(',')) { "JSON array comma is missing" }
+        }
+    }
+
+    private fun parseString(): String {
+        require(take('"')) { "JSON string is missing" }
+        val start = index - 1
+        while (index < text.length) {
+            when (val char = text[index++]) {
+                '"' -> {
+                    val encoded = text.substring(start, index)
+                    return ProtocolCodec.json().decodeFromString<String>(encoded)
+                }
+                '\\' -> {
+                    require(index < text.length) { "JSON escape is truncated" }
+                    if (text[index++] == 'u') {
+                        require(index + 4 <= text.length) { "JSON unicode escape is truncated" }
+                        repeat(4) {
+                            require(text[index++].digitToIntOrNull(16) != null) {
+                                "JSON unicode escape is invalid"
+                            }
+                        }
+                    }
+                }
+                else -> require(char.code >= 0x20) { "JSON string control character" }
+            }
+        }
+        throw IllegalArgumentException("JSON string is unterminated")
+    }
+
+    private fun parseLiteral(literal: String) {
+        require(text.regionMatches(index, literal, 0, literal.length)) { "JSON literal is invalid" }
+        index += literal.length
+    }
+
+    private fun parseNumber() {
+        val start = index
+        if (take('-')) Unit
+        if (take('0')) Unit else {
+            require(index < text.length && text[index] in '1'..'9') { "JSON number is invalid" }
+            while (index < text.length && text[index].isDigit()) index += 1
+        }
+        if (take('.')) {
+            require(index < text.length && text[index].isDigit()) { "JSON number fraction is invalid" }
+            while (index < text.length && text[index].isDigit()) index += 1
+        }
+        if (index < text.length && text[index] in "eE") {
+            index += 1
+            if (index < text.length && text[index] in "+-") index += 1
+            require(index < text.length && text[index].isDigit()) { "JSON number exponent is invalid" }
+            while (index < text.length && text[index].isDigit()) index += 1
+        }
+        require(index > start) { "JSON number is missing" }
+    }
+
+    private fun skipWhitespace() {
+        while (index < text.length && text[index].isWhitespace()) index += 1
+    }
+
+    private fun take(expected: Char): Boolean =
+        if (index < text.length && text[index] == expected) {
+            index += 1
+            true
+        } else {
+            false
+        }
+}
+
 @Serializable
 enum class WireKind {
     @SerialName("command")
@@ -442,6 +566,8 @@ object ProtocolCodec {
             "plugin.ui.query",
             "plugin.ui.query.prepare",
             "plugin.ui.cancel",
+            MOBILE_WEB_UI_RELEASE_GET,
+            MOBILE_WEB_UI_CONTENT_PREPARE,
             "device.update",
             "ping",
         ),
@@ -464,7 +590,6 @@ object ProtocolCodec {
             "connection.degraded",
             "sync.completed",
             "sync.reset_required",
-            "device.revoked",
         ),
         WireKind.ACK to setOf("event.ack"),
         WireKind.CONTROL to setOf(
@@ -473,6 +598,8 @@ object ProtocolCodec {
             "auth.accepted",
             "resume",
             "plugin.ui.changed",
+            MOBILE_WEB_UI_RELEASE_CHANGED,
+            "device.revoked",
             "pair.claim",
             "pair.pending",
             "pair.accepted",
@@ -486,6 +613,7 @@ object ProtocolCodec {
         require(text.toByteArray(Charsets.UTF_8).size <= MAX_JSON_FRAME_BYTES) {
             "JSON frame exceeds $MAX_JSON_FRAME_BYTES bytes"
         }
+        requireNoDuplicateJsonKeys(text)
         val envelope = json.decodeFromString<WireEnvelope>(text)
 
         // 2. 校验协议版本与 envelope 不变量
@@ -540,7 +668,7 @@ object ProtocolCodec {
                 "Authenticated frames require a positive connection_epoch"
             }
             WireKind.CONTROL -> when (envelope.type) {
-                "auth.accepted", "resume", "plugin.ui.changed" -> require(
+                "auth.accepted", "resume", "plugin.ui.changed", MOBILE_WEB_UI_RELEASE_CHANGED, "device.revoked" -> require(
                     envelope.connectionEpoch != null && envelope.connectionEpoch > 0,
                 ) { "Authenticated controls require a positive connection_epoch" }
                 else -> require(envelope.connectionEpoch == null) {

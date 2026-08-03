@@ -46,19 +46,30 @@ internal fun withCachedAttachment(
     action(attachment)
 }
 
-internal fun openCachedAttachment(context: Context, attachment: MessageAttachmentUi) {
+internal fun openCachedAttachment(
+    context: Context,
+    attachment: MessageAttachmentUi,
+    onActivityLaunched: () -> Unit = {},
+) {
     val intent = Intent(Intent.ACTION_VIEW).apply {
         setDataAndType(attachment.contentUri(context), attachment.contentType)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     try {
         context.startActivity(intent)
+        onActivityLaunched()
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, "没有可打开此文件的应用", Toast.LENGTH_SHORT).show()
+    } catch (_: SecurityException) {
+        Toast.makeText(context, "系统拒绝打开此文件", Toast.LENGTH_SHORT).show()
     }
 }
 
-internal fun shareCachedAttachment(context: Context, attachment: MessageAttachmentUi) {
+internal fun shareCachedAttachment(
+    context: Context,
+    attachment: MessageAttachmentUi,
+    onActivityLaunched: () -> Unit = {},
+) {
     val uri = attachment.contentUri(context)
     val send = Intent(Intent.ACTION_SEND).apply {
         type = attachment.contentType
@@ -68,8 +79,11 @@ internal fun shareCachedAttachment(context: Context, attachment: MessageAttachme
     }
     try {
         context.startActivity(Intent.createChooser(send, "分享 ${attachment.filename}"))
+        onActivityLaunched()
     } catch (_: ActivityNotFoundException) {
         Toast.makeText(context, "没有可分享此文件的应用", Toast.LENGTH_SHORT).show()
+    } catch (_: SecurityException) {
+        Toast.makeText(context, "系统拒绝分享此文件", Toast.LENGTH_SHORT).show()
     }
 }
 
@@ -168,6 +182,10 @@ internal fun launchPlainTextShare(context: Context, prepared: PreparedMobileText
     } catch (_: ActivityNotFoundException) {
         prepared.cacheFile?.delete()
         Toast.makeText(context, "没有可分享消息的应用", Toast.LENGTH_SHORT).show()
+        return false
+    } catch (_: SecurityException) {
+        prepared.cacheFile?.delete()
+        Toast.makeText(context, "系统拒绝分享消息", Toast.LENGTH_SHORT).show()
         return false
     }
 }

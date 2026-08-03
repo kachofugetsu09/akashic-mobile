@@ -1,6 +1,6 @@
 # Akashic Mobile
 
-Akashic 的 Android 客户端与移动 WebView 容器。共享对话 WebUI 源码位于 `akashic-agent/frontend/chat`；本仓库固定并校验其构建产物。
+Akashic 的 Android 客户端与移动 WebView 容器。共享对话 WebUI 源码位于 `akashic-agent/frontend/chat`；本仓库固定并校验 APK 内的 embedded baseline，并在运行时消费已配对 Core 选择的 WebUI generation。
 
 本仓库可以独立测试、构建和发布 APK；服务端协议真源仍由 `akashic-agent/schema/` 维护。
 
@@ -17,9 +17,35 @@ cd clients/android
 ./test-device-gate.sh
 ```
 
-`protocol/source.json` 固定客户端实现对应的历史协议快照；`runtime-gate/` 另外固定实际验收的核心 revision、tree 和 31 个跨仓库语义场景。两者变化时必须重新运行 runtime contract Gate，不能用浮动分支或本机核心 checkout 代替。
+`protocol/source.json` 固定客户端实现对应的历史协议快照；`runtime-gate/` 另外固定实际验收的核心 revision、tree 和 36 个跨仓库语义场景。两者变化时必须重新运行 runtime contract Gate，不能用浮动分支或本机核心 checkout 代替。
 
-`clients/android/mobile-web/source.json` 固定共享 WebUI 的源码 commit/tree，旁边的 ZIP 与 SHA-256 是 Android 的独立构建输入。更新界面时先在 `akasic-agent` 运行 WebUI 类型检查、lint、状态测试和双入口构建，再用干净提交生成新 ZIP，并同步这三个文件。
+`clients/android/mobile-web/source.json` 固定 embedded baseline 的源码 commit/tree，旁边的 ZIP 与 SHA-256 是 Android 的独立构建输入。只有发布新的 Android binary 时才从已合并且干净的 `akasic-agent` commit 重建并同步这三个文件；服务端 WebUI generation 不反向修改 APK baseline。
+
+## WebUI 发布边界
+
+运行时更新只回答三个问题，不把检查、下载和页面替换串成一条全局状态机：
+
+```text
+┌─────────┐      ┌─────────┐      ┌─────────┐
+│ Resolve │ ───▶ │ Ensure  │ ───▶ │ Present │
+│ 服务端要什么 │      │ 本地是否完整 │      │ 本次会话展示什么 │
+└─────────┘      └─────────┘      └─────────┘
+     │                │                 │
+     └─ 临时失败沿用当前 UI ─────────────┘
+                      └─ 未就绪不替换；APK baseline 永久可用
+```
+
+颜色、排版、抽屉、island、组件组合和只调用既有 bridge capability 的交互，由 Core 显式发布 Stable/Preview generation，手机按内容摘要增量补齐，不需要重新发 APK。保存源码、构建成功、文件 watcher 或重启 Core 都不会自动发布；这条显式提交边界让 Preview、提升和回滚可审计。新增原生能力、改变 bridge/snapshot 兼容范围、Room、WebView 生命周期、网络或安全逻辑时，仍必须发布 Android binary。Preview 不理想时由 Core 清除 Preview 或回滚指针；客户端下一次成功 Resolve 收敛，不维护任意本地版本选择器。
+
+| 变化 | 唯一 owner | 是否发布 APK |
+|---|---|---|
+| 颜色、排版、抽屉、island、组件组合、既有 bridge 交互 | Core WebUI generation + Stable/Preview | 否 |
+| 当前服务端选择、Preview 清除/提升/回滚、资源数据面 | Core 发布者 | 否 |
+| Resolve/Ensure、摘要校验、缓存、GC/reset、session-boundary Present | Android Kotlin | 是 |
+| 新系统能力、bridge/snapshot、Room、WebView 生命周期、网络与安全策略 | Android Kotlin | 是 |
+| GitHub APK 检查、下载、摘要验证和系统安装确认 | 既有 Android updater | 维持现状 |
+
+客户端不直接打开远程页面。资源经当前配对身份授权下载、完整校验后进入 app-private cache，再由本地可信 HTTPS origin 加载；未配对、离线、无发布、不兼容、下载失败或激活失败时继续使用已提交 UI 或 embedded baseline。完整合同与 edge case 矩阵由 Core 的 `docs/design/server-published-mobile-webui.md`、本仓库的 `docs/decisions/0007-*` 和 `docs/projectneed.md` 共同约束。现有 GitHub APK 检查、下载和安装入口保持独立且原样保留。
 
 ## WebUI Pilot APK
 
@@ -71,7 +97,7 @@ ADB 报告写入 `clients/android/build/reports/debug-diagnostics/<时间戳>/`�
 
 ```bash
 cd clients/android
-./scripts/publish-release.sh 0.8.15
+./scripts/publish-release.sh 0.8.17
 ```
 
 发布脚本会构建并验证签名，上传 APK、R8 mapping 和 `SHA256SUMS`。签名材料仍只从本机凭据或受保护 CI secret 读取，不进入仓库或 Release。

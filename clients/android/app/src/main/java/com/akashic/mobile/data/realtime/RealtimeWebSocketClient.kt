@@ -28,6 +28,9 @@ data class SocketCandidateId(val generation: Long, val ordinal: Int)
 interface RealtimeSocketListener {
     fun onOpen(candidateId: SocketCandidateId, endpoint: ServerEndpoint)
 
+    /** socket owner 撤销当前竞态 generation 时同步调用。 */
+    fun onRevoked(candidateId: SocketCandidateId, code: Int, reason: String)
+
     fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope)
 
     fun onBinary(candidateId: SocketCandidateId, chunk: AttachmentChunkCodec.DecodedChunk)
@@ -44,6 +47,8 @@ interface RealtimeSocketListener {
 class RealtimeWebSocketClient(
     private val listener: RealtimeSocketListener,
     private val allowInsecureTransport: Boolean,
+    private val openWebSocket: (OkHttpClient, Request, WebSocketListener) -> WebSocket =
+        { client, request, socketListener -> client.newWebSocket(request, socketListener) },
 ) {
     private data class RaceState(
         val generation: Long,
@@ -116,6 +121,15 @@ class RealtimeWebSocketClient(
         losers.forEach { it.close(CLOSE_REPLACED, "authenticated candidate won") }
         return true
     }
+
+    /** 返回候选 generation 是否仍由此 socket client 持有。 */
+    fun isGenerationCurrent(generation: Long): Boolean = synchronized(lock) {
+        state?.generation == generation
+    }
+
+    /** 在重连逻辑运行前关闭 generation 的所有 socket 并使其失效。 */
+    fun closeGeneration(generation: Long, code: Int = CLOSE_REVOKED, reason: String = "device revoked"): Boolean =
+        closeGenerationIfOwned(generation, null, code, reason)
 
     fun send(candidateId: SocketCandidateId, envelope: WireEnvelope): Boolean {
         val socket = synchronized(lock) { state?.sockets?.get(candidateId) } ?: return false
@@ -243,6 +257,81 @@ class RealtimeWebSocketClient(
         }
     }
 
+    /** 复用当前端点的 TLS 信任策略读取带 digest 路径的 WebUI manifest/blob。 */
+    internal fun executeMobileWebUiHttp(
+        endpoint: ServerEndpoint,
+        request: MobileWebUiHttpRequest,
+    ): MobileWebUiHttpResponse {
+        validateEndpoint(endpoint)
+        require(request.ticket.length in 1..MAX_PLUGIN_UI_TICKET_CHARS) {
+            "Invalid WebUI HTTP ticket"
+        }
+        val isManifest = MOBILE_WEB_UI_MANIFEST_ROUTE.matches(request.path)
+        val blobMatch = MOBILE_WEB_UI_BLOB_ROUTE.matchEntire(request.path)
+        require(isManifest || blobMatch != null) { "Invalid WebUI HTTP path" }
+        if (isManifest) {
+            require(request.blobSha256 == null && request.byteLength == null && request.offset == null) {
+                "Manifest HTTP request must not contain a range"
+            }
+        } else {
+            val digest = requireNotNull(blobMatch).groupValues[1]
+            require(request.blobSha256 == digest) { "WebUI blob path digest mismatch" }
+            val byteLength = requireNotNull(request.byteLength)
+            val offset = requireNotNull(request.offset)
+            require(byteLength in 1..MOBILE_WEB_UI_MAX_FILE_BYTES) { "Invalid WebUI blob length" }
+            require(offset in 0 until byteLength) { "Invalid WebUI blob offset" }
+        }
+        val websocketUri = URI(endpoint.url)
+        val httpScheme = when (requireNotNull(websocketUri.scheme).lowercase()) {
+            "wss" -> "https"
+            "ws" -> "http"
+            else -> error("Validated endpoint scheme changed")
+        }
+        val url = URI(
+            httpScheme,
+            null,
+            websocketUri.host,
+            websocketUri.port,
+            request.path,
+            null,
+            null,
+        ).toString()
+        val builder = Request.Builder()
+            .url(url)
+            .header("Authorization", "Bearer ${request.ticket}")
+            .header("Accept-Encoding", "identity")
+            .get()
+        if (!isManifest) {
+            val byteLength = requireNotNull(request.byteLength)
+            val offset = requireNotNull(request.offset)
+            val rangeEnd = minOf(
+                byteLength - 1,
+                Math.addExact(offset, MOBILE_WEB_UI_MAX_FILE_BYTES - 1L),
+            )
+            builder.header("Range", "bytes=$offset-$rangeEnd")
+            builder.header("If-Range", "\"${requireNotNull(request.blobSha256)}\"")
+        }
+        val call = clientFor(endpoint)
+            .newBuilder()
+            .followRedirects(false)
+            .build()
+            .newCall(builder.build())
+        return call.execute().use { response ->
+            MobileWebUiHttpResponse(
+                statusCode = response.code,
+                body = readBoundedMobileWebUiBody(
+                    response,
+                    if (isManifest) MOBILE_WEB_UI_MAX_MANIFEST_BYTES else MOBILE_WEB_UI_MAX_FILE_BYTES,
+                ),
+                contentLength = response.header("Content-Length")?.toLongOrNull(),
+                contentRange = response.header("Content-Range"),
+                etag = response.header("ETag"),
+                contentDigest = response.header("Content-Digest"),
+                representationDigest = response.header("Repr-Digest"),
+            )
+        }
+    }
+
     fun reject(candidateId: SocketCandidateId, code: Int, reason: String) {
         val socket = synchronized(lock) {
             val current = state ?: return
@@ -268,7 +357,7 @@ class RealtimeWebSocketClient(
         }
         val client = clientFor(endpoint)
         val request = Request.Builder().url(endpoint.url).build()
-        val socket = client.newWebSocket(request, socketListener(candidateId, endpoint))
+        val socket = openWebSocket(client, request, socketListener(candidateId, endpoint))
         synchronized(lock) {
             val current = state
             if (current == null || current.generation != generation || current.winner != null) {
@@ -317,6 +406,13 @@ class RealtimeWebSocketClient(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.w(TAG, "WebSocket closed: id=$candidateId code=$code reason=$reason")
+                if (code == CLOSE_REVOKED) {
+                    if (revokeGeneration(candidateId.generation, candidateId)) {
+                        listener.onRevoked(candidateId, code, reason)
+                        listener.onClosed(candidateId, code, reason)
+                    }
+                    return
+                }
                 val wasWinner = removeCandidate(candidateId, null)
                 if (wasWinner) listener.onClosed(candidateId, code, reason)
                 reportExhaustedIfNeeded(candidateId.generation)
@@ -349,6 +445,30 @@ class RealtimeWebSocketClient(
         current.sockets.remove(candidateId)
         if (error != null) current.lastError = error
         current.winner == candidateId
+    }
+
+    /** 在通知 session 设备撤销前，使 generation 失效。 */
+    private fun revokeGeneration(generation: Long, candidateId: SocketCandidateId): Boolean {
+        return closeGenerationIfOwned(generation, candidateId, CLOSE_REVOKED, "device revoked")
+    }
+
+    private fun closeGenerationIfOwned(
+        generation: Long,
+        candidateId: SocketCandidateId?,
+        code: Int,
+        reason: String,
+    ): Boolean {
+        val sockets = synchronized(lock) {
+            val current = state ?: return false
+            if (current.generation != generation) return false
+            if (candidateId != null && candidateId !in current.sockets) return false
+            state = null
+            generationSequence.incrementAndGet()
+            current.delayedTunnel?.cancel(false)
+            current.sockets.values.toList()
+        }
+        sockets.forEach { socket -> socket.close(code, reason) }
+        return true
     }
 
     private fun reportExhaustedIfNeeded(generation: Long) {
@@ -430,6 +550,22 @@ class RealtimeWebSocketClient(
         return buffer.readByteArray()
     }
 
+    private fun readBoundedMobileWebUiBody(response: Response, limit: Long): ByteArray {
+        val body = response.body
+        val declared = body.contentLength()
+        if (declared > limit) throw IOException("WebUI HTTP 响应超过大小上限")
+        val source = body.source()
+        val buffer = Buffer()
+        var total = 0L
+        while (true) {
+            val read = source.read(buffer, minOf(8 * 1024L, limit + 1L - total))
+            if (read == -1L) break
+            total += read
+            if (total > limit) throw IOException("WebUI HTTP 响应超过大小上限")
+        }
+        return buffer.readByteArray()
+    }
+
     private fun envelopeLabel(envelope: WireEnvelope): String =
         "kind=${envelope.kind} type=${envelope.type} id=${envelope.id} epoch=${envelope.connectionEpoch} " +
             "session=${envelope.sessionId} turn=${envelope.turnId} payloadKeys=${envelope.payload.keys}"
@@ -444,10 +580,13 @@ class RealtimeWebSocketClient(
         const val PING_INTERVAL_SECONDS = 25L
         const val TUNNEL_RACE_DELAY_MILLIS = 750L
         const val CLOSE_REPLACED = 4000
+        const val CLOSE_REVOKED = 4403
         const val CLOSE_PROTOCOL_ERROR = 4406
         const val MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES = 192 * 1024L
         const val MAX_MESSAGE_CONTENT_RANGE_BYTES = 256 * 1024L
         const val MAX_PLUGIN_UI_TICKET_CHARS = 4096
+        val MOBILE_WEB_UI_MANIFEST_ROUTE = Regex("^/mobile/webui/v1/manifest/[0-9a-f]{64}$")
+        val MOBILE_WEB_UI_BLOB_ROUTE = Regex("^/mobile/webui/v1/blob/([0-9a-f]{64})$")
         const val PLUGIN_UI_HTTP_PATH = "/mobile/plugin-ui/v1/query"
         const val MESSAGE_CONTENT_HTTP_PATH = "/mobile/message-content/v1"
         val PLUGIN_UI_JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()

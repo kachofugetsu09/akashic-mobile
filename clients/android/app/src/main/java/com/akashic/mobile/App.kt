@@ -16,6 +16,7 @@ import com.akashic.mobile.data.local.MessageContentStore
 import com.akashic.mobile.data.local.IncomingShareStore
 import com.akashic.mobile.data.realtime.DeviceKeyStore
 import com.akashic.mobile.data.realtime.RealtimeSession
+import com.akashic.mobile.data.realtime.MobileWebUiStore
 import com.akashic.mobile.data.realtime.TransferNetworkMonitor
 import com.akashic.mobile.data.realtime.pluginui.PluginUiAssetStore
 import com.akashic.mobile.data.realtime.pluginui.PluginUiCatalogStore
@@ -96,6 +97,11 @@ class AppContainer(application: Application) {
     val pluginUiAssetStore = PluginUiAssetStore(
         application.filesDir.resolve("plugin-ui-cache/v2"),
     )
+    val mobileWebUiStore = MobileWebUiStore(
+        application.filesDir.resolve("mobile-web-ui"),
+        database.mobileWebUi(),
+        BuildConfig.VERSION_CODE,
+    )
     private val pluginUiResultStore = PluginUiResultStore(
         application.filesDir.resolve("plugin-ui-cache/v3-results"),
     )
@@ -114,6 +120,8 @@ class AppContainer(application: Application) {
         pluginUiAssetStore = pluginUiAssetStore,
         pluginUiCatalogStore = pluginUiCatalogStore,
         pluginUiResultStore = pluginUiResultStore,
+        mobileWebUiStore = mobileWebUiStore,
+        nativeBuild = BuildConfig.VERSION_CODE,
         scope = applicationScope,
         allowInsecureTransport = BuildConfig.ALLOW_INSECURE_WS,
         onRuntimeError = { context, error ->

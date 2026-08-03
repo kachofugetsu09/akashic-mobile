@@ -34,7 +34,9 @@ import com.akashic.mobile.data.realtime.pluginui.PluginUiHttpRequest
 import java.time.Instant
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
@@ -53,6 +55,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -79,6 +82,9 @@ data class MobileSessionState(
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
+
+internal fun decodeDeviceRevocationReason(payload: JsonObject): String =
+    jsonStringValue(payload["reason"]).orEmpty()
 
 internal enum class NotificationTargetOpenResult {
     OPENED,
@@ -114,11 +120,13 @@ internal object FullJitterBackoff {
 internal enum class TerminalProtocolAction {
     FAIL_ACTIVE_COMMAND,
     PRESERVE_OUTBOX,
+    REVOKE_DEVICE,
 }
 
 internal fun terminalProtocolAction(code: Int): TerminalProtocolAction? = when (code) {
     4400 -> TerminalProtocolAction.PRESERVE_OUTBOX
     4406 -> TerminalProtocolAction.PRESERVE_OUTBOX
+    4403 -> TerminalProtocolAction.REVOKE_DEVICE
     4410 -> TerminalProtocolAction.FAIL_ACTIVE_COMMAND
     else -> null
 }
@@ -172,6 +180,15 @@ internal fun shouldRefreshSyncDeadline(
     phaseAfterFrame: ConnectionPhase,
 ): Boolean = phaseBeforeFrame == ConnectionPhase.SYNCING &&
     phaseAfterFrame == ConnectionPhase.SYNCING
+
+internal fun shouldApplyQueuedDeviceRevocation(
+    currentEpoch: Long,
+    queuedEpoch: Long,
+    currentGeneration: Long,
+    queuedGeneration: Long,
+    ownerGenerationCurrent: Boolean,
+): Boolean = currentEpoch == queuedEpoch &&
+    (ownerGenerationCurrent || currentGeneration == queuedGeneration)
 
 internal fun historyStartPage(
     remoteMessageCount: Int,
@@ -266,6 +283,8 @@ class RealtimeSession(
     pluginUiAssetStore: PluginUiAssetStore,
     pluginUiCatalogStore: PluginUiCatalogStore,
     pluginUiResultStore: PluginUiResultStore,
+    mobileWebUiStore: MobileWebUiStore,
+    nativeBuild: Int,
     private val scope: CoroutineScope,
     allowInsecureTransport: Boolean,
     private val onRuntimeError: (String, Throwable) -> Unit,
@@ -286,8 +305,27 @@ class RealtimeSession(
 
     private val json = Json { encodeDefaults = true; explicitNulls = false }
     private val mutex = Mutex()
+    private lateinit var mobileWebUiOwner: MobileWebUiCoordinator
     private val attachmentOperations = AttachmentOperationOwner()
     private val socket = RealtimeWebSocketClient(this, allowInsecureTransport)
+    internal val mobileWebUi = MobileWebUiCoordinator(
+        store = mobileWebUiStore,
+        scope = scope,
+        nativeBuild = nativeBuild,
+        sendCommand = ::sendMobileWebUiCommand,
+        startHttp = ::startMobileWebUiHttp,
+        onError = { message -> mutableState.value = mutableState.value.copy(errorMessage = message) },
+        onRetryTrigger = { serverId ->
+            scope.launch {
+                mutex.withLock {
+                    if (profile?.serverId == serverId) mobileWebUiOwner.resolve(serverId)
+                }
+            }
+        },
+    )
+    init {
+        mobileWebUiOwner = mobileWebUi
+    }
     private val uploads = AttachmentUploadCoordinator(
         dao = database.attachmentTransfers(),
         sourceFile = attachmentDrafts::fileFor,
@@ -348,6 +386,15 @@ class RealtimeSession(
     private var meteredLargeTransferApproved = false
     private var profile: ServerProfileEntity? = null
     private var pendingPairing: PendingPairing? = null
+    @Volatile
+    private var deviceRevoked = false
+    @Volatile
+    private var pendingRevokedGeneration: Long? = null
+    @Volatile
+    private var pendingRevocationEpoch: Long? = null
+    private val revocationEpoch = AtomicLong(0)
+    private var deviceRevokeCleanupStarted = false
+    private val revokedGenerations = ConcurrentHashMap.newKeySet<Long>()
     private var pairingConfirmationGeneration: Long? = null
     private val challengedCandidates = mutableSetOf<SocketCandidateId>()
     private val candidateEndpoints = mutableMapOf<SocketCandidateId, ServerEndpoint>()
@@ -397,6 +444,23 @@ class RealtimeSession(
                     deliveryStore.restoreSelectedSession(it.serverId, settings.currentSessionId)
                 }
                 if (selected != settings.currentSessionId) preferences.selectSession(selected)
+                profile?.let { selectedProfile ->
+                    try {
+                        mobileWebUi.restoreLocal(selectedProfile.serverId)
+                    } catch (error: IOException) {
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = "WebUI 本地缓存恢复失败：${error.message}",
+                        )
+                    } catch (error: SQLiteException) {
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = "WebUI 本地状态数据库暂不可用：${error.message}",
+                        )
+                    } catch (error: SecurityException) {
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = "WebUI 本地缓存无权访问：${error.message}",
+                        )
+                    }
+                }
                 mutableState.value = mutableState.value.copy(
                     initialized = true,
                     hasProfile = profile != null,
@@ -412,12 +476,51 @@ class RealtimeSession(
         }
     }
 
+    /** Activity 回到前台时，重新检查当前 WebUI 发布一次。 */
+    fun onForeground() {
+        scope.launch {
+            mutex.withLock {
+                val current = profile
+                if (current == null) return@withLock
+                when (mutableState.value.connection.phase) {
+                    ConnectionPhase.AUTHENTICATED,
+                    ConnectionPhase.SYNCING,
+                    ConnectionPhase.READY,
+                    ConnectionPhase.DEGRADED,
+                    -> mobileWebUiOwner.resolve(current.serverId)
+                    else -> Unit
+                }
+            }
+        }
+    }
+
+    suspend fun collectMobileWebUiGarbage(serverId: String): MobileWebUiGcReport =
+        mutex.withLock {
+            require(profile?.serverId == serverId) { "WebUI GC 服务端 owner 已变化" }
+            mobileWebUi.collectGarbage(serverId)
+        }
+
+    suspend fun resetMobileWebUi(serverId: String) = mutex.withLock {
+        require(profile?.serverId == serverId) { "WebUI reset 服务端 owner 已变化" }
+        mobileWebUi.resetServer(serverId)
+    }
+
+    suspend fun retryMobileWebUi(serverId: String): Boolean = mutex.withLock {
+        require(profile?.serverId == serverId) { "WebUI retry 服务端 owner 已变化" }
+        mobileWebUi.retryCurrentUi(serverId)
+    }
+
     fun beginPairing(rawQr: String) {
         scope.launch {
             try {
                 mutex.withLock {
                     val qr = PairingQrDecoder.decode(rawQr)
                     check(profile == null) { "Remove the current server before pairing another one" }
+                    revocationEpoch.incrementAndGet()
+                    deviceRevoked = false
+                    pendingRevokedGeneration = null
+                    pendingRevocationEpoch = null
+                    deviceRevokeCleanupStarted = false
                     val alias = deviceKeys.aliasForServer(qr.serverId)
                     if (!deviceKeys.contains(alias)) deviceKeys.create(alias)
                     val claim = PairingTranscripts.createClaim(
@@ -465,6 +568,11 @@ class RealtimeSession(
                 pendingPairing = null
                 pairingConfirmationGeneration = null
                 profile = null
+                revocationEpoch.incrementAndGet()
+                deviceRevoked = false
+                pendingRevokedGeneration = null
+                pendingRevocationEpoch = null
+                deviceRevokeCleanupStarted = false
                 resetGenerationState()
                 networkRecovery.reset()
                 stops.reset()
@@ -948,6 +1056,32 @@ class RealtimeSession(
         }
     }
 
+    /** 从当前已认证端点下载 WebUI manifest/blob，并把结果交回唯一 OTA owner。 */
+    private fun startMobileWebUiHttp(request: MobileWebUiHttpRequest) {
+        val candidate = requireNotNull(activeCandidate) { "WebUI HTTPS 请求缺少活动连接" }
+        val endpoint = requireNotNull(candidateEndpoints[candidate]) { "WebUI HTTPS 请求缺少活动端点" }
+        scope.launch {
+            val response = try {
+                withContext(Dispatchers.IO) {
+                    socket.executeMobileWebUiHttp(endpoint, request)
+                }
+            } catch (error: IOException) {
+                mutex.withLock {
+                    mobileWebUi.onHttpFailure(request.requestId, "WebUI HTTPS 请求失败：${error.message}")
+                }
+                return@launch
+            } catch (error: SecurityException) {
+                mutex.withLock {
+                    mobileWebUi.onHttpFailure(request.requestId, "WebUI HTTPS 请求未通过安全校验")
+                }
+                return@launch
+            }
+            mutex.withLock {
+                mobileWebUi.onHttpResponse(request.requestId, response)
+            }
+        }
+    }
+
     fun cancelPluginUiOwner(ownerId: String) {
         scope.launch {
             mutex.withLock {
@@ -1302,6 +1436,10 @@ class RealtimeSession(
         scope.launch {
             mutex.withLock {
                 if (candidateId.generation != currentGeneration()) return@withLock
+                if (deviceRevoked || candidateId.generation in revokedGenerations) {
+                    socket.reject(candidateId, 4403, "device revoked")
+                    return@withLock
+                }
                 candidateEndpoints[candidateId] = endpoint
                 if (
                     !shouldApplyCandidateOpen(
@@ -1327,14 +1465,23 @@ class RealtimeSession(
     }
 
     override fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
+        if (
+            candidateId.generation != currentGeneration() ||
+            candidateId.generation in revokedGenerations ||
+            !socket.isGenerationCurrent(candidateId.generation)
+        ) return
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             mutex.withLock {
+                if (
+                    candidateId.generation != currentGeneration() ||
+                    candidateId.generation in revokedGenerations ||
+                    deviceRevoked ||
+                    !socket.isGenerationCurrent(candidateId.generation)
+                ) return@withLock
                 try {
                     handleEnvelope(candidateId, envelope)
                 } catch (error: IllegalArgumentException) {
                     failCandidateProtocol(candidateId, envelope, error, "连接协议校验失败：${error.message}")
-                } catch (error: IllegalStateException) {
-                    failCandidateProtocol(candidateId, envelope, error, "连接状态校验失败：${error.message}")
                 } catch (error: ArithmeticException) {
                     failCandidateProtocol(candidateId, envelope, error, "连接协议数值溢出")
                 } catch (error: SQLiteException) {
@@ -1349,8 +1496,19 @@ class RealtimeSession(
     }
 
     override fun onBinary(candidateId: SocketCandidateId, chunk: AttachmentChunkCodec.DecodedChunk) {
+        if (
+            candidateId.generation != currentGeneration() ||
+            candidateId.generation in revokedGenerations ||
+            !socket.isGenerationCurrent(candidateId.generation)
+        ) return
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             mutex.withLock {
+                if (
+                    candidateId.generation != currentGeneration() ||
+                    candidateId.generation in revokedGenerations ||
+                    deviceRevoked ||
+                    !socket.isGenerationCurrent(candidateId.generation)
+                ) return@withLock
                 if (candidateId != activeCandidate) {
                     socket.reject(candidateId, 4406, "binary frame before authentication")
                     return@withLock
@@ -1359,8 +1517,6 @@ class RealtimeSession(
                     downloads.onBinary(chunk)
                 } catch (error: IllegalArgumentException) {
                     failDownloadConnection("附件下载协议校验失败：${error.message}")
-                } catch (error: IllegalStateException) {
-                    failDownloadConnection("附件下载状态失败：${error.message}")
                 } catch (error: IOException) {
                     failDownloadConnection("附件缓存写入失败：${error.message}")
                 } catch (error: SQLiteException) {
@@ -1375,16 +1531,32 @@ class RealtimeSession(
     }
 
     override fun onClosed(candidateId: SocketCandidateId, code: Int, reason: String) {
+        val action = terminalProtocolAction(code)
+        if (action == TerminalProtocolAction.REVOKE_DEVICE) {
+            if (
+                candidateId.generation != currentGeneration() &&
+                candidateId.generation != pendingRevokedGeneration
+            ) return
+            markDeviceRevokedImmediately(candidateId.generation)?.let { epoch ->
+                enqueueDeviceRevocation(candidateId.generation, epoch, reason)
+            }
+            return
+        }
+        if (candidateId.generation != currentGeneration()) return
         scope.launch {
             mutex.withLock {
-                if (candidateId != activeCandidate) return@withLock
-                val action = terminalProtocolAction(code)
-                if (action != null) {
+                if (candidateId == activeCandidate && action != null) {
                     failProtocolConnection(code, action)
-                } else {
+                } else if (candidateId == activeCandidate) {
                     scheduleReconnect("连接关闭：$code $reason")
                 }
             }
+        }
+    }
+
+    override fun onRevoked(candidateId: SocketCandidateId, code: Int, reason: String) {
+        markDeviceRevokedImmediately(candidateId.generation)?.let { epoch ->
+            enqueueDeviceRevocation(candidateId.generation, epoch, reason)
         }
     }
 
@@ -1392,6 +1564,7 @@ class RealtimeSession(
         Log.e(TAG, "实时连接候选失败: candidate=$candidateId", error)
         scope.launch {
             mutex.withLock {
+                if (deviceRevoked) return@withLock
                 if (candidateId == activeCandidate) scheduleReconnect(error.message ?: "连接失败")
             }
         }
@@ -1421,6 +1594,8 @@ class RealtimeSession(
 
     private suspend fun handleEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
         if (candidateId.generation != currentGeneration()) return
+        if (candidateId.generation in revokedGenerations || deviceRevoked) return
+        if (!socket.isGenerationCurrent(candidateId.generation)) return
         if (activeCandidate != null && candidateId != activeCandidate) return
         when (envelope.type) {
             "server.challenge" -> handleChallenge(candidateId, envelope)
@@ -1517,6 +1692,12 @@ class RealtimeSession(
     }
 
     private suspend fun handleAuthAccepted(candidateId: SocketCandidateId, envelope: WireEnvelope) {
+        if (
+            candidateId.generation != currentGeneration() ||
+            candidateId.generation in revokedGenerations ||
+            deviceRevoked ||
+            !socket.isGenerationCurrent(candidateId.generation)
+        ) return
         require(candidateId in challengedCandidates) { "auth.accepted arrived before a verified challenge" }
         require(envelope.kind == WireKind.CONTROL) { "auth.accepted must be a control frame" }
         val accepted = ProtocolCodec.decodePayload<AuthAcceptedPayload>(envelope.payload)
@@ -1566,6 +1747,7 @@ class RealtimeSession(
         )
         armPhaseDeadline(candidateId.generation, ConnectionDeadlinePhase.SYNC)
         database.outbox().resetInFlight(currentProfile.serverId)
+        mobileWebUi.onAuthenticated(currentProfile.serverId)
     }
 
     private suspend fun handleAuthenticatedFrame(candidateId: SocketCandidateId, envelope: WireEnvelope) {
@@ -1676,6 +1858,7 @@ class RealtimeSession(
                 if (uploads.onReply(envelope)) return
                 if (messageDownloads.onReply(envelope)) return
                 if (pluginUi.onReply(envelope)) return
+                if (mobileWebUi.onReply(envelope)) return
                 if (runtimeInspection.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
                 if (envelope.type == "command.list.ok") {
@@ -1769,10 +1952,24 @@ class RealtimeSession(
                 }
             }
             WireKind.CONTROL -> {
-                require(envelope.type == "plugin.ui.changed") {
-                    "Unexpected authenticated control: ${envelope.type}"
+                when (envelope.type) {
+                    "plugin.ui.changed" -> pluginUi.onCatalogChanged()
+                    MOBILE_WEB_UI_RELEASE_CHANGED -> {
+                        val serverId = requireNotNull(profile).serverId
+                        val hint = decodeMobileWebUiReleaseChangedPayload(envelope.payload)
+                        require(hint.serverId == serverId) {
+                            "WebUI release hint server_id 不匹配"
+                        }
+                        mobileWebUi.onControlHint(serverId)
+                    }
+                    "device.revoked" -> {
+                        handleDeviceRevoked(
+                            currentGeneration(),
+                            decodeDeviceRevocationReason(envelope.payload),
+                        )
+                    }
+                    else -> error("Unexpected authenticated control: ${envelope.type}")
                 }
-                pluginUi.onCatalogChanged()
             }
             else -> error("Unexpected authenticated server frame: ${envelope.kind}")
         }
@@ -2226,23 +2423,35 @@ class RealtimeSession(
     }
 
     private fun connectQr(qr: PairingQrPayload) {
+        if (deviceRevoked) return
         reconnectJob?.cancel()
         resetGenerationState()
-        currentGenerationValue = socket.connectRace(
+        val generation = socket.connectRace(
             qr.lanEndpoints.lanEndpoints(qr.tlsSpkiPins),
             qr.tunnelEndpoints.tunnelEndpoints(),
         )
+        currentGenerationValue = generation
+        if (deviceRevoked || generation in revokedGenerations) {
+            socket.closeGeneration(generation)
+            return
+        }
         networkRecovery.onGenerationStarted(currentGenerationValue, mutableState.value.transferNetwork)
         armPhaseDeadline(currentGenerationValue, ConnectionDeadlinePhase.CHALLENGE)
     }
 
     private fun connectProfile(value: ServerProfileEntity) {
+        if (deviceRevoked) return
         reconnectJob?.cancel()
         resetGenerationState()
         val pins = json.decodeFromString<List<String>>(value.tlsSpkiPinsJson)
         val lan = json.decodeFromString<List<String>>(value.lanEndpointsJson).lanEndpoints(pins)
         val tunnel = json.decodeFromString<List<String>>(value.tunnelEndpointsJson).tunnelEndpoints()
-        currentGenerationValue = socket.connectRace(lan, tunnel)
+        val generation = socket.connectRace(lan, tunnel)
+        currentGenerationValue = generation
+        if (deviceRevoked || generation in revokedGenerations) {
+            socket.closeGeneration(generation)
+            return
+        }
         networkRecovery.onGenerationStarted(currentGenerationValue, mutableState.value.transferNetwork)
         armPhaseDeadline(currentGenerationValue, ConnectionDeadlinePhase.CHALLENGE)
         mutableState.value = mutableState.value.copy(
@@ -2349,7 +2558,15 @@ class RealtimeSession(
     }
 
     private fun scheduleReconnect(message: String) {
+        if (deviceRevoked) {
+            mutableState.value = mutableState.value.copy(
+                connection = mutableState.value.connection.copy(phase = ConnectionPhase.FAILED),
+                errorMessage = "设备配对已撤销：请重新配对",
+            )
+            return
+        }
         cancelPhaseDeadline()
+        mobileWebUi.onDisconnected()
         if (reconnectJob?.isActive == true) return
         val reconnectImmediately = networkRecovery.consume(currentGeneration())
         activeCandidate = null
@@ -2383,7 +2600,87 @@ class RealtimeSession(
         reconnectJob = scope.launch {
             delay(FullJitterBackoff.nextDelayMillis(retryCount))
             mutex.withLock {
+                if (deviceRevoked) return@withLock
                 pendingPairing?.let { connectQr(it.qr) } ?: profile?.let(::connectProfile)
+            }
+        }
+    }
+
+    private suspend fun handleDeviceRevoked(revokedGeneration: Long, reason: String) {
+        if (deviceRevokeCleanupStarted) return
+        val epoch = pendingRevocationEpoch
+        if (epoch != null && revocationEpoch.get() != epoch) return
+        if (pendingRevokedGeneration != null && pendingRevokedGeneration != revokedGeneration) return
+        deviceRevokeCleanupStarted = true
+        deviceRevoked = true
+        pendingRevokedGeneration = revokedGeneration
+        if (pendingRevocationEpoch == null) {
+            pendingRevocationEpoch = revocationEpoch.incrementAndGet()
+        }
+        revokedGenerations += revokedGeneration
+        socket.closeGeneration(revokedGeneration, 4403, "device revoked")
+        reconnectJob?.cancel()
+        reconnectJob = null
+        cancelPhaseDeadline()
+        activeCandidate = null
+        activeEpoch = null
+        ackJob?.cancel()
+        ackJob = null
+        pendingAckCount = 0
+        var revokeError: String? = null
+        try {
+            profile?.serverId?.let { mobileWebUi.revokeServer(it) }
+        } catch (error: IOException) {
+            revokeError = "本地 WebUI 撤销清理失败：${error.message}"
+        } catch (error: SQLiteException) {
+            revokeError = "本地 WebUI 撤销数据库失败：${error.message}"
+        } catch (error: SecurityException) {
+            revokeError = "本地 WebUI 撤销权限失败：${error.message}"
+        }
+        uploads.onDisconnected()
+        downloads.onDisconnected()
+        messageDownloads.onDisconnected()
+        pendingSyncCommands.clear()
+        pendingCommandListId = null
+        pluginUi.onDisconnected("设备配对已撤销")
+        runtimeInspection.onDisconnected()
+        mutableState.value = mutableState.value.copy(
+            connection = mutableState.value.connection.copy(
+                phase = ConnectionPhase.FAILED,
+                lastErrorCode = "device_revoked",
+            ),
+            errorMessage = revokeError ?: "设备配对已撤销：请重新配对${reason.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()}",
+        )
+    }
+
+    /** 在回调获取 session mutex 前锁存撤销状态，阻断重连竞态。 */
+    private fun markDeviceRevokedImmediately(generation: Long): Long? {
+        if (deviceRevoked) {
+            return pendingRevokedGeneration
+                ?.takeIf { it == generation }
+                ?.let { pendingRevocationEpoch }
+        }
+        deviceRevoked = true
+        pendingRevokedGeneration = generation
+        val epoch = revocationEpoch.incrementAndGet()
+        pendingRevocationEpoch = epoch
+        revokedGenerations += generation
+        reconnectJob?.cancel()
+        return epoch
+    }
+
+    private fun enqueueDeviceRevocation(generation: Long, epoch: Long, reason: String) {
+        scope.launch {
+            mutex.withLock {
+                if (!shouldApplyQueuedDeviceRevocation(
+                        currentEpoch = revocationEpoch.get(),
+                        queuedEpoch = epoch,
+                        currentGeneration = currentGeneration(),
+                        queuedGeneration = generation,
+                        ownerGenerationCurrent = socket.isGenerationCurrent(generation),
+                    )
+                ) return@withLock
+                handleDeviceRevoked(generation, reason)
             }
         }
     }
@@ -2391,6 +2688,7 @@ class RealtimeSession(
     /** 停止永久协议错误，并按错误类型隔离或保留当前 outbox。 */
     private suspend fun failProtocolConnection(code: Int, action: TerminalProtocolAction) {
         // 1. 收起当前连接态任务
+        mobileWebUi.onDisconnected()
         reconnectJob?.cancel()
         reconnectJob = null
         cancelPhaseDeadline()
@@ -2484,6 +2782,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pluginUi.onDisconnected("连接已重置")
         runtimeInspection.onDisconnected()
+        mobileWebUi.onDisconnected()
     }
 
     private fun publishTurnState() {
@@ -2557,6 +2856,25 @@ class RealtimeSession(
         payload = payload,
     )
 
+    private fun sendMobileWebUiCommand(type: String, payload: kotlinx.serialization.json.JsonObject): String? {
+        val candidate = activeCandidate ?: return null
+        val epoch = activeEpoch ?: return null
+        val commandId = Ulid.next()
+        val sent = socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = type,
+                id = commandId,
+                connectionEpoch = epoch,
+                payload = payload,
+            ),
+        )
+        return commandId.takeIf { sent }
+    }
+
+    @Volatile
     private var currentGenerationValue = 0L
 
     private fun currentGeneration(): Long = currentGenerationValue
@@ -2577,6 +2895,7 @@ class RealtimeSession(
             "proactive",
             "attachments-v1",
             "history-content-range-v1",
+            MOBILE_WEB_UI_CAPABILITY,
         )
         val LEGACY_HISTORY_FALLBACK_CODES = setOf(
             "invalid_payload",

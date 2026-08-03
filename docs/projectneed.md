@@ -10,7 +10,7 @@
 
 ### MOB-OWN-002 移动端拥有客户端能力
 
-本仓库拥有 Android 客户端、WebView 容器与原生桥、客户端可靠投递状态、设备侧密钥、协议消费实现、测试和发布工具。共享对话 WebUI 源码由 `akashic-agent/frontend/chat` 拥有；本仓库只消费固定来源和摘要的构建产物。
+本仓库拥有 Android 客户端、WebView 容器与原生桥、客户端可靠投递状态、设备侧密钥、WebUI 下载/校验/缓存/激活、协议消费实现、测试和发布工具。共享对话 WebUI 源码、generation 和当前 Stable/Preview 选择由 `akashic-agent` 拥有；本仓库只消费固定来源、兼容范围和内容摘要，不维护第二份界面源码或服务端发布真相。
 
 ### MOB-OWN-003 核心补丁必须具有通用理由
 
@@ -53,6 +53,14 @@ Room 中从核心重新拉取的会话、消息、turn block 和附件元数据�
 ### MOB-DATA-004 超长历史正文必须完整且可续传恢复
 
 历史消息超过实时事件预算时，移动端仍必须恢复完整 UTF-8 正文，并保持该消息的 thinking、tool block、顺序和身份不变。正文通过当前已认证连接授权的同源 HTTPS Range 分段恢复；已确认的文件偏移跨断线和进程重启保留，只有字节长度与 SHA-256 同时匹配时才替换预览。失败必须保持可重试状态，不得把预览、部分文件或摘要不匹配的内容标记为完整正文。
+
+### MOB-DATA-005 WebUI 缓存只保存可验证的派生界面
+
+每个服务端的 WebUI manifest、blob、verified generation、desired/serving/fallback/attempt marker 和 rejected target 是移动端派生状态，不得进入消息、outbox、草稿、附件、配对或插件表。下载先写 app-private staging，逐项完成 schema、兼容范围、路径、MIME、大小和 SHA-256 校验后才提交 verified generation；同 digest 的重复 path 必须具有相同 size/MIME，partial、orphan 和进程中断都不得变成 ready。`WaitFor(space)` 是 coordinator 持有的进程内协调事实，不得混入业务表或伪装成已下载。
+
+GC 只能删除未被 serving、fallback、当前 ready desired 或 attempting 引用的对象，且只有物理文件删除成功后才能删除 metadata/reference owner；已不属于任何 profile、没有 metadata 且没有同 hash reset journal 的合法 server-hash root，才可作为已删除 profile 的派生 orphan 删除，未知目录必须保留并计入全局预算。物理删除失败必须 fail-loud，不得报告已释放空间。用户执行名称明确的“重置此服务端 UI 缓存”时，owner 必须先取消并等待该服务端的 Resolve/Ensure/Present，持久化绑定 server/Target/fingerprint 的 `<hash>.reset.json`，完成物理缓存删除后才事务减少对应 metadata/reference，并立即回到 embedded baseline。marker、live root 与 trash 的 rename/delete 后必须同步缓存根目录项；同步失败保留 journal/Room owner。重置不自动重下同一 Target；用户必须随后对当前服务端 Target 执行“重新检查”。该动作不得删除其他服务端缓存、配对、密钥、消息、草稿、outbox、阅读位置、附件或插件状态。
+
+manifest/blob 本地验证、删除或 WebUI metadata 写入失败时，WebUI coordinator 必须保留 serving/attempt owner 并暴露可观察错误或有界重试。这类派生 UI 缓存故障不得被当成 realtime 协议错误而断开消息连接。
 
 ## 4. 配对与删除
 
@@ -98,11 +106,15 @@ HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system t
 
 核心为同一条主动消息的实时事件和发送成功后的历史消息提供同一个稳定投递身份。移动端必须优先按该身份合并为一条本地消息；内容与时间匹配只兼容没有稳定身份的旧协议数据，候选不唯一时不得猜测或删除。历史投影尚未到达时，移动端使用该投递身份引用主动消息；历史完成 canonical 化后继续使用服务端 message ID，不把本地临时 ID 发送给核心。
 
+### MOB-XREPO-004 WebUI 发布只消费固定 Core schema
+
+WebUI `ReleaseView`、Target、manifest、短期 ticket 和 HTTPS 资源协议以 Core schema 为唯一真源。本仓库必须固定 source repository、完整 commit/tree、schema path/hash 和实际 provider runtime；不得用 Kotlin 类型、设计文档、浮动分支或本机 checkout 反向定义协议。`release.changed` 只触发新的已认证 Resolve，客户端不得把 hint、sequence、时间或 semver 当作可下载 target 或新旧排序依据。
+
 ## 7. 仓库与安全边界
 
 ### MOB-REPO-001 移动端仓库可独立构建
 
-移动端必须能脱离核心源码 checkout 独立获取依赖、测试、构建和发布。共享 WebUI 以仓库内固定 ZIP、source manifest 和 SHA-256 作为构建输入；仓库不得依赖开发者本机绝对路径或未固定的父仓库状态。
+移动端必须能脱离核心源码 checkout 独立获取依赖、测试、构建和发布。embedded baseline 以仓库内固定 ZIP、source manifest 和 SHA-256 作为 APK 构建输入；服务端 generation 只在应用运行且完成配对认证后写入 app-private cache。Gradle、CI 和发布不得依赖开发者本机绝对路径、未固定父仓库状态或网络下载才能构建 baseline。
 
 ### MOB-SEC-001 公共仓库不保存秘密
 
@@ -130,4 +142,20 @@ Android 客户端只从 `kachofugetsu09/akashic-mobile` 的公开 GitHub 稳定 
 
 ### MOB-UI-002 共享 WebUI 产物必须固定来源并校验
 
-APK 只能打包由干净 `akashic-agent` commit 构建的共享 WebUI ZIP。产物必须记录 source repository、commit、tree 与资产摘要；Gradle 在解包前校验外部 SHA-256 和内嵌 manifest，不匹配时 fail-loud，不从网络、本机父目录或旧 build cache 回退。
+APK embedded baseline 只能打包由干净 `akashic-agent` commit 构建的共享 WebUI ZIP。产物必须记录 source repository、commit、tree 与资产摘要；Gradle 在解包前校验外部 SHA-256 和内嵌 manifest，不匹配时 fail-loud，不从网络、本机父目录或旧 build cache 回退。首个 OTA APK 的 embedded loader 继续只消费现有 ZIP manifest schema 1，远端 OTA parser 只消费 Core 固定的 generation manifest schema 2；baseline 不导入 OTA Room/CAS，两个 schema 不互相 fallback。OTA 更新失败、未配对或离线时继续使用 baseline，不把旧 build cache 或远程页面伪装成 baseline。未来远端 schema 变化必须进入 compatibility gate；保留数据的 APK 强制降级不是受支持恢复路径，且不得以 destructive Room migration 伪装兼容。
+
+### MOB-UI-003 服务端 WebUI 通过 Resolve、Ensure、Present 收敛
+
+已配对客户端只从当前服务端身份读取已认证 `ReleaseView`，在同一认证边界下载 manifest 和按文件摘要寻址的资源，再从本地可信 origin 创建 WebView。客户端只维护 `desired`、`ready(desired)`、`serving` 和 `fallback` 四个事实，并以 `Resolve`、`Ensure`、`Present` 三个幂等动作协调；不得建立把检查、下载、等待页面状态和激活串成一条全局状态机。
+
+Preview 优先于 Stable；一次成功 Resolve 中两者不兼容或不存在时，desired 明确为 embedded baseline。旧 serving 只可维持尚未结束的 UI session，或在 Resolve 因临时网络/认证失败时继续显示，不能反向成为成功 Resolve 的 desired。新 target 取代旧 Ensure，迟到结果用本地 owner token 丢弃；`Present` 不等待网络，只在新 UI session 或用户明确立即应用且原生 `canReplaceUi` 成立时切换。candidate 完成 exact-origin/nonce/generation/协议握手、完整 snapshot、root render 和 visual acknowledgment 前不得取得发送、文件、系统或插件副作用能力。
+
+`Resolve/Ensure` 只能产生 `Ready`、`RetryAfter`、`WaitFor(trigger)` 或 `RejectTarget`。同 Target 进入 `WaitFor(space)` 后，前台、重连和普通 hint 可重新 Resolve 当前选择，但不得重复 prepare/manifest/blob；只有 Target 变化、显式清理、用户明确重试、reset 或 revoke 才解除等待。同 Target 的永久 reject 只能由 Target/兼容指纹变化，或用户对当前 `ReleaseView` 按 Preview→Stable 选出的确切 rejected Target 显式重试解除，不轮询。旧 ReleaseView 遗留的 reject 不得让设置页显示幽灵重试入口，也不得因用户重试新 Target 而被顺带清除。
+
+candidate 由 application/process-scope attempt lease 持有，与已提交 serving 和 asset handler 当前 presentation 分权。Activity 旋转/配置重建时必须继续同一 candidate lease 和 `admission=false`；切换 server 必须在新 server 首帧前同步建立新 UI session。candidate 健康前不得打开系统外链 Activity。若健康窗口中 Resolve 得到不同 Target，立即废止旧 attempt 并恢复已提交 serving/baseline，不得等旧 candidate 超时或自报健康后再处理。
+
+### MOB-UI-004 UI-only 更新与 Android 二进制发行分开
+
+颜色、排版、抽屉、island、组件组合和只调用既有 bridge capability 的交互可以由服务端发布新 WebUI，不要求发布 APK。新增原生系统能力、改变 bridge/snapshot 兼容范围、WebView 生命周期、Room、网络或安全逻辑时仍必须发布 Android binary，并用 manifest `minimum_native_build` 阻止旧版本加载。
+
+GitHub APK 检查、下载、摘要验证、系统安装确认和 `REQUEST_INSTALL_PACKAGES` 继续由现有独立 owner 管理。WebUI OTA 不得自动安装 APK、改变该入口或提前替换为 Google Play 发行策略。

@@ -23,8 +23,12 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PendingMessageNotificationEntity::class,
         PendingTurnStopEntity::class,
         MessageContentTransferEntity::class,
+        MobileWebUiStateEntity::class,
+        MobileWebUiGenerationEntity::class,
+        MobileWebUiBlobEntity::class,
+        MobileWebUiRejectEntity::class,
     ],
-    version = 12,
+    version = 13,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -52,6 +56,8 @@ abstract class AppDatabase : RoomDatabase() {
 
     abstract fun messageContentTransfers(): MessageContentTransferDao
 
+    abstract fun mobileWebUi(): MobileWebUiDao
+
     companion object {
         fun create(context: Context): AppDatabase = Room.databaseBuilder(
             context.applicationContext,
@@ -69,6 +75,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_9_10,
             MIGRATION_10_11,
             MIGRATION_11_12,
+            MIGRATION_12_13,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -365,6 +372,121 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_message_content_transfers_state` ON `message_content_transfers` (`state`)",
+                )
+            }
+        }
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `mobile_webui_state` (
+                        `serverId` TEXT NOT NULL,
+                        `desiredChannel` TEXT NOT NULL,
+                        `desiredTargetKey` TEXT,
+                        `desiredGenerationId` TEXT,
+                        `desiredManifestDigest` TEXT,
+                        `releaseEpoch` TEXT,
+                        `releaseSequence` INTEGER,
+                        `selectionDigest` TEXT,
+                        `servingGenerationId` TEXT,
+                        `fallbackGenerationId` TEXT,
+                        `attemptingGenerationId` TEXT,
+                        `attemptingNonce` TEXT,
+                        `attemptingStartedAt` INTEGER,
+                        `lastHealthyAt` INTEGER,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`serverId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `mobile_webui_generations` (
+                        `serverId` TEXT NOT NULL,
+                        `generationId` TEXT NOT NULL,
+                        `targetKey` TEXT NOT NULL,
+                        `manifestDigest` TEXT NOT NULL,
+                        `manifestPath` TEXT NOT NULL,
+                        `entrypoint` TEXT NOT NULL,
+                        `bridgeProtocolMin` INTEGER NOT NULL,
+                        `bridgeProtocolMax` INTEGER NOT NULL,
+                        `snapshotProtocolMin` INTEGER NOT NULL,
+                        `snapshotProtocolMax` INTEGER NOT NULL,
+                        `minimumNativeBuild` INTEGER NOT NULL,
+                        `platformsJson` TEXT NOT NULL,
+                        `sourceRepository` TEXT NOT NULL,
+                        `sourceCommit` TEXT NOT NULL,
+                        `sourceTree` TEXT NOT NULL,
+                        `inputDigest` TEXT NOT NULL,
+                        `buildContextDigest` TEXT NOT NULL,
+                        `dirtyProvenanceJson` TEXT,
+                        `reproducible` INTEGER NOT NULL,
+                        `builderIdentityJson` TEXT NOT NULL,
+                        `unpackedSizeBytes` INTEGER NOT NULL,
+                        `fileCount` INTEGER NOT NULL,
+                        `verifiedAt` INTEGER NOT NULL,
+                        `lastUsedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`serverId`, `generationId`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_generations_serverId` " +
+                        "ON `mobile_webui_generations` (`serverId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_generations_manifestDigest` " +
+                        "ON `mobile_webui_generations` (`manifestDigest`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_generations_lastUsedAt` " +
+                        "ON `mobile_webui_generations` (`lastUsedAt`)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `mobile_webui_blobs` (
+                        `serverId` TEXT NOT NULL,
+                        `sha256` TEXT NOT NULL,
+                        `bytes` INTEGER NOT NULL,
+                        `relativePath` TEXT NOT NULL,
+                        `lastUsedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`serverId`, `sha256`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_blobs_serverId` " +
+                        "ON `mobile_webui_blobs` (`serverId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_blobs_lastUsedAt` " +
+                        "ON `mobile_webui_blobs` (`lastUsedAt`)"
+                )
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `mobile_webui_rejects` (
+                        `serverId` TEXT NOT NULL,
+                        `targetKey` TEXT NOT NULL,
+                        `compatibilityFingerprint` TEXT NOT NULL,
+                        `reason` TEXT NOT NULL,
+                        `firstRejectedAt` INTEGER NOT NULL,
+                        `retryAfter` INTEGER,
+                        PRIMARY KEY(`serverId`, `targetKey`, `compatibilityFingerprint`),
+                        FOREIGN KEY(`serverId`) REFERENCES `server_profiles`(`serverId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_rejects_serverId` " +
+                        "ON `mobile_webui_rejects` (`serverId`)"
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_mobile_webui_rejects_retryAfter` " +
+                        "ON `mobile_webui_rejects` (`retryAfter`)"
                 )
             }
         }

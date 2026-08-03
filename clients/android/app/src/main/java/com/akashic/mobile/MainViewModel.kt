@@ -178,6 +178,14 @@ class MainViewModel(
     val pluginUiResults = container.realtimeSession.pluginUi.results
     val runtimeInspection = container.realtimeSession.runtimeInspection.state
     val pluginUiAssetStore = container.pluginUiAssetStore
+    val mobileWebUiStore = container.mobileWebUiStore
+    val mobileWebUiServing = container.mobileWebUiStore.serving
+    val mobileWebUiAttempt = container.mobileWebUiStore.attempt
+    val mobileWebUiReadyGeneration = container.realtimeSession.mobileWebUi.readyGeneration
+    val mobileWebUiResetEvent = container.realtimeSession.mobileWebUi.resetEvent
+    val mobileWebUiWaitForSpace = container.realtimeSession.mobileWebUi.waitForSpace
+    val mobileWebUiRetryAvailable = container.realtimeSession.mobileWebUi.retryAvailable
+    internal val mobileWebUiCoordinator = container.realtimeSession.mobileWebUi
     private val navigationTarget = MutableStateFlow<NavigationTargetUi?>(null)
     private val pendingNotificationTarget = savedStateHandle.getStateFlow<NotificationTargetRequest?>(
         PENDING_NOTIFICATION_TARGET,
@@ -802,6 +810,17 @@ class MainViewModel(
     }
 
     fun restartPairing() = MobileConnectionService.disconnect(getApplication())
+
+    fun onForeground() = container.realtimeSession.onForeground()
+
+    suspend fun collectMobileWebUiGarbage(serverId: String) =
+        container.realtimeSession.collectMobileWebUiGarbage(serverId)
+
+    suspend fun resetMobileWebUi(serverId: String) =
+        container.realtimeSession.resetMobileWebUi(serverId)
+
+    suspend fun retryMobileWebUi(serverId: String) =
+        container.realtimeSession.retryMobileWebUi(serverId)
 
     fun reloadFromServer() = container.realtimeSession.reloadFromServer()
 
