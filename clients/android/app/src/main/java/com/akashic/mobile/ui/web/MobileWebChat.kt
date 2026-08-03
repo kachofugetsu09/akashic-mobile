@@ -96,6 +96,7 @@ private const val MOBILE_WEB_COMMITTED_NONCE = "committed"
 private const val MOBILE_WEB_LOG_TAG = "AkashicMobileWeb"
 private const val MOBILE_WEB_RENDER_DEADLINE_MILLIS = 10_000L
 private const val MOBILE_WEB_RENDERER_RETRY_WINDOW_MILLIS = 5 * 60 * 1_000L
+private const val MOBILE_WEB_MAX_SAFE_INTEGER = 9_007_199_254_740_991L
 private val MOBILE_WEB_ORIGIN: Uri by lazy(LazyThreadSafetyMode.NONE) {
     Uri.parse("https://appassets.androidplatform.net")
 }
@@ -113,7 +114,7 @@ data class MobileSharedTextDraft(
     val revision: Int,
 )
 
-private data class MobileWebUiAttempt(val serverId: String, val generationId: String, val nonce: String)
+internal data class MobileWebUiAttempt(val serverId: String, val generationId: String, val nonce: String)
 private data class MobileWebUiRendererFailure(
     val serverId: String,
     val generationId: String,
@@ -125,6 +126,9 @@ internal fun mobileWebUiLeaseCallbackAllowed(
     currentView: Any?,
     leaseStateCurrent: Boolean,
 ): Boolean = callbackView === currentView && leaseStateCurrent
+
+internal fun mobileWebUiOwnerViewCurrent(currentView: Any?, expectedView: Any): Boolean =
+    currentView === expectedView
 
 internal fun shouldStartMobileWebUiCandidate(
     sessionStarted: Boolean,
@@ -162,6 +166,63 @@ internal fun mobileWebUiHealthReady(
     rootRendered: Boolean,
     healthyReported: Boolean,
 ): Boolean = snapshotDelivered && visualFrameReady && rootRendered && healthyReported
+
+internal fun mobileWebUiActivationResultOwnerMatches(
+    currentServerId: String?,
+    currentAttempt: MobileWebUiAttempt?,
+    currentGeneration: String?,
+    currentGenerationRef: String?,
+    expectedAttempt: MobileWebUiAttempt,
+    currentPresentationEpoch: Long,
+    expectedPresentationEpoch: Long,
+): Boolean = currentServerId == expectedAttempt.serverId &&
+    currentAttempt == expectedAttempt &&
+    currentGeneration == expectedAttempt.generationId &&
+    currentGenerationRef == expectedAttempt.generationId &&
+    currentPresentationEpoch == expectedPresentationEpoch
+
+internal fun mobileWebUiCommittedResultOwnerMatches(
+    currentServerId: String?,
+    currentAttempt: MobileWebUiAttempt?,
+    currentGeneration: String?,
+    currentGenerationRef: String?,
+    expectedServerId: String,
+    expectedGeneration: String,
+    currentPresentationEpoch: Long,
+    expectedPresentationEpoch: Long,
+): Boolean = currentServerId == expectedServerId &&
+    currentAttempt == null &&
+    currentGeneration == expectedGeneration &&
+    currentGenerationRef == expectedGeneration &&
+    currentPresentationEpoch == expectedPresentationEpoch
+
+internal fun mobileWebUiCommittedFailureOwnerMatches(
+    currentServerId: String?,
+    currentServingGeneration: String?,
+    currentAttempt: MobileWebUiAttempt?,
+    currentGeneration: String?,
+    currentGenerationRef: String?,
+    expectedServerId: String,
+    expectedGeneration: String,
+    currentPresentationEpoch: Long,
+    expectedPresentationEpoch: Long,
+): Boolean = currentServingGeneration == expectedGeneration &&
+    mobileWebUiCommittedResultOwnerMatches(
+        currentServerId = currentServerId,
+        currentAttempt = currentAttempt,
+        currentGeneration = currentGeneration,
+        currentGenerationRef = currentGenerationRef,
+        expectedServerId = expectedServerId,
+        expectedGeneration = expectedGeneration,
+        currentPresentationEpoch = currentPresentationEpoch,
+        expectedPresentationEpoch = expectedPresentationEpoch,
+    )
+
+internal fun mobileWebUiReadingPositionOffset(value: Long): Int? =
+    value.takeIf { it in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong() }?.toInt()
+
+internal fun mobileWebUiReadThroughTimestamp(value: Long): Long? =
+    value.takeIf { it in 0L..MOBILE_WEB_MAX_SAFE_INTEGER }
 
 /** 在 Compose 调用 release 前按 WebView identity 保留对应 owner。 */
 internal class MobileWebViewOwnerRegistry<T : Any, O : Any>(
@@ -318,6 +379,12 @@ internal fun MobileWebChat(
         AtomicBoolean(activeAttempt == null)
     }
     val healthCommitStarted = remember { AtomicBoolean(false) }
+    val latestMobileWebUiServerId by rememberUpdatedState(mobileWebUiServerId)
+    val latestMobileWebUiServingGeneration by rememberUpdatedState(mobileWebUiServingGeneration)
+    val latestMobileWebUiPresentationEpoch by rememberUpdatedState(mobileWebUiPresentationEpoch)
+    val latestActiveAttempt by rememberUpdatedState(activeAttempt)
+    val latestActiveGeneration by rememberUpdatedState(activeGeneration)
+    val latestGenerationRef by rememberUpdatedState(generationRef)
     val webViewKey = when {
         activeAttempt != null -> "candidate:${activeAttempt!!.serverId}:${activeAttempt!!.generationId}:${activeAttempt!!.nonce}"
         activeGeneration != null -> "serving:${mobileWebUiServerId}:${activeGeneration}:$rendererRebuildToken"
@@ -533,9 +600,10 @@ internal fun MobileWebChat(
         lastHandledResetEvent = event
     }
 
-    fun failMobileWebUiActivation(reason: String) {
-        val attempt = activeAttempt ?: return
+    fun failMobileWebUiActivation(reason: String, ownerView: WebView) {
+        val attempt = latestActiveAttempt ?: return
         if (!activationFinished.compareAndSet(false, true)) return
+        val expectedPresentationEpoch = latestMobileWebUiPresentationEpoch
         shareScope.launch {
             var fallbackGeneration: String? = null
             var rollbackError: String? = null
@@ -557,6 +625,19 @@ internal fun MobileWebChat(
                 rollbackError = "WebUI 候选界面已隔离，回滚暂不可用：缓存无权访问"
             }
             withContext(Dispatchers.Main) {
+                if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), ownerView)) {
+                    return@withContext
+                }
+                if (!mobileWebUiActivationResultOwnerMatches(
+                        currentServerId = latestMobileWebUiServerId,
+                        currentAttempt = latestActiveAttempt,
+                        currentGeneration = latestActiveGeneration,
+                        currentGenerationRef = latestGenerationRef.get(),
+                        expectedAttempt = attempt,
+                        currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                        expectedPresentationEpoch = expectedPresentationEpoch,
+                    )
+                ) return@withContext
                 if (rollbackError == null) {
                     admissionRef.set(true)
                     activeAttempt = null
@@ -579,11 +660,13 @@ internal fun MobileWebChat(
         reason: String,
         expectedServerId: String? = null,
         expectedGeneration: String? = null,
+        ownerView: WebView,
     ) {
-        if (expectedServerId != null && mobileWebUiServerId != expectedServerId) return
-        val generation = expectedGeneration ?: activeGeneration ?: return
-        val serverId = expectedServerId ?: mobileWebUiServerId ?: return
-        if (expectedGeneration != null && activeGeneration != expectedGeneration) return
+        if (expectedServerId != null && latestMobileWebUiServerId != expectedServerId) return
+        val generation = expectedGeneration ?: latestActiveGeneration ?: return
+        val serverId = expectedServerId ?: latestMobileWebUiServerId ?: return
+        if (expectedGeneration != null && latestActiveGeneration != expectedGeneration) return
+        val expectedPresentationEpoch = latestMobileWebUiPresentationEpoch
         val now = System.currentTimeMillis()
         val previous = rendererFailure?.takeIf {
             it.serverId == serverId && it.generationId == generation
@@ -604,6 +687,20 @@ internal fun MobileWebChat(
                     forceBaseline = false,
                 )
                 withContext(Dispatchers.Main) {
+                    if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), ownerView)) {
+                        return@withContext
+                    }
+                    if (!mobileWebUiCommittedResultOwnerMatches(
+                        currentServerId = latestMobileWebUiServerId,
+                        currentAttempt = latestActiveAttempt,
+                        currentGeneration = latestActiveGeneration,
+                        currentGenerationRef = latestGenerationRef.get(),
+                        expectedServerId = serverId,
+                        expectedGeneration = generation,
+                        currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                        expectedPresentationEpoch = expectedPresentationEpoch,
+                    )
+                    ) return@withContext
                     activeGeneration = fallback
                     generationRef.set(fallback)
                     admissionRef.set(true)
@@ -613,18 +710,63 @@ internal fun MobileWebChat(
             } catch (error: IOException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery storage failed: ${error.message}")
                 withContext(Dispatchers.Main) {
+                    if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), ownerView)) {
+                        return@withContext
+                    }
+                    if (!mobileWebUiCommittedFailureOwnerMatches(
+                        currentServerId = latestMobileWebUiServerId,
+                        currentServingGeneration = latestMobileWebUiServingGeneration,
+                        currentAttempt = latestActiveAttempt,
+                        currentGeneration = latestActiveGeneration,
+                        currentGenerationRef = latestGenerationRef.get(),
+                        expectedServerId = serverId,
+                        expectedGeneration = generation,
+                        currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                        expectedPresentationEpoch = expectedPresentationEpoch,
+                    )
+                    ) return@withContext
                     webReady = false
                     webLoadError = "WebUI 回滚暂不可用：${error.message.orEmpty()}"
                 }
             } catch (error: android.database.sqlite.SQLiteException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery database failed: ${error.message}")
                 withContext(Dispatchers.Main) {
+                    if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), ownerView)) {
+                        return@withContext
+                    }
+                    if (!mobileWebUiCommittedFailureOwnerMatches(
+                        currentServerId = latestMobileWebUiServerId,
+                        currentServingGeneration = latestMobileWebUiServingGeneration,
+                        currentAttempt = latestActiveAttempt,
+                        currentGeneration = latestActiveGeneration,
+                        currentGenerationRef = latestGenerationRef.get(),
+                        expectedServerId = serverId,
+                        expectedGeneration = generation,
+                        currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                        expectedPresentationEpoch = expectedPresentationEpoch,
+                    )
+                    ) return@withContext
                     webReady = false
                     webLoadError = "WebUI 回滚暂不可用：本地数据库暂不可用"
                 }
             } catch (error: SecurityException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery permission failed: ${error.message}")
                 withContext(Dispatchers.Main) {
+                    if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), ownerView)) {
+                        return@withContext
+                    }
+                    if (!mobileWebUiCommittedFailureOwnerMatches(
+                        currentServerId = latestMobileWebUiServerId,
+                        currentServingGeneration = latestMobileWebUiServingGeneration,
+                        currentAttempt = latestActiveAttempt,
+                        currentGeneration = latestActiveGeneration,
+                        currentGenerationRef = latestGenerationRef.get(),
+                        expectedServerId = serverId,
+                        expectedGeneration = generation,
+                        currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                        expectedPresentationEpoch = expectedPresentationEpoch,
+                    )
+                    ) return@withContext
                     webReady = false
                     webLoadError = "WebUI 回滚暂不可用：缓存无权访问"
                 }
@@ -782,34 +924,104 @@ internal fun MobileWebChat(
                         isLeaseCurrent = { leaseStillCurrent() },
                         onHealthy = healthy@{
                             val attempt = leaseAttempt ?: return@healthy
-                            if (generationRef.get() != attempt.generationId || activeAttempt?.nonce != attempt.nonce) return@healthy
+                            if (latestMobileWebUiServerId != attempt.serverId ||
+                                latestGenerationRef.get() != attempt.generationId ||
+                                latestActiveAttempt?.nonce != attempt.nonce
+                            ) return@healthy
                             if (!healthCommitStarted.compareAndSet(false, true)) return@healthy
+                            val expectedPresentationEpoch = latestMobileWebUiPresentationEpoch
                             shareScope.launch {
                                 try {
-                                    mobileWebUiCoordinator?.commitHealthy(
+                                    val committed = mobileWebUiCoordinator?.commitHealthy(
                                         attempt.serverId,
                                         attempt.generationId,
                                         attempt.nonce,
-                                    )
+                                    ) ?: false
                                     withContext(Dispatchers.Main) {
+                                        if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), currentWebView)) {
+                                            return@withContext
+                                        }
+                                        if (!mobileWebUiActivationResultOwnerMatches(
+                                                currentServerId = latestMobileWebUiServerId,
+                                                currentAttempt = latestActiveAttempt,
+                                                currentGeneration = latestActiveGeneration,
+                                                currentGenerationRef = latestGenerationRef.get(),
+                                                expectedAttempt = attempt,
+                                                currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                                                expectedPresentationEpoch = expectedPresentationEpoch,
+                                            )
+                                        ) return@withContext
                                         activationFinished.set(true)
                                         admissionRef.set(true)
                                         activeAttempt = null
+                                        if (!committed) {
+                                            activeGeneration = latestMobileWebUiServingGeneration
+                                            generationRef.set(activeGeneration)
+                                            healthCommitStarted.set(false)
+                                        }
                                         webLoadError = null
                                     }
                                 } catch (_: IOException) {
-                                    healthCommitStarted.set(false)
-                                    failMobileWebUiActivation("healthy_storage_retry")
+                                    withContext(Dispatchers.Main) {
+                                        if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), currentWebView)) {
+                                            return@withContext
+                                        }
+                                        if (mobileWebUiActivationResultOwnerMatches(
+                                                currentServerId = latestMobileWebUiServerId,
+                                                currentAttempt = latestActiveAttempt,
+                                                currentGeneration = latestActiveGeneration,
+                                                currentGenerationRef = latestGenerationRef.get(),
+                                                expectedAttempt = attempt,
+                                                currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                                                expectedPresentationEpoch = expectedPresentationEpoch,
+                                            )
+                                        ) {
+                                            healthCommitStarted.set(false)
+                                            failMobileWebUiActivation("healthy_storage_retry", currentWebView)
+                                        }
+                                    }
                                 } catch (_: android.database.sqlite.SQLiteException) {
-                                    healthCommitStarted.set(false)
-                                    failMobileWebUiActivation("healthy_database_retry")
+                                    withContext(Dispatchers.Main) {
+                                        if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), currentWebView)) {
+                                            return@withContext
+                                        }
+                                        if (mobileWebUiActivationResultOwnerMatches(
+                                                currentServerId = latestMobileWebUiServerId,
+                                                currentAttempt = latestActiveAttempt,
+                                                currentGeneration = latestActiveGeneration,
+                                                currentGenerationRef = latestGenerationRef.get(),
+                                                expectedAttempt = attempt,
+                                                currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                                                expectedPresentationEpoch = expectedPresentationEpoch,
+                                            )
+                                        ) {
+                                            healthCommitStarted.set(false)
+                                            failMobileWebUiActivation("healthy_database_retry", currentWebView)
+                                        }
+                                    }
                                 } catch (_: SecurityException) {
-                                    healthCommitStarted.set(false)
-                                    failMobileWebUiActivation("healthy_permission_retry")
+                                    withContext(Dispatchers.Main) {
+                                        if (!mobileWebUiOwnerViewCurrent(webViewOwners.currentView(), currentWebView)) {
+                                            return@withContext
+                                        }
+                                        if (mobileWebUiActivationResultOwnerMatches(
+                                                currentServerId = latestMobileWebUiServerId,
+                                                currentAttempt = latestActiveAttempt,
+                                                currentGeneration = latestActiveGeneration,
+                                                currentGenerationRef = latestGenerationRef.get(),
+                                                expectedAttempt = attempt,
+                                                currentPresentationEpoch = latestMobileWebUiPresentationEpoch,
+                                                expectedPresentationEpoch = expectedPresentationEpoch,
+                                            )
+                                        ) {
+                                            healthCommitStarted.set(false)
+                                            failMobileWebUiActivation("healthy_permission_retry", currentWebView)
+                                        }
+                                    }
                                 }
                             }
                         },
-                        onTimeout = { failMobileWebUiActivation("health_timeout") },
+                        onTimeout = { failMobileWebUiActivation("health_timeout", currentWebView) },
                     )
                     newWebView.apply {
                         settings.javaScriptEnabled = true
@@ -846,16 +1058,26 @@ internal fun MobileWebChat(
                                         if (!leaseStillCurrent(callbackView)) return@post
                                         webLoadError = message
                                     }
-                                    if (candidate) failMobileWebUiActivation("render_failed")
-                                    else recoverCommittedMobileWebUi("render_failed", mobileWebUiServerId, leaseGeneration)
+                                    if (candidate) failMobileWebUiActivation("render_failed", callbackView)
+                                    else recoverCommittedMobileWebUi(
+                                        "render_failed",
+                                        mobileWebUiServerId,
+                                        leaseGeneration,
+                                        callbackView,
+                                    )
                                 }
                             },
                             onRendererGone = {
                                 if (leaseStillCurrent()) {
                                     if (candidate) {
-                                        failMobileWebUiActivation("renderer_terminated")
+                                        failMobileWebUiActivation("renderer_terminated", currentWebView)
                                     } else {
-                                        recoverCommittedMobileWebUi("renderer_repeated", mobileWebUiServerId, leaseGeneration)
+                                        recoverCommittedMobileWebUi(
+                                            "renderer_repeated",
+                                            mobileWebUiServerId,
+                                            leaseGeneration,
+                                            currentWebView,
+                                        )
                                     }
                                 }
                             },
@@ -1109,16 +1331,18 @@ private class MobileWebBridge(
         updatedAt: String,
     ) = dispatch {
         val revision = requireNotNull(updatedAt.toLongOrNull()) { "会话草稿 revision 无效" }
-        require(revision in 1..9_007_199_254_740_991) { "会话草稿 revision 无效" }
+        require(revision in 1..MOBILE_WEB_MAX_SAFE_INTEGER) { "会话草稿 revision 无效" }
         it.onSaveComposerDraft(sessionId, text, replyToMessageId.ifBlank { null }, revision)
     }
 
-    fun saveReadingPosition(sessionId: String, messageId: String, offsetPx: Int) = dispatch {
-        it.onSaveReadingPosition(sessionId, messageId, offsetPx)
+    fun saveReadingPosition(sessionId: String, messageId: String, offsetPx: Long) {
+        val boundedOffset = mobileWebUiReadingPositionOffset(offsetPx) ?: return
+        dispatch { it.onSaveReadingPosition(sessionId, messageId, boundedOffset) }
     }
 
-    fun markSessionReadThrough(sessionId: String, readAtMillis: Long) = dispatch {
-        it.onMarkSessionReadThrough(sessionId, readAtMillis)
+    fun markSessionReadThrough(sessionId: String, readAtMillis: Long) {
+        val boundedTimestamp = mobileWebUiReadThroughTimestamp(readAtMillis) ?: return
+        dispatch { it.onMarkSessionReadThrough(sessionId, boundedTimestamp) }
     }
 
     fun navigationTargetHandled(messageId: String) = dispatch {
@@ -1172,7 +1396,7 @@ private class MobileWebBridge(
         if (
             sessionId.isBlank() ||
             revision == null ||
-            revision !in 1..9_007_199_254_740_991
+            revision !in 1..MOBILE_WEB_MAX_SAFE_INTEGER
         ) {
             reportSendResult(requestId, false)
             return@dispatch
@@ -1435,7 +1659,7 @@ private fun dispatchMobileWebTransport(
         "continueMeteredTransfer" -> bridge.continueMeteredTransfer()
         "retryFailedMessage" -> bridge.retryFailedMessage(string(0))
         "saveComposerDraft" -> bridge.saveComposerDraft(string(0), string(1), string(2), string(3))
-        "saveReadingPosition" -> bridge.saveReadingPosition(string(0), string(1), number(2).toInt())
+        "saveReadingPosition" -> bridge.saveReadingPosition(string(0), string(1), number(2))
         "markSessionReadThrough" -> bridge.markSessionReadThrough(string(0), number(1))
         "navigationTargetHandled" -> bridge.navigationTargetHandled(string(0))
         "retryDownloadedAttachment" -> bridge.retryDownloadedAttachment(string(0))

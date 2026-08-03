@@ -747,57 +747,87 @@ class MobileWebUiStore(
                 }
                 return@withServerLock false
             }
-            val fallbackId = state.fallbackGenerationId
-            val fallback = fallbackId?.let { id ->
-                dao.getGeneration(serverId, id)?.let { generation ->
-                    try {
-                        readVerifiedGeneration(serverId, generation)
-                    } catch (_: IllegalArgumentException) {
-                        null
-                    }
-                }
-            }
-            val nextState = state.copy(
-                servingGenerationId = fallback?.let { fallbackId },
-                fallbackGenerationId = fallback?.let { fallbackId },
-                attemptingGenerationId = null,
-                attemptingNonce = null,
-                attemptingStartedAt = null,
-                updatedAt = System.currentTimeMillis(),
-            )
-            dao.upsertState(nextState)
-            attemptState.value = null
-            setCommittedServing(fallback?.let { Serving(serverId, requireNotNull(fallbackId)) }, fallback)
-            true
+            rollbackAttemptLocked(serverId, state, generationId, nonce)
         }
 
-    suspend fun commitHealthy(serverId: String, generationId: String, nonce: String) =
-        withServerLock(serverId) {
-            val state = requireNotNull(dao.getState(serverId)) { "WebUI state 未初始化" }
-            require(state.attemptingGenerationId == generationId && state.attemptingNonce == nonce) {
-                "WebUI healthy nonce 不匹配"
-            }
-            val generation = requireNotNull(dao.getGeneration(serverId, generationId)) {
-                "WebUI generation 未准备完成"
-            }
-            require(state.desiredGenerationId == generationId && state.desiredTargetKey == generation.targetKey) {
-                "WebUI healthy lease 已不再是当前 desired target"
-            }
-            val manifest = readVerifiedGeneration(serverId, generation)
-            val now = System.currentTimeMillis()
-            val nextState = state.copy(
-                servingGenerationId = generationId,
-                fallbackGenerationId = state.servingGenerationId ?: state.fallbackGenerationId,
-                attemptingGenerationId = null,
-                attemptingNonce = null,
-                attemptingStartedAt = null,
-                lastHealthyAt = now,
-                updatedAt = now,
-            )
-            dao.commitHealthyDurableState(nextState, generationId, now)
+    suspend fun commitHealthy(serverId: String, generationId: String, nonce: String) {
+        check(commitHealthyIfCurrent(serverId, generationId, nonce)) {
+            "WebUI healthy lease 已过期"
+        }
+    }
+
+    /** 在服务端锁内提交仍属于当前候选的健康结果，过期结果只返回 obsolete。 */
+    suspend fun commitHealthyIfCurrent(
+        serverId: String,
+        generationId: String,
+        nonce: String,
+    ): Boolean = withServerLock(serverId) {
+        require(generationId.isNotBlank() && nonce.isNotBlank()) { "WebUI healthy lease 无效" }
+        val state = dao.getState(serverId) ?: return@withServerLock false
+        if (state.attemptingGenerationId != generationId || state.attemptingNonce != nonce) {
+            return@withServerLock false
+        }
+        if (state.desiredGenerationId != generationId) {
+            rollbackAttemptLocked(serverId, state, generationId, nonce)
+            return@withServerLock false
+        }
+        val generation = requireNotNull(dao.getGeneration(serverId, generationId)) {
+            "WebUI generation 未准备完成"
+        }
+        if (state.desiredTargetKey != generation.targetKey) {
+            rollbackAttemptLocked(serverId, state, generationId, nonce)
+            return@withServerLock false
+        }
+        val manifest = readVerifiedGeneration(serverId, generation)
+        val now = System.currentTimeMillis()
+        val nextState = state.copy(
+            servingGenerationId = generationId,
+            fallbackGenerationId = state.servingGenerationId ?: state.fallbackGenerationId,
+            attemptingGenerationId = null,
+            attemptingNonce = null,
+            attemptingStartedAt = null,
+            lastHealthyAt = now,
+            updatedAt = now,
+        )
+        dao.commitHealthyDurableState(nextState, generationId, now)
+        if (attemptState.value == MobileWebUiAttemptLease(serverId, generationId, nonce)) {
             attemptState.value = null
             setCommittedServing(Serving(serverId, generationId), manifest)
         }
+        true
+    }
+
+    private suspend fun rollbackAttemptLocked(
+        serverId: String,
+        state: MobileWebUiStateEntity,
+        generationId: String,
+        nonce: String,
+    ): Boolean {
+        val fallbackId = state.fallbackGenerationId
+        val fallback = fallbackId?.let { id ->
+            dao.getGeneration(serverId, id)?.let { generation ->
+                try {
+                    readVerifiedGeneration(serverId, generation)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
+            }
+        }
+        val nextState = state.copy(
+            servingGenerationId = fallback?.let { fallbackId },
+            fallbackGenerationId = fallback?.let { fallbackId },
+            attemptingGenerationId = null,
+            attemptingNonce = null,
+            attemptingStartedAt = null,
+            updatedAt = System.currentTimeMillis(),
+        )
+        dao.upsertState(nextState)
+        if (attemptState.value == MobileWebUiAttemptLease(serverId, generationId, nonce)) {
+            attemptState.value = null
+            setCommittedServing(fallback?.let { Serving(serverId, requireNotNull(fallbackId)) }, fallback)
+        }
+        return true
+    }
 
     /** 在一个持久化事务中回滚候选并拒绝其精确目标。 */
     suspend fun rollbackAttemptAndReject(

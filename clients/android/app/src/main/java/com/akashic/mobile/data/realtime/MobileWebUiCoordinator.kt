@@ -593,8 +593,8 @@ internal class MobileWebUiCoordinator(
         return nonce
     }
 
-    suspend fun commitHealthy(serverId: String, generationId: String, nonce: String) =
-        store.commitHealthy(serverId, generationId, nonce)
+    suspend fun commitHealthy(serverId: String, generationId: String, nonce: String): Boolean =
+        store.commitHealthyIfCurrent(serverId, generationId, nonce)
 
     suspend fun isAttemptCurrent(serverId: String, generationId: String, nonce: String): Boolean =
         store.isAttemptCurrent(serverId, generationId, nonce)

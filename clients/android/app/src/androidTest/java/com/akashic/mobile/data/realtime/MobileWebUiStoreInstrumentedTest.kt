@@ -1386,6 +1386,51 @@ class MobileWebUiStoreInstrumentedTest {
         coordinatorJob.cancel()
     }
 
+    @Test
+    fun staleHealthyCommitReturnsObsoleteAfterNewNonce() = runBlocking {
+        val manifest = validManifest()
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.ensureEmptyBlob(SERVER_ID, emptyDigest())
+        store.setDesired(SERVER_ID, releaseView(target), target)
+
+        assertTrue(store.openAttempt(SERVER_ID, target.generationId, "nonce-a", FINGERPRINT))
+        assertTrue(store.openAttempt(SERVER_ID, target.generationId, "nonce-b", FINGERPRINT))
+
+        assertFalse(store.commitHealthyIfCurrent(SERVER_ID, target.generationId, "nonce-a"))
+        assertEquals("nonce-b", store.attempt.value?.nonce)
+        assertEquals(target.generationId, store.servingGenerationId())
+        assertTrue(store.commitHealthyIfCurrent(SERVER_ID, target.generationId, "nonce-b"))
+        assertNull(store.attempt.value)
+        assertEquals(target.generationId, store.servingGenerationId())
+    }
+
+    @Test
+    fun staleHealthyCommitRollsBackOwnedCandidateWhenDesiredChanges() = runBlocking {
+        val committed = prepareHealthyGeneration(store)
+        val candidateBytes = "obsolete-candidate".toByteArray()
+        val candidateManifest = manifestWithFile(candidateBytes)
+        val candidate = targetFor(candidateManifest)
+        store.commitManifest(SERVER_ID, candidate, mobileWebUiManifestBytes(candidateManifest))
+        store.setDesired(SERVER_ID, releaseView(candidate), candidate)
+        store.appendBlob(
+            SERVER_ID,
+            contentDigest(candidateBytes),
+            candidateBytes.size.toLong(),
+            0,
+            candidateBytes,
+        )
+        assertTrue(store.openAttempt(SERVER_ID, candidate.generationId, "obsolete", FINGERPRINT))
+
+        store.setDesired(SERVER_ID, releaseView(committed), committed)
+
+        assertFalse(store.commitHealthyIfCurrent(SERVER_ID, candidate.generationId, "obsolete"))
+        assertNull(store.attempt.value)
+        assertEquals(committed.generationId, store.servingGenerationId())
+        assertEquals(committed.generationId, database.mobileWebUi().getState(SERVER_ID)?.servingGenerationId)
+        assertNull(database.mobileWebUi().getState(SERVER_ID)?.attemptingGenerationId)
+    }
+
     private suspend fun prepareHealthyGeneration(
         store: MobileWebUiStore,
         serverId: String = SERVER_ID,
