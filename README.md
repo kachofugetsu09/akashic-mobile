@@ -17,7 +17,7 @@ cd clients/android
 ./test-device-gate.sh
 ```
 
-`protocol/source.json` 固定客户端实现对应的历史协议快照；`runtime-gate/` 另外固定实际验收的核心 revision、tree 和 31 个跨仓库语义场景。两者变化时必须重新运行 runtime contract Gate，不能用浮动分支或本机核心 checkout 代替。
+`protocol/source.json` 固定客户端实现对应的历史协议快照；`runtime-gate/` 另外固定实际验收的核心 revision、tree 和 36 个跨仓库语义场景。两者变化时必须重新运行 runtime contract Gate，不能用浮动分支或本机核心 checkout 代替。
 
 `clients/android/mobile-web/source.json` 固定 embedded baseline 的源码 commit/tree，旁边的 ZIP 与 SHA-256 是 Android 的独立构建输入。只有发布新的 Android binary 时才从已合并且干净的 `akasic-agent` commit 重建并同步这三个文件；服务端 WebUI generation 不反向修改 APK baseline。
 
