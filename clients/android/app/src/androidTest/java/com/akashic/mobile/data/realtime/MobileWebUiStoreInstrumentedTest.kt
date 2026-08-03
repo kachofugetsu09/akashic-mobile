@@ -636,7 +636,7 @@ class MobileWebUiStoreInstrumentedTest {
         val digest = contentDigest(content)
         val prefix = content.copyOf(content.size / 2)
         val partialDirectory = root.resolve(serverHash()).resolve("partials")
-        assertTrue(partialDirectory.mkdirs())
+        assertTrue(partialDirectory.isDirectory || partialDirectory.mkdirs())
         partialDirectory.resolve("$digest.part").writeBytes(prefix)
         partialDirectory.resolve("$digest.meta").writeText(
             "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
