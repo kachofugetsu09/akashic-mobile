@@ -329,7 +329,6 @@ internal class MobileWebUiCoordinator(
         val commandId = sendCommand(MOBILE_WEB_UI_RELEASE_GET, kotlinx.serialization.json.buildJsonObject {})
         if (commandId == null) {
             resolveInFlight = false
-            onError("WebUI 发布检查等待认证连接")
             return
         }
         resolveInFlight = true
@@ -732,7 +731,8 @@ internal class MobileWebUiCoordinator(
                 put("target_key", context.target.targetKey)
             },
         ) ?: run {
-            onError("WebUI 内容授权等待认证连接")
+            // 认证连接尚未可用；丢弃未发送的 Ensure owner，下一次认证会重新 Resolve。
+            ensure = null
             return
         }
         pendingCommandId = commandId

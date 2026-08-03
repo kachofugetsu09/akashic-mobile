@@ -1127,6 +1127,101 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun releaseResolveWaitsForAuthenticationWithoutPublishingError() = runBlocking {
+        var releaseAttempts = 0
+        val errors = mutableListOf<String>()
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { type, _ ->
+                assertEquals(MOBILE_WEB_UI_RELEASE_GET, type)
+                releaseAttempts += 1
+                if (releaseAttempts == 1) null else "release-$releaseAttempts"
+            },
+            startHttp = { },
+            onError = errors::add,
+            onRetryTrigger = { },
+        )
+
+        coordinator.restoreLocal(SERVER_ID)
+        coordinator.resolve(SERVER_ID)
+        assertEquals(1, releaseAttempts)
+        assertTrue(errors.isEmpty())
+
+        coordinator.onDisconnected()
+        coordinator.onAuthenticated(SERVER_ID)
+        assertEquals(2, releaseAttempts)
+        assertTrue(errors.isEmpty())
+        assertTrue(coordinator.onReply(releaseReply("release-2", releaseView(null))))
+        assertTrue(errors.isEmpty())
+        coordinatorJob.cancel()
+    }
+
+    @Test
+    fun contentPrepareWaitsForAuthenticationAndReleasesEnsureOwner() = runBlocking {
+        val target = targetFor(validManifest())
+        var releaseAttempts = 0
+        var prepareAttempts = 0
+        val requests = mutableListOf<MobileWebUiHttpRequest>()
+        val errors = mutableListOf<String>()
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { type, _ ->
+                when (type) {
+                    MOBILE_WEB_UI_RELEASE_GET -> "release-${++releaseAttempts}"
+                    MOBILE_WEB_UI_CONTENT_PREPARE -> {
+                        prepareAttempts += 1
+                        if (prepareAttempts == 1) null else "prepare-$prepareAttempts"
+                    }
+                    else -> error("unexpected WebUI command: $type")
+                }
+            },
+            startHttp = requests::add,
+            onError = errors::add,
+            onRetryTrigger = { },
+        )
+
+        coordinator.restoreLocal(SERVER_ID)
+        coordinator.resolve(SERVER_ID)
+        assertTrue(coordinator.onReply(releaseReply("release-1", releaseView(target))))
+        assertEquals(1, prepareAttempts)
+        assertTrue(errors.isEmpty())
+
+        coordinator.onDisconnected()
+        coordinator.onAuthenticated(SERVER_ID)
+        assertEquals(2, releaseAttempts)
+        assertTrue(coordinator.onReply(releaseReply("release-2", releaseView(target))))
+        assertEquals(2, prepareAttempts)
+        assertTrue(
+            coordinator.onReply(
+                WireEnvelope(
+                    v = WIRE_PROTOCOL_VERSION,
+                    kind = WireKind.REPLY,
+                    type = "$MOBILE_WEB_UI_CONTENT_PREPARE.ok",
+                    id = "prepare-2",
+                    connectionEpoch = 1,
+                    payload = MOBILE_WEB_UI_JSON.encodeToJsonElement(
+                        MobileWebUiContentGrant(
+                            targetKey = target.targetKey,
+                            manifestDigest = target.manifestDigest,
+                            ticket = "ticket",
+                            expiresAt = "2026-08-03T12:00:00Z",
+                        ),
+                    ).jsonObject,
+                ),
+            ),
+        )
+        assertEquals(1, requests.size)
+        assertTrue(errors.isEmpty())
+        coordinatorJob.cancel()
+    }
+
+    @Test
     fun supersededPrepareReplyIsConsumedWithoutFallingIntoGenericDispatch() = runBlocking {
         val target = targetFor(validManifest())
         val commandIds = listOf("release-1", "prepare-1", "release-2")
