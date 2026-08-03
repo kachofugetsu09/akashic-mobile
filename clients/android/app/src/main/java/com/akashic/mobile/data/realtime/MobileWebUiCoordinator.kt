@@ -48,6 +48,11 @@ internal fun classifyMobileWebUiCommandError(code: String?): MobileWebUiCommandA
     else -> MobileWebUiCommandAction.REPORT_UNKNOWN
 }
 
+internal fun pairingRecoveryRequiredAfterCommandError(
+    current: Boolean,
+    code: String?,
+): Boolean = current || code == "capability_required"
+
 /** 在不把错误抛入 realtime owner 的前提下，分类已认证的 WebUI HTTP 响应。 */
 internal fun classifyMobileWebUiHttp(
     kind: String,
@@ -154,6 +159,8 @@ internal class MobileWebUiCoordinator(
 
     private val readyGenerationState = MutableStateFlow<String?>(null)
     val readyGeneration: StateFlow<String?> = readyGenerationState.asStateFlow()
+    private val pairingRecoveryRequiredState = MutableStateFlow(false)
+    val pairingRecoveryRequired: StateFlow<Boolean> = pairingRecoveryRequiredState.asStateFlow()
     private val retryAvailableState = MutableStateFlow(false)
     val retryAvailable: StateFlow<Boolean> = retryAvailableState.asStateFlow()
     private val waitForSpaceState = MutableStateFlow<MobileWebUiSpaceAdmission?>(null)
@@ -163,6 +170,7 @@ internal class MobileWebUiCoordinator(
     val resetEvent: StateFlow<MobileWebUiResetEvent?> = resetEventState.asStateFlow()
 
     suspend fun onAuthenticated(serverId: String) {
+        pairingRecoveryRequiredState.value = false
         if (currentServerId != serverId) {
             resolveInFlight = false
             resolveDirty = false
@@ -329,7 +337,6 @@ internal class MobileWebUiCoordinator(
         val commandId = sendCommand(MOBILE_WEB_UI_RELEASE_GET, kotlinx.serialization.json.buildJsonObject {})
         if (commandId == null) {
             resolveInFlight = false
-            onError("WebUI 发布检查等待认证连接")
             return
         }
         resolveInFlight = true
@@ -385,6 +392,7 @@ internal class MobileWebUiCoordinator(
                     }
                     try {
                         handleReleaseView(view)
+                        pairingRecoveryRequiredState.value = false
                     } catch (error: IOException) {
                         scheduleResolveRetry(currentServerId, "WebUI 本地缓存暂不可用：${error.message}")
                     } catch (error: SQLiteException) {
@@ -732,7 +740,8 @@ internal class MobileWebUiCoordinator(
                 put("target_key", context.target.targetKey)
             },
         ) ?: run {
-            onError("WebUI 内容授权等待认证连接")
+            // 认证连接尚未可用；丢弃未发送的 Ensure owner，下一次认证会重新 Resolve。
+            ensure = null
             return
         }
         pendingCommandId = commandId
@@ -740,6 +749,10 @@ internal class MobileWebUiCoordinator(
     }
 
     private suspend fun handleCommandError(context: EnsureContext?, code: String?, message: String) {
+        pairingRecoveryRequiredState.value = pairingRecoveryRequiredAfterCommandError(
+            pairingRecoveryRequiredState.value,
+            code,
+        )
         when (classifyMobileWebUiCommandError(code)) {
             MobileWebUiCommandAction.RESOLVE_RELEASE -> {
                 ensure = null

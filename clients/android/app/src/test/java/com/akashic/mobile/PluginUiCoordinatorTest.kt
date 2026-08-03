@@ -23,6 +23,49 @@ import org.junit.Test
 
 class PluginUiCoordinatorTest {
     @Test
+    fun pairingRestartClearsActiveCatalogButRetainsCachedArtifacts() = runBlocking {
+        val root = Files.createTempDirectory("plugin-ui-pairing-restart").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val module = "export default { slots: {} };".toByteArray(Charsets.UTF_8)
+            val moduleSha = module.sha256()
+            assets.store(moduleSha, "module", module.toString(Charsets.UTF_8), module.size)
+            val oldCatalog = catalog(
+                revision = "a".repeat(64),
+                items = listOf(catalogItem("observe", moduleSha, module.size)),
+            )
+            val sent = mutableListOf<Pair<String, String>>()
+            val coordinator = coordinator(root, assets, catalogs, sent)
+
+            coordinator.onConnectionReady("old-server")
+            coordinator.onReply(catalogReply(sent.single().second, oldCatalog))
+            assertEquals(oldCatalog.catalogRevision, coordinator.catalog.value.catalogRevision)
+            assertEquals(oldCatalog, catalogs.read("old-server"))
+
+            coordinator.onPairingRestarted()
+
+            assertEquals("", coordinator.catalog.value.catalogRevision)
+            assertEquals(true, coordinator.catalog.value.updating)
+            assertEquals(emptyList<PluginUiWebPlugin>(), coordinator.catalog.value.plugins)
+            assertEquals(oldCatalog, catalogs.read("old-server"))
+            assertEquals(true, assets.contains(moduleSha, "module", module.size))
+
+            coordinator.query(
+                "request-after-repair", "owner", "turn.after_answer", "mobile:one", null,
+                "observe", "health.snapshot", "{}", "none", "old-server",
+            )
+            assertEquals("插件界面尚未就绪", coordinator.results.first().error)
+            assertEquals(listOf("plugin.ui.catalog"), sent.map { it.first })
+
+            coordinator.onConnectionReady("new-server")
+            assertEquals(listOf("plugin.ui.catalog", "plugin.ui.catalog"), sent.map { it.first })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun catalogChangeWhileCatalogPendingDiscardsCachedOldCatalog() {
         val root = Files.createTempDirectory("plugin-ui-catalog-change").toFile()
         try {
@@ -334,6 +377,49 @@ class PluginUiCoordinatorTest {
                 listOf("插件方法名无效", "插件参数超过 64 KiB"),
                 coordinator.results.take(2).toList().map { it.error },
             )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun queryIdentityBoundaryFailuresPublishTerminalErrors() = runBlocking {
+        val root = Files.createTempDirectory("plugin-ui-query-identity-boundary").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val module = "export default { slots: {} };".toByteArray()
+            assets.store(module.sha256(), "module", module.toString(Charsets.UTF_8), module.size)
+            val sent = mutableListOf<Pair<String, String>>()
+            val coordinator = coordinator(root, assets, catalogs, sent)
+            coordinator.onConnectionReady("mobile-lab")
+            coordinator.onReply(
+                catalogReply(
+                    sent.single().second,
+                    catalog(
+                        revision = "1".repeat(64),
+                        items = listOf(catalogItem("observe", module.sha256(), module.size)),
+                    ),
+                ),
+            )
+
+            coordinator.query(
+                "", "owner", "turn.after_answer", "mobile:one", null,
+                "observe", "health.snapshot", "{}", "none", "mobile-lab",
+            )
+            coordinator.query(
+                "request-owner", "x".repeat(129), "turn.after_answer", "mobile:one", null,
+                "observe", "health.snapshot", "{}", "none", "mobile-lab",
+            )
+
+            assertEquals(
+                listOf(
+                    "" to "插件请求 ID 无效",
+                    "request-owner" to "插件 owner ID 无效",
+                ),
+                coordinator.results.take(2).toList().map { it.requestId to it.error },
+            )
+            assertEquals(listOf("plugin.ui.catalog"), sent.map { it.first })
         } finally {
             root.deleteRecursively()
         }

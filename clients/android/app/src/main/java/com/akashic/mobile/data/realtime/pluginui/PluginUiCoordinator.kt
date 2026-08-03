@@ -140,6 +140,18 @@ class PluginUiCoordinator(
         mutableCatalog.value = mutableCatalog.value.copy(updating = true)
     }
 
+    /** 重新配对时隔离旧服务端的内存目录，但保留可重建的本地缓存。 */
+    fun onPairingRestarted() {
+        onDisconnected("进入重新配对")
+        activeScope = null
+        activeCatalog = null
+        mutableCatalog.value = PluginUiWebCatalog(
+            catalogRevision = "",
+            updating = true,
+            plugins = emptyList(),
+        )
+    }
+
     /** 校验 WebView 请求并映射到当前插件 revision。 */
     fun query(
         requestId: String,
@@ -155,7 +167,14 @@ class PluginUiCoordinator(
         transportMode: String = "inline",
     ) {
         // 1. WebView 是外部输入边界
-        if (requestId.length !in 1..128 || ownerId.length !in 1..128) return
+        if (requestId.length !in 1..128) {
+            publishResult(PluginUiWebResult(requestId, error = "插件请求 ID 无效"))
+            return
+        }
+        if (ownerId.length !in 1..128) {
+            publishResult(PluginUiWebResult(requestId, error = "插件 owner ID 无效"))
+            return
+        }
         if (slot !in SLOT_NAMES) {
             publishResult(PluginUiWebResult(requestId, error = "插件 slot 无效"))
             return

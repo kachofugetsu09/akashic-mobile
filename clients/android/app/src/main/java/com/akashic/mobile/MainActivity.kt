@@ -101,6 +101,7 @@ class MainActivity : ComponentActivity() {
                     if (uris.isNotEmpty()) viewModel.addAttachments(uris)
                 }
                 val pendingSave = remember { mutableStateOf<MessageAttachmentUi?>(null) }
+                val notificationNoticeDismissed = rememberSaveable { mutableStateOf(false) }
                 val attachmentSaver = rememberLauncherForActivityResult(
                     ActivityResultContracts.CreateDocument("application/octet-stream"),
                 ) { destination ->
@@ -142,10 +143,14 @@ class MainActivity : ComponentActivity() {
                 val mobileWebUiResetEvent by viewModel.mobileWebUiResetEvent.collectAsStateWithLifecycle()
                 val mobileWebUiWaitForSpace by viewModel.mobileWebUiWaitForSpace.collectAsStateWithLifecycle()
                 val mobileWebUiRetryAvailable by viewModel.mobileWebUiRetryAvailable.collectAsStateWithLifecycle()
+                val pairingRecoveryRequired by viewModel.pairingRecoveryRequired.collectAsStateWithLifecycle()
                 val mobileWebUiApplyGeneration = remember { mutableStateOf<String?>(null) }
                 val mobileWebUiSessionStarted = rememberSaveable { mutableStateOf(false) }
                 val mobileWebUiSessionServerId = rememberSaveable { mutableStateOf<String?>(null) }
                 val mobileWebUiSessionProcessToken = rememberSaveable { mutableStateOf<String?>(null) }
+                val pairingRecoveryNoticeDismissed = rememberSaveable(pairingRecoveryRequired) {
+                    mutableStateOf(false)
+                }
                 val processSessionStarted = mobileWebUiSessionStartedForProcess(
                     savedProcessToken = mobileWebUiSessionProcessToken.value,
                     currentProcessToken = MOBILE_WEB_UI_PROCESS_TOKEN,
@@ -357,12 +362,34 @@ class MainActivity : ComponentActivity() {
                             onRetry = { viewModel.retryIncomingShare(requireNotNull(incomingShare).id) },
                             onDiscard = { viewModel.discardIncomingShare(requireNotNull(incomingShare).id) },
                         )
-                    } else if (!notificationsEnabled.value && notificationPermissionWasRequested()) {
+                    } else if (pairingRecoveryNoticeVisible(
+                            required = pairingRecoveryRequired,
+                            dismissed = pairingRecoveryNoticeDismissed.value,
+                            hasProfile = session.hasProfile,
+                        )
+                    ) {
+                        PairingRecoveryNotice(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 16.dp, vertical = 20.dp),
+                            onRestartPairing = viewModel::restartPairing,
+                            onDismiss = { pairingRecoveryNoticeDismissed.value = true },
+                        )
+                    } else if (notificationPermissionNoticeVisible(
+                            notificationsEnabled = notificationsEnabled.value,
+                            permissionRequested = notificationPermissionWasRequested(),
+                            dismissed = notificationNoticeDismissed.value,
+                        )
+                    ) {
                         NotificationPermissionNotice(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .padding(horizontal = 16.dp, vertical = 20.dp),
-                            onOpenSettings = ::openNotificationSettings,
+                            onOpenSettings = {
+                                notificationNoticeDismissed.value = true
+                                openNotificationSettings()
+                            },
+                            onDismiss = { notificationNoticeDismissed.value = true },
                         )
                     }
                     if (settingsOpen.value) {
@@ -472,8 +499,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openNotificationSettings() {
-        if (!nativeActivityLaunchSucceeded(
-                launch = {
+        val launched = nativeActivityLaunchWithFallback(
+            launches = listOf(
+                {
                     startActivity(
                         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                             data = "package:$packageName".toUri()
@@ -481,9 +509,17 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 },
-                onSuccess = ::markNativeActivityResultLaunched,
-            )
-        ) {
+                {
+                    startActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = "package:$packageName".toUri()
+                        },
+                    )
+                },
+            ),
+            onSuccess = ::markNativeActivityResultLaunched,
+        )
+        if (!launched) {
             Toast.makeText(this, "系统通知设置页面不可用", Toast.LENGTH_SHORT).show()
         }
     }
@@ -579,6 +615,7 @@ private fun IncomingShareNotice(
 private fun NotificationPermissionNotice(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     Snackbar(
         modifier = modifier,
@@ -587,7 +624,35 @@ private fun NotificationPermissionNotice(
                 Text(stringResource(R.string.notification_permission_action))
             }
         },
+        dismissAction = { TextButton(onClick = onDismiss) { Text("关闭") } },
     ) {
         Text(stringResource(R.string.notification_permission_notice))
     }
 }
+
+@Composable
+private fun PairingRecoveryNotice(
+    modifier: Modifier = Modifier,
+    onRestartPairing: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Snackbar(
+        modifier = modifier,
+        action = { TextButton(onClick = onRestartPairing) { Text("重新配对") } },
+        dismissAction = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    ) {
+        Text("当前界面需要更新连接能力，请重新配对后继续")
+    }
+}
+
+internal fun notificationPermissionNoticeVisible(
+    notificationsEnabled: Boolean,
+    permissionRequested: Boolean,
+    dismissed: Boolean,
+): Boolean = !notificationsEnabled && permissionRequested && !dismissed
+
+internal fun pairingRecoveryNoticeVisible(
+    required: Boolean,
+    dismissed: Boolean,
+    hasProfile: Boolean,
+): Boolean = required && hasProfile && !dismissed

@@ -47,7 +47,9 @@
 
 ## 当前配对行为
 
-`RealtimeSession.restartPairing()` 会断开 socket、清空当前运行时 profile 和当前服务器选择，但保留 Room、设备密钥、会话和本地消息。`ServerProfileDao` 只提供查询和 upsert，不暴露整服务器物理删除能力。
+`RealtimeSession.restartPairing()` 会断开 socket、清空当前运行时 profile 和当前服务器选择，但保留 Room、设备密钥、会话、本地消息和按服务端隔离的可重建缓存。进入重新配对时插件进程内 catalog owner 立即清空并停止查询，磁盘 catalog/asset 不删除；新授权只有在历史同步完成后才重新激活当前服务端目录。`ServerProfileDao` 只提供查询和 upsert，不暴露整服务器物理删除能力。
+
+`MobileWebUiCoordinator.pairingRecoveryRequired` 只由服务端 `capability_required` 错误置位。MainActivity 以原生 Material 3 Snackbar 提供“重新配对”，因此 embedded WebUI 或 bridge 自身不可用时仍有恢复路径；普通断线不伪装问题已解决，新认证开始或有效 ReleaseView 成功处理后才清除此状态。
 
 ## 当前跨仓库证据
 
@@ -72,6 +74,23 @@ Core 显式提交 Stable/Preview 后，Android 用当前已认证连接执行 `R
 ```
 
 embedded baseline 永远保留在 APK；远端目标未就绪、离线、不兼容、被拒、激活失败或 renderer 连续失败时，当前会话继续 committed serving，下一边界使用 verified fallback 或 baseline。`4403` 与已认证 `device.revoked` 是唯一绕过普通 session 边界的撤销路径：立即关闭当前 socket generation 和 bridge admission、回 baseline、停止重连，同时保留业务数据与已验证 WebUI cache。
+
+## WebView bridge 完成语义
+
+发送和插件查询是带副作用或占用页面 pending 的交互；在发起 WebView 生命周期仍有效时，原生 bridge 为每个 request 保证一个 terminal result。健康候选只允许握手；如果页面在 candidate、旧 lease、关闭 admission 或主线程队列不可用时请求动作，bridge 立即向发起 WebView 返回失败，不排队、不静默丢弃，也不把旧页面的迟到成功投给新页面。owner release 销毁发起 WebView 时，该页面的 pending 随页面取消，结果不得转投新的 owner。
+
+```text
+WebUI request
+     │
+     ├─ current lease + admission ─▶ native owner ─▶ accepted / rejected
+     │
+     └─ candidate / stale / closed ─────────────────▶ rejected
+                                                        │
+                                                        ▼
+                                           同一发起 WebView 清除 pending
+```
+
+embedded baseline 没有远端 generation，`generationRef=null` 本身就是它的合法代际身份；不能拿字符串 `embedded` 与空 ref 比较后把整条恢复 bridge 判成 stale。普通导航动作仍遵守 exact origin、main frame、nonce、generation 和当前 WebView identity。
 
 ## 历史同步进度
 
