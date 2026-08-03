@@ -14,8 +14,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -67,6 +68,27 @@ internal fun classifyMobileWebUiHttp(
     statusCode in 400..499 -> MobileWebUiHttpAction.RETRY_AFTER
     else -> MobileWebUiHttpAction.RETRY_AFTER
 }
+
+/** Decode only string error codes from an untrusted WebUI HTTP error body. */
+internal fun decodeMobileWebUiHttpErrorCode(body: ByteArray): String? {
+    if (body.isEmpty()) return null
+    return try {
+        val payload = MOBILE_WEB_UI_ERROR_JSON.decodeFromString<JsonObject>(
+            body.toString(Charsets.UTF_8),
+        )
+        jsonStringValue(payload["code"])
+            ?: (payload["error"] as? JsonObject)?.let { error ->
+                jsonStringValue(error["code"])
+            }
+    } catch (_: SerializationException) {
+        null
+    } catch (_: IllegalArgumentException) {
+        null
+    }
+}
+
+private fun jsonStringValue(value: JsonElement?): String? =
+    (value as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 private const val MOBILE_WEB_UI_MAX_RETRIES = 3
 private val MOBILE_WEB_UI_RETRY_BACKOFF_MILLIS = longArrayOf(1_000L, 5_000L, 30_000L)
@@ -978,20 +1000,7 @@ internal class MobileWebUiCoordinator(
     }
 
     private fun mobileWebUiErrorCode(response: MobileWebUiHttpResponse): String? {
-        if (response.body.isEmpty()) return null
-        return try {
-            val payload = MOBILE_WEB_UI_ERROR_JSON.decodeFromString<JsonObject>(
-                response.body.toString(Charsets.UTF_8),
-            )
-            payload["code"]?.jsonPrimitive?.content
-                ?: payload["error"]?.let { value ->
-                    if (value is JsonObject) value["code"]?.jsonPrimitive?.content else null
-                }
-        } catch (_: SerializationException) {
-            null
-        } catch (_: IllegalArgumentException) {
-            null
-        }
+        return decodeMobileWebUiHttpErrorCode(response.body)
     }
 
     private fun contextServer(pending: PendingHttp): String = pending.context.serverId

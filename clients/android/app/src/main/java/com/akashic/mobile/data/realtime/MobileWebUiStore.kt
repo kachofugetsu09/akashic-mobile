@@ -365,10 +365,21 @@ class MobileWebUiStore(
             .toSet()
         val profileRoots = dao.listKnownServerIds().map { it.sha256() }.toSet()
         val knownServerRoots = servers.map { it.sha256() }.toSet()
-        root.listFiles()?.toList().orEmpty()
+        val rootEntries = root.listFiles()?.toList().orEmpty()
+        val resetJournalRoots = rootEntries.mapNotNull { entry ->
+            val hash = when {
+                entry.name.endsWith(".reset.json.tmp") -> entry.name.removeSuffix(".reset.json.tmp")
+                entry.name.endsWith(".reset.json") -> entry.name.removeSuffix(".reset.json")
+                entry.name.endsWith(".reset-trash") -> entry.name.removeSuffix(".reset-trash")
+                else -> null
+            }
+            hash?.takeIf { MOBILE_WEB_UI_SHA256.matches(it) }
+        }.toSet()
+        rootEntries
             .filter {
                 it.isDirectory && MOBILE_WEB_UI_SHA256.matches(it.name) &&
-                    it.name !in profileRoots && it.name !in knownServerRoots
+                    it.name !in profileRoots && it.name !in knownServerRoots &&
+                    it.name !in resetJournalRoots
             }
             .forEach { orphanRoot ->
                 val bytes = orphanRoot.walkTopDown().filter(File::isFile).sumOf(File::length)
@@ -379,11 +390,11 @@ class MobileWebUiStore(
                     unownedFiles += orphanRoot.walkTopDown().count(File::isFile).coerceAtLeast(1)
                 }
             }
-        val rootEntries = root.listFiles()?.toList().orEmpty()
-        val unknownRootFiles = rootEntries
+        val remainingRootEntries = root.listFiles()?.toList().orEmpty()
+        val unknownRootFiles = remainingRootEntries
             .filter { it.isDirectory && MOBILE_WEB_UI_SHA256.matches(it.name) && it.name !in knownServerRoots }
             .sumOf { serverRoot -> serverRoot.walkTopDown().count(File::isFile) }
-        val rootArtifacts = rootEntries
+        val rootArtifacts = remainingRootEntries
             .filter { entry ->
                 entry.name !in knownServerRoots &&
                     !(entry.isDirectory && MOBILE_WEB_UI_SHA256.matches(entry.name))

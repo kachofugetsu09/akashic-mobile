@@ -376,6 +376,35 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun globalGarbageCollectionRetainsRootsOwnedByAnyResetJournal() = runBlocking {
+        val journalSuffixes = listOf(".reset.json", ".reset.json.tmp", ".reset-trash")
+        val hashes = listOf("b", "c", "d").map { it.repeat(64) }
+        val orphanFiles = hashes.map { hash ->
+            val directory = root.resolve(hash).resolve("blobs")
+            assertTrue(directory.mkdirs())
+            directory.resolve(emptyDigest()).apply { writeText("reset-owned") }
+        }
+        hashes.zip(journalSuffixes).forEach { (hash, suffix) ->
+            val journal = root.resolve(hash + suffix)
+            if (suffix == ".reset-trash") {
+                assertTrue(journal.mkdirs())
+                journal.resolve("orphan").writeText("reset-owned")
+            } else {
+                journal.writeText("{}")
+            }
+        }
+
+        val report = store.collectGlobalGarbage(maxBytes = 1)
+
+        orphanFiles.forEach { orphan -> assertTrue(orphan.isFile) }
+        hashes.zip(journalSuffixes).forEach { (hash, suffix) ->
+            assertTrue(root.resolve(hash + suffix).exists())
+        }
+        assertEquals(0L, report.removedBytes)
+        assertTrue(report.unownedFiles > 0)
+    }
+
+    @Test
     fun baselineSelectionClearsRemoteServingOnlyAtNextSessionOwnerAction() = runBlocking {
         val target = prepareHealthyGeneration(store)
         store.setDesired(SERVER_ID, releaseView(null), null)

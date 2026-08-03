@@ -2,6 +2,7 @@ package com.akashic.mobile.data.realtime
 
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Test
 import kotlinx.serialization.json.JsonNull
@@ -11,6 +12,34 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
 class MobileWebUiProtocolTest {
+    @Test
+    fun `HTTP error parser accepts only string codes at the trust boundary`() {
+        assertEquals(
+            "resource_not_found",
+            decodeMobileWebUiHttpErrorCode("""{"code":"resource_not_found"}""".toByteArray()),
+        )
+        assertEquals(
+            "invalid_ticket",
+            decodeMobileWebUiHttpErrorCode("""{"error":{"code":"invalid_ticket"}}""".toByteArray()),
+        )
+
+        listOf(
+            """{"code":{}}""",
+            """{"code":[]}""",
+            """{"code":1}""",
+            """{"code":true}""",
+            """{"code":null}""",
+            """{"error":{"code":{}}}""",
+            """{"error":{"code":[]}}""",
+            "[]",
+            "null",
+            "42",
+            "{\"code\":\"unterminated}",
+        ).forEach { body ->
+            assertNull(body, decodeMobileWebUiHttpErrorCode(body.toByteArray()))
+        }
+    }
+
     @Test
     fun `canonical manifest derives generation and target identity`() {
         val manifest = validManifest()
