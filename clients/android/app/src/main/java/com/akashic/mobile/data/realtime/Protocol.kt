@@ -38,7 +38,7 @@ private class JsonDuplicateKeyScanner(private val text: String) {
             'f' -> parseLiteral("false")
             'n' -> parseLiteral("null")
             '-', in '0'..'9' -> parseNumber()
-            else -> error("JSON value is invalid")
+            else -> throw IllegalArgumentException("JSON value is invalid")
         }
     }
 
@@ -95,7 +95,7 @@ private class JsonDuplicateKeyScanner(private val text: String) {
                 else -> require(char.code >= 0x20) { "JSON string control character" }
             }
         }
-        error("JSON string is unterminated")
+        throw IllegalArgumentException("JSON string is unterminated")
     }
 
     private fun parseLiteral(literal: String) {

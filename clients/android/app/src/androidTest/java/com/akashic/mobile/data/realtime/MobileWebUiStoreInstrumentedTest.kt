@@ -738,7 +738,7 @@ class MobileWebUiStoreInstrumentedTest {
         val partialDirectory = root.resolve(serverHash()).resolve("partials")
         assertTrue(partialDirectory.mkdirs())
         partialDirectory.resolve("$digest.part").writeBytes(content.copyOf(content.size / 2))
-        partialDirectory.resolve("$digest.meta").writeText("{malformed")
+        partialDirectory.resolve("$digest.meta").writeText("garbage")
 
         val admission = store.prepareDownloadSpace(SERVER_ID, manifest, serverBudgetBytes = 1)
 

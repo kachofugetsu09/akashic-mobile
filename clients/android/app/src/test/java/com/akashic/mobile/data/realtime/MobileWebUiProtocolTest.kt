@@ -52,6 +52,15 @@ class MobileWebUiProtocolTest {
     }
 
     @Test
+    fun `duplicate key scanner reports malformed values as argument errors`() {
+        listOf("garbage", "\"unterminated").forEach { raw ->
+            assertThrows(IllegalArgumentException::class.java) {
+                requireNoDuplicateJsonKeys(raw)
+            }
+        }
+    }
+
+    @Test
     fun `canonical manifest derives generation and target identity`() {
         val manifest = validManifest()
         validateMobileWebUiManifest(manifest)
