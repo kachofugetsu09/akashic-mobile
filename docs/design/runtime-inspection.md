@@ -2,9 +2,8 @@
 
 - 状态：current
 - 证据基线：本文所在 Git tree
-- 核心能力提交：`051cf38ea31f93dced3e46abd5c24984705b335f`
-- 核心 tree：`1555c29e67b2f06104fcb406ce58b0aa85af82de`
-- 核心 schema SHA-256：`32a345eacd5971aa6b4b4bbbe7c01b5250c50b0629e6ae5b6688ca77acb35457`
+- 历史能力快照（运行资料查看实现）：Core commit `051cf38ea31f93dced3e46abd5c24984705b335f`、tree `1555c29e67b2f06104fcb406ce58b0aa85af82de`、schema SHA-256 `32a345eacd5971aa6b4b4bbbe7c01b5250c50b0629e6ae5b6688ca77acb35457`
+- 当前 Runtime Contract：以 `protocol/source.json` 与 `runtime-gate/runtime-contract.lock.json` 为准；两者固定当前协议快照、能力/provider commit/tree/schema digest 与场景目录。
 
 本文记录移动端如何只读展示核心拥有的运行资料，不把远端事实复制为移动端权威状态。
 
@@ -77,4 +76,4 @@
 
 ## 固定跨仓库证据
 
-`protocol/source.json` 与 `runtime-gate/runtime-contract.lock.json` 固定上方核心 commit、tree 和 schema digest；`runtime-gate/scenarios.json` 同时登记核心 provider 场景与移动端 consumer 测试。核心提交必须先可从远端获取，移动端 PR 的 Gate 才能重放这组证据。
+`protocol/source.json` 与 `runtime-gate/runtime-contract.lock.json` 固定当前 PR 的协议快照、能力/provider commit、tree、schema digest 与场景目录；`runtime-gate/scenarios.json` 同时登记核心 provider 场景与移动端 consumer 测试。本文开头的核心 commit、tree 和 schema 仅是运行资料查看实现的历史能力快照，不是当前 Gate 锚点。核心提交必须先可从远端获取，移动端 PR 的 Gate 才能重放当前锁定证据。
