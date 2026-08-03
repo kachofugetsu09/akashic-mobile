@@ -17,3 +17,15 @@ internal fun nativeActivityLaunchSucceeded(
     onSuccess()
     return true
 }
+
+/** 按兼容性顺序尝试外部 Activity，首个成功启动后只通知一次展示 owner。 */
+internal fun nativeActivityLaunchWithFallback(
+    launches: List<() -> Unit>,
+    onSuccess: () -> Unit,
+): Boolean {
+    require(launches.isNotEmpty()) { "至少需要一个外部 Activity 启动方式" }
+    for (launch in launches) {
+        if (nativeActivityLaunchSucceeded(launch, onSuccess)) return true
+    }
+    return false
+}

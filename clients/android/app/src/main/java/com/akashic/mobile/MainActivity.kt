@@ -101,6 +101,7 @@ class MainActivity : ComponentActivity() {
                     if (uris.isNotEmpty()) viewModel.addAttachments(uris)
                 }
                 val pendingSave = remember { mutableStateOf<MessageAttachmentUi?>(null) }
+                val notificationNoticeDismissed = rememberSaveable { mutableStateOf(false) }
                 val attachmentSaver = rememberLauncherForActivityResult(
                     ActivityResultContracts.CreateDocument("application/octet-stream"),
                 ) { destination ->
@@ -357,12 +358,21 @@ class MainActivity : ComponentActivity() {
                             onRetry = { viewModel.retryIncomingShare(requireNotNull(incomingShare).id) },
                             onDiscard = { viewModel.discardIncomingShare(requireNotNull(incomingShare).id) },
                         )
-                    } else if (!notificationsEnabled.value && notificationPermissionWasRequested()) {
+                    } else if (notificationPermissionNoticeVisible(
+                            notificationsEnabled = notificationsEnabled.value,
+                            permissionRequested = notificationPermissionWasRequested(),
+                            dismissed = notificationNoticeDismissed.value,
+                        )
+                    ) {
                         NotificationPermissionNotice(
                             modifier = Modifier
                                 .align(Alignment.BottomCenter)
                                 .padding(horizontal = 16.dp, vertical = 20.dp),
-                            onOpenSettings = ::openNotificationSettings,
+                            onOpenSettings = {
+                                notificationNoticeDismissed.value = true
+                                openNotificationSettings()
+                            },
+                            onDismiss = { notificationNoticeDismissed.value = true },
                         )
                     }
                     if (settingsOpen.value) {
@@ -472,8 +482,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openNotificationSettings() {
-        if (!nativeActivityLaunchSucceeded(
-                launch = {
+        val launched = nativeActivityLaunchWithFallback(
+            launches = listOf(
+                {
                     startActivity(
                         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                             data = "package:$packageName".toUri()
@@ -481,9 +492,17 @@ class MainActivity : ComponentActivity() {
                         },
                     )
                 },
-                onSuccess = ::markNativeActivityResultLaunched,
-            )
-        ) {
+                {
+                    startActivity(
+                        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                            data = "package:$packageName".toUri()
+                        },
+                    )
+                },
+            ),
+            onSuccess = ::markNativeActivityResultLaunched,
+        )
+        if (!launched) {
             Toast.makeText(this, "系统通知设置页面不可用", Toast.LENGTH_SHORT).show()
         }
     }
@@ -579,6 +598,7 @@ private fun IncomingShareNotice(
 private fun NotificationPermissionNotice(
     modifier: Modifier = Modifier,
     onOpenSettings: () -> Unit,
+    onDismiss: () -> Unit,
 ) {
     Snackbar(
         modifier = modifier,
@@ -587,7 +607,14 @@ private fun NotificationPermissionNotice(
                 Text(stringResource(R.string.notification_permission_action))
             }
         },
+        dismissAction = { TextButton(onClick = onDismiss) { Text("关闭") } },
     ) {
         Text(stringResource(R.string.notification_permission_notice))
     }
 }
+
+internal fun notificationPermissionNoticeVisible(
+    notificationsEnabled: Boolean,
+    permissionRequested: Boolean,
+    dismissed: Boolean,
+): Boolean = !notificationsEnabled && permissionRequested && !dismissed
