@@ -63,28 +63,40 @@ private data class MobileWebUiResetMarker(
 )
 
 // Android bionic 的各架构头文件定义 O_DIRECTORY 为八进制 040000。
-private const val MOBILE_WEB_UI_O_DIRECTORY = 0x4000
-
 /** 让 reset 根目录的 journal 变更在掉电后仍可恢复。 */
 private fun fsyncMobileWebUiDirectory(directory: File) {
-    // 1. 使用 API 26+ POSIX bridge 打开目录。
+    // 1. 使用 API 26+ POSIX bridge 打开目录，不硬编码架构相关的 O_DIRECTORY。
     val descriptor = try {
         Os.open(
             directory.absolutePath,
-            OsConstants.O_RDONLY or MOBILE_WEB_UI_O_DIRECTORY,
+            OsConstants.O_RDONLY,
             0,
         )
     } catch (error: ErrnoException) {
         throw IOException("无法打开 WebUI reset 根目录进行 fsync: $directory", error)
     }
 
-    // 2. 独立执行 fsync 和 close，并保留首个失败。
+    // 2. 通过 fd 元数据确认打开的对象仍是目录，再执行 fsync。
     var failure: IOException? = null
     try {
-        Os.fsync(descriptor)
-    } catch (error: ErrnoException) {
-        failure = IOException("无法 fsync WebUI reset 根目录: $directory", error)
+        val mode = try {
+            Os.fstat(descriptor).st_mode
+        } catch (error: ErrnoException) {
+            throw IOException("无法检查 WebUI reset 根目录 fd: $directory", error)
+        }
+        if (!OsConstants.S_ISDIR(mode)) {
+            throw IOException("WebUI reset 根目录不是目录: $directory")
+        }
+        try {
+            Os.fsync(descriptor)
+        } catch (error: ErrnoException) {
+            throw IOException("无法 fsync WebUI reset 根目录: $directory", error)
+        }
+    } catch (error: IOException) {
+        failure = error
     }
+
+    // 3. 独立关闭 fd，并保留首个失败。
     try {
         Os.close(descriptor)
     } catch (error: ErrnoException) {

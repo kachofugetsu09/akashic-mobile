@@ -132,6 +132,16 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun resetWithDefaultDirectoryFsyncCompletesOnPrivateRoot() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+
+        store.resetServer(SERVER_ID, manualRejectTarget = target, fingerprint = FINGERPRINT)
+
+        assertEquals("baseline", database.mobileWebUi().getState(SERVER_ID)?.desiredChannel)
+        assertFalse(root.resolve("${serverHash()}.reset.json").exists())
+    }
+
+    @Test
     fun resetRootFsyncFailureLeavesJournalAndRoomOwners() = runBlocking {
         val target = prepareHealthyGeneration(store)
         val failingStore = MobileWebUiStore(
