@@ -1127,6 +1127,64 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun supersededPrepareReplyIsConsumedWithoutFallingIntoGenericDispatch() = runBlocking {
+        val target = targetFor(validManifest())
+        val commandIds = listOf("release-1", "prepare-1", "release-2")
+        var commandIndex = 0
+        val requests = mutableListOf<MobileWebUiHttpRequest>()
+        val errors = mutableListOf<String>()
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> commandIds[commandIndex++] },
+            startHttp = requests::add,
+            onError = errors::add,
+            onRetryTrigger = { },
+        )
+
+        coordinator.restoreLocal(SERVER_ID)
+        coordinator.resolve(SERVER_ID)
+        val unknownReplyError = try {
+            coordinator.onReply(releaseReply("unknown-release", releaseView(null)))
+            null
+        } catch (error: IllegalArgumentException) {
+            error
+        }
+        assertNotNull(unknownReplyError)
+
+        // release.changed 在 release-1 仍解析时到达；owner 必须在启动 release-2 前记住 prepare-1，
+        // 因为它的回复可能稍后才到达。
+        coordinator.onControlHint(SERVER_ID)
+        assertTrue(coordinator.onReply(releaseReply("release-1", releaseView(target))))
+        assertEquals(3, commandIndex)
+
+        val latePrepare = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.REPLY,
+            type = "$MOBILE_WEB_UI_CONTENT_PREPARE.ok",
+            id = "prepare-1",
+            connectionEpoch = 1,
+            payload = JsonObject(emptyMap()),
+        )
+        val staleReplyError = try {
+            coordinator.onReply(latePrepare.copy(type = "$MOBILE_WEB_UI_RELEASE_GET.ok"))
+            null
+        } catch (error: IllegalArgumentException) {
+            error
+        }
+        assertNotNull(staleReplyError)
+        assertTrue(coordinator.onReply(latePrepare))
+        assertTrue(requests.isEmpty())
+        assertTrue(errors.isEmpty())
+
+        assertTrue(coordinator.onReply(releaseReply("release-2", releaseView(null))))
+        assertNull(database.mobileWebUi().getState(SERVER_ID)?.desiredGenerationId)
+        coordinatorJob.cancel()
+    }
+
+    @Test
     fun completePartialSkipsBlobHttpAfterManifestAdmission() = runBlocking {
         val content = "coordinator-complete-part".toByteArray()
         val manifest = manifestWithFile(content)

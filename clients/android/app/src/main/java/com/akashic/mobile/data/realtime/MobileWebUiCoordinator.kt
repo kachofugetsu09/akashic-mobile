@@ -91,6 +91,7 @@ internal fun jsonStringValue(value: JsonElement?): String? =
     (value as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 private const val MOBILE_WEB_UI_MAX_RETRIES = 3
+private const val MAX_SUPERSEDED_COMMANDS = 128
 private val MOBILE_WEB_UI_RETRY_BACKOFF_MILLIS = longArrayOf(1_000L, 5_000L, 30_000L)
 private val MOBILE_WEB_UI_ERROR_JSON = Json {
     ignoreUnknownKeys = true
@@ -135,6 +136,8 @@ internal class MobileWebUiCoordinator(
     private var currentServerId: String? = null
     private var pendingCommandId: String? = null
     private var pendingCommandKind: String? = null
+    // 新一轮 Resolve 或断线取消的命令仍由本 owner 认领其迟到回复。
+    private val supersededCommandKinds = linkedMapOf<String, String>()
     private var ensure: EnsureContext? = null
     private var pendingHttp: PendingHttp? = null
     private var lastReleaseView: MobileWebUiReleaseView? = null
@@ -260,8 +263,7 @@ internal class MobileWebUiCoordinator(
 
     fun onDisconnected() {
         token += 1
-        pendingCommandId = null
-        pendingCommandKind = null
+        abandonPendingCommand()
         pendingHttp = null
         ensure = null
         lastReleaseView = null
@@ -321,8 +323,7 @@ internal class MobileWebUiCoordinator(
         token += 1
         retryJob?.cancel()
         retryJob = null
-        pendingCommandId = null
-        pendingCommandKind = null
+        abandonPendingCommand()
         pendingHttp = null
         ensure = null
         val commandId = sendCommand(MOBILE_WEB_UI_RELEASE_GET, kotlinx.serialization.json.buildJsonObject {})
@@ -339,8 +340,21 @@ internal class MobileWebUiCoordinator(
     /** 把已认证的 WebSocket 回复路由到唯一的 release/prepare owner。 */
     suspend fun onReply(envelope: WireEnvelope): Boolean {
         val id = envelope.id ?: return false
-        if (id != pendingCommandId) return false
-        val kind = pendingCommandKind
+        val supersededKind = supersededCommandKinds[id]
+        if (supersededKind != null) {
+            require(isMobileWebUiReplyFor(supersededKind, envelope.type)) {
+                "WebUI superseded $supersededKind reply type mismatch: ${envelope.type}"
+            }
+            supersededCommandKinds.remove(id)
+            return true
+        }
+        if (id != pendingCommandId) {
+            if (mobileWebUiReplyKind(envelope.type) != null) {
+                throw IllegalArgumentException("WebUI reply id is not owned: $id")
+            }
+            return false
+        }
+        val kind = requireNotNull(pendingCommandKind) { "WebUI pending command kind missing" }
         pendingCommandId = null
         pendingCommandKind = null
         when (kind) {
@@ -1016,8 +1030,7 @@ internal class MobileWebUiCoordinator(
 
     private fun invalidateOwner() {
         token += 1
-        pendingCommandId = null
-        pendingCommandKind = null
+        abandonPendingCommand()
         pendingHttp = null
         ensure = null
         retryJob?.cancel()
@@ -1033,6 +1046,32 @@ internal class MobileWebUiCoordinator(
         resetRecoveryInFlight = false
         readyGenerationState.value = null
     }
+
+    private fun abandonPendingCommand() {
+        val id = pendingCommandId
+        if (id != null) {
+            val kind = requireNotNull(pendingCommandKind) {
+                "WebUI pending command kind missing while abandoning $id"
+            }
+            supersededCommandKinds[id] = kind
+            while (supersededCommandKinds.size > MAX_SUPERSEDED_COMMANDS) {
+                supersededCommandKinds.remove(supersededCommandKinds.entries.first().key)
+            }
+        }
+        pendingCommandId = null
+        pendingCommandKind = null
+    }
+
+    private fun mobileWebUiReplyKind(type: String): String? = when {
+        type == "$MOBILE_WEB_UI_RELEASE_GET.ok" || type == "$MOBILE_WEB_UI_RELEASE_GET.error" ->
+            MOBILE_WEB_UI_RELEASE_GET
+        type == "$MOBILE_WEB_UI_CONTENT_PREPARE.ok" ||
+            type == "$MOBILE_WEB_UI_CONTENT_PREPARE.error" -> MOBILE_WEB_UI_CONTENT_PREPARE
+        else -> null
+    }
+
+    private fun isMobileWebUiReplyFor(kind: String, type: String): Boolean =
+        mobileWebUiReplyKind(type) == kind
 
     private fun compatibilityFingerprint(): String =
         "android-$nativeBuild-$MOBILE_WEB_UI_BRIDGE_PROTOCOL-$MOBILE_WEB_UI_SNAPSHOT_PROTOCOL"
