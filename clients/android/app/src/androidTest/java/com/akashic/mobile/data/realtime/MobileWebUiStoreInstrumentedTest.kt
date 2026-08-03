@@ -691,6 +691,19 @@ class MobileWebUiStoreInstrumentedTest {
         )
 
         val serverB = "server-2"
+        database.serverProfiles().upsert(
+            ServerProfileEntity(
+                serverId = serverB,
+                displayName = "第二台测试电脑",
+                deviceId = "device-b",
+                keyAlias = "alias-b",
+                applicationKeyFingerprint = "fingerprint-b",
+                lanEndpointsJson = "[]",
+                tunnelEndpointsJson = "[]",
+                tlsSpkiPinsJson = "[]",
+                createdAt = 2L,
+            ),
+        )
         val oldContent = "global-old-generation-content".toByteArray()
         val oldManifest = manifestWithFile(oldContent)
         val oldTarget = targetFor(oldManifest, serverB)
