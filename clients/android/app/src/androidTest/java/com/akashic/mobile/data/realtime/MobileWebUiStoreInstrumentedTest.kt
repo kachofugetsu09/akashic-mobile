@@ -9,6 +9,10 @@ import com.akashic.mobile.data.local.ServerProfileEntity
 import java.io.File
 import java.io.IOException
 import java.security.MessageDigest
+import java.util.Base64
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,6 +20,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
+import kotlin.concurrent.thread
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -387,6 +392,43 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun concurrentPresentationReadsOnlyServeMatchingGenerationManifest() = runBlocking {
+        val firstContent = "presentation-a".toByteArray()
+        val secondContent = "presentation-b".toByteArray()
+        val first = prepareHealthyFileGeneration(firstContent)
+        val second = prepareHealthyFileGeneration(secondContent)
+        val firstPath = "${serverHash()}/${first.generationId}/mobile.html"
+        val secondPath = "${serverHash()}/${second.generationId}/mobile.html"
+        val stop = AtomicBoolean(false)
+        val mismatches = AtomicInteger(0)
+        val failure = AtomicReference<Throwable?>(null)
+        val writer = thread(start = true, name = "webui-presentation-writer") {
+            try {
+                runBlocking {
+                    repeat(200) { index ->
+                        val target = if (index % 2 == 0) first else second
+                        store.setDesired(SERVER_ID, releaseView(target), target)
+                        val nonce = "presentation-$index"
+                        assertTrue(store.openAttempt(SERVER_ID, target.generationId, nonce, FINGERPRINT))
+                        store.commitHealthy(SERVER_ID, target.generationId, nonce)
+                    }
+                }
+            } catch (error: Throwable) {
+                failure.set(error)
+            } finally {
+                stop.set(true)
+            }
+        }
+        while (!stop.get()) {
+            assertPresentationBody(firstPath, firstContent, mismatches)
+            assertPresentationBody(secondPath, secondContent, mismatches)
+        }
+        writer.join()
+        failure.get()?.let { throw AssertionError("presentation writer failed", it) }
+        assertEquals(0, mismatches.get())
+    }
+
+    @Test
     fun garbageCollectionRemovesOrphanGenerationWithoutRoomOwner() = runBlocking {
         prepareHealthyGeneration(store)
         val orphan = root.resolve(serverHash()).resolve("generations").resolve("orphan-generation")
@@ -526,6 +568,60 @@ class MobileWebUiStoreInstrumentedTest {
         assertTrue(allowed.allowed)
         store.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
         assertTrue(store.hasBlob(SERVER_ID, contentDigest(content), content.size.toLong()))
+    }
+
+    @Test
+    fun completeOwnedPartialCountsAsAlreadyDownloadedForSpaceAdmission() = runBlocking {
+        val content = "admission-complete-part".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(content)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(content)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
+        )
+        val occupied = root.walkTopDown().filter(File::isFile).sumOf(File::length)
+
+        val admission = store.prepareDownloadSpace(
+            SERVER_ID,
+            manifest,
+            serverBudgetBytes = occupied,
+            globalBudgetBytes = occupied,
+        )
+
+        assertTrue(admission.allowed)
+        assertEquals(0L, admission.requiredBytes)
+        assertTrue(admission.serverBytes <= occupied)
+        assertTrue(partialDirectory.resolve("$digest.part").isFile)
+    }
+
+    @Test
+    fun corruptCompletePartialIsRemovedBeforeSpaceAdmission() = runBlocking {
+        val expected = "admission-complete-part".toByteArray()
+        val corrupt = expected.copyOf().also { it[0] = 'x'.code.toByte() }
+        val manifest = manifestWithFile(expected)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        val digest = contentDigest(expected)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(corrupt)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${expected.size}}",
+        )
+
+        val admission = store.prepareDownloadSpace(SERVER_ID, manifest, serverBudgetBytes = 1)
+
+        assertFalse(admission.allowed)
+        assertEquals(expected.size.toLong(), admission.requiredBytes)
+        assertEquals("server_budget", admission.blockedReason)
+        assertFalse(partialDirectory.resolve("$digest.part").exists())
+        assertFalse(partialDirectory.resolve("$digest.meta").exists())
     }
 
     @Test
@@ -848,6 +944,81 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun completePartialSkipsBlobHttpAfterManifestAdmission() = runBlocking {
+        val content = "coordinator-complete-part".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        val manifestBytes = mobileWebUiManifestBytes(manifest)
+        val requests = mutableListOf<MobileWebUiHttpRequest>()
+        val commandIds = listOf("release-1", "prepare-1")
+        var commandIndex = 0
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> commandIds[commandIndex++] },
+            startHttp = requests::add,
+            onError = { },
+            onRetryTrigger = { },
+        )
+
+        coordinator.restoreLocal(SERVER_ID)
+        coordinator.resolve(SERVER_ID)
+        assertTrue(coordinator.onReply(releaseReply("release-1", releaseView(target))))
+        assertTrue(
+            coordinator.onReply(
+                WireEnvelope(
+                    v = WIRE_PROTOCOL_VERSION,
+                    kind = WireKind.REPLY,
+                    type = "$MOBILE_WEB_UI_CONTENT_PREPARE.ok",
+                    id = "prepare-1",
+                    connectionEpoch = 1,
+                    payload = MOBILE_WEB_UI_JSON.encodeToJsonElement(
+                        MobileWebUiContentGrant(
+                            targetKey = target.targetKey,
+                            manifestDigest = target.manifestDigest,
+                            ticket = "ticket",
+                            expiresAt = "2026-08-03T12:00:00Z",
+                        ),
+                    ).jsonObject,
+                ),
+            ),
+        )
+        assertEquals(1, requests.size)
+        assertEquals("$MOBILE_WEB_UI_MANIFEST_PATH/${target.manifestDigest}", requests.single().path)
+
+        val digest = contentDigest(content)
+        val partialDirectory = root.resolve(serverHash()).resolve("partials")
+        assertTrue(partialDirectory.mkdirs())
+        partialDirectory.resolve("$digest.part").writeBytes(content)
+        partialDirectory.resolve("$digest.meta").writeText(
+            "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
+        )
+        val manifestDigestHeader = digestHeader(mobileWebUiSha256Hex(manifestBytes))
+        val manifestRequest = requests.single()
+
+        coordinator.onHttpResponse(
+            manifestRequest.requestId,
+            MobileWebUiHttpResponse(
+                statusCode = 200,
+                body = manifestBytes,
+                contentLength = manifestBytes.size.toLong(),
+                contentRange = null,
+                etag = mobileWebUiStrongEtag(target.manifestDigest),
+                contentDigest = manifestDigestHeader,
+                representationDigest = manifestDigestHeader,
+            ),
+        )
+
+        assertEquals(target.generationId, coordinator.readyGeneration.value)
+        assertTrue(store.hasBlob(SERVER_ID, digest, content.size.toLong()))
+        assertEquals(1, requests.size)
+        assertTrue(requests.none { it.blobSha256 != null })
+        coordinatorJob.cancel()
+    }
+
+    @Test
     fun reconnectDoesNotReconcileAwayAProcessOwnedCandidateLease() = runBlocking {
         val coordinatorJob = SupervisorJob()
         val coordinatorScope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined)
@@ -989,6 +1160,24 @@ class MobileWebUiStoreInstrumentedTest {
         return target
     }
 
+    private suspend fun prepareHealthyFileGeneration(content: ByteArray): MobileWebUiTarget {
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+        store.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
+        val nonce = "presentation-initial-${target.generationId}"
+        assertTrue(store.openAttempt(SERVER_ID, target.generationId, nonce, FINGERPRINT))
+        store.commitHealthy(SERVER_ID, target.generationId, nonce)
+        return target
+    }
+
+    private fun assertPresentationBody(path: String, expected: ByteArray, mismatches: AtomicInteger) {
+        val response = store.handlePresentation(path) ?: return
+        val body = requireNotNull(response.data).use { it.readBytes() }
+        if (!body.contentEquals(expected)) mismatches.incrementAndGet()
+    }
+
     private fun targetFor(
         manifest: MobileWebUiManifest,
         serverId: String = SERVER_ID,
@@ -1041,6 +1230,13 @@ class MobileWebUiStoreInstrumentedTest {
 
     private fun contentDigest(content: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(content).joinToString("") { "%02x".format(it) }
+
+    private fun digestHeader(digest: String): String =
+        "sha-256=:${Base64.getEncoder().encodeToString(digest.hexBytes())}:"
+
+    private fun String.hexBytes(): ByteArray = chunked(2)
+        .map { it.toInt(16).toByte() }
+        .toByteArray()
 
     private fun releaseView(target: MobileWebUiTarget?): MobileWebUiReleaseView =
         releaseView(SERVER_ID, target)

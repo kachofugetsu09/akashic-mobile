@@ -119,11 +119,9 @@ class MobileWebUiStore(
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
 
+    /** PathHandler 只读取这一份不可变快照，避免 generation 与 manifest 交叉。 */
     @Volatile
-    private var activeServing: Serving? = null
-
-    @Volatile
-    private var servingManifest: MobileWebUiManifest? = null
+    private var presentation: Presentation? = null
 
     private val servingState = MutableStateFlow<MobileWebUiServing?>(null)
     val serving: StateFlow<MobileWebUiServing?> = servingState.asStateFlow()
@@ -539,7 +537,11 @@ class MobileWebUiStore(
                 else {
                     val blob = blobFile(serverId, file.sha256)
                     if (blob.isFile && blob.length() == file.sizeBytes && blob.sha256() == file.sha256) 0L
-                    else file.sizeBytes
+                    else file.sizeBytes - trustedPartialBytesLocked(
+                        serverId,
+                        file.sha256,
+                        file.sizeBytes,
+                    )
                 }
             }
             val serverBytes = derivedServerBytesLocked(serverId)
@@ -992,9 +994,9 @@ class MobileWebUiStore(
         false
     }
 
-    fun servingServerId(): String? = activeServing?.serverId
+    fun servingServerId(): String? = presentation?.serving?.serverId
 
-    fun servingGenerationId(): String? = activeServing?.generationId
+    fun servingGenerationId(): String? = presentation?.serving?.generationId
 
     /** 只对账派生文件；不触碰业务 Room 行。 */
     suspend fun reconcile(serverId: String) = withServerLock(serverId) {
@@ -1081,7 +1083,9 @@ class MobileWebUiStore(
                     null
                 }
                 if (metadataValue == null || metadataValue.sha256 != digest || digest !in keep ||
-                    metadataValue.bytes !in 0..MOBILE_WEB_UI_MAX_FILE_BYTES || part.length() > metadataValue.bytes
+                    metadataValue.bytes !in 0..MOBILE_WEB_UI_MAX_FILE_BYTES ||
+                    (part.exists() && !part.isFile) || part.length() > metadataValue.bytes ||
+                    (part.isFile && part.length() == metadataValue.bytes && part.sha256() != digest)
                 ) {
                     removedBytes += part.length() + metadata.length()
                     deletePart(part, metadata)
@@ -1201,6 +1205,19 @@ class MobileWebUiStore(
             .filter(File::isFile)
             .sumOf(File::length)
 
+    /** 只把已登记、长度合法的 partial 前缀从本次新增空间中扣除。 */
+    private fun trustedPartialBytesLocked(serverId: String, sha256: String, bytes: Long): Long {
+        val metadata = blobPartMetadata(serverId, sha256)
+        val part = blobPart(serverId, sha256)
+        if (!metadata.isFile || !part.isFile) return 0L
+        val stored = MOBILE_WEB_UI_JSON.decodeFromString<BlobPartMetadata>(metadata.readText())
+        if (stored.sha256 != sha256 || stored.bytes != bytes) return 0L
+        val length = part.length()
+        if (length !in 0L..bytes) return 0L
+        if (length == bytes && part.sha256() != sha256) return 0L
+        return length
+    }
+
     private suspend fun reconcileOrphanGenerations(serverId: String) {
         val generations = dao.listGenerations(serverId).map { it.generationId }.toSet()
         val directory = serverDirectory(serverId).resolve("generations")
@@ -1249,7 +1266,7 @@ class MobileWebUiStore(
             deleteResetTemporaryFile(temporary)
             return
         }
-        if (activeServing?.serverId == serverId || attemptState.value?.serverId == serverId) {
+        if (presentation?.serving?.serverId == serverId || attemptState.value?.serverId == serverId) {
             attemptState.value = null
             setCommittedServing(null, null)
         }
@@ -1367,7 +1384,7 @@ class MobileWebUiStore(
         val markerFile = resetMarkerFile(serverId)
         val trash = resetTrashDirectory(serverId)
         // 1. 接触文件前停止 serving；部分删除不能留下可用的 WebView 目标。
-        if (activeServing?.serverId == serverId || attemptState.value?.serverId == serverId) {
+        if (presentation?.serving?.serverId == serverId || attemptState.value?.serverId == serverId) {
             attemptState.value = null
             setCommittedServing(null, null)
         }
@@ -1403,10 +1420,11 @@ class MobileWebUiStore(
     fun handlePresentation(path: String): WebResourceResponse? {
         val segments = path.split('/', limit = 3)
         if (segments.size != 3) return null
-        val current = activeServing ?: return null
-        if (segments[0] != current.serverId.sha256() || segments[1] != current.generationId) return null
-        val manifest = servingManifest ?: return null
-        return servePath(current, manifest, segments[2])
+        val current = presentation ?: return null
+        if (segments[0] != current.serving.serverId.sha256() || segments[1] != current.serving.generationId) {
+            return null
+        }
+        return servePath(current.serving, current.manifest, segments[2])
     }
 
     private fun servePath(current: Serving, manifest: MobileWebUiManifest, path: String): WebResourceResponse? {
@@ -1489,8 +1507,8 @@ class MobileWebUiStore(
     }
 
     private fun setPresentation(next: Serving?, manifest: MobileWebUiManifest?) {
-        activeServing = next
-        servingManifest = manifest
+        require((next == null) == (manifest == null)) { "WebUI presentation 快照必须成对更新" }
+        presentation = if (next == null) null else Presentation(next, requireNotNull(manifest))
     }
 
     private fun setDurableServing(next: Serving?) {
@@ -1731,6 +1749,8 @@ class MobileWebUiStore(
     private fun String.sha256(): String = toByteArray(Charsets.UTF_8).sha256()
 
     private data class Serving(val serverId: String, val generationId: String)
+
+    private data class Presentation(val serving: Serving, val manifest: MobileWebUiManifest)
 
     @kotlinx.serialization.Serializable
     private data class BlobPartMetadata(val sha256: String, val bytes: Long)
