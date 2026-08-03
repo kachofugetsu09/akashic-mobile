@@ -140,6 +140,18 @@ class PluginUiCoordinator(
         mutableCatalog.value = mutableCatalog.value.copy(updating = true)
     }
 
+    /** 重新配对时隔离旧服务端的内存目录，但保留可重建的本地缓存。 */
+    fun onPairingRestarted() {
+        onDisconnected("进入重新配对")
+        activeScope = null
+        activeCatalog = null
+        mutableCatalog.value = PluginUiWebCatalog(
+            catalogRevision = "",
+            updating = true,
+            plugins = emptyList(),
+        )
+    }
+
     /** 校验 WebView 请求并映射到当前插件 revision。 */
     fun query(
         requestId: String,

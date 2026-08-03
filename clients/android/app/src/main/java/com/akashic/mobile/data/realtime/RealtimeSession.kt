@@ -565,6 +565,7 @@ class RealtimeSession(
                 uploads.onDisconnected()
                 downloads.onDisconnected()
                 messageDownloads.onDisconnected()
+                pluginUi.onPairingRestarted()
                 pendingPairing = null
                 pairingConfirmationGeneration = null
                 profile = null
