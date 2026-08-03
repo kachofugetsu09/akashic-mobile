@@ -2,6 +2,8 @@ package com.akashic.mobile.ui.web
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import com.akashic.mobile.data.realtime.MobileWebUiResetEvent
@@ -9,6 +11,8 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.JsonPrimitive
 
 class MobileNavigationPolicyTest {
+    private data class FakeWebViewOwner(val view: Any)
+
     @Test
     fun androidBackOnlyStaysInActivityWhenWebSurfaceConsumedIt() {
         assertEquals(true, mobileWebBackHandled("true"))
@@ -119,6 +123,65 @@ class MobileNavigationPolicyTest {
 
         assertEquals(1, actionCount)
         assertEquals(1, healthyCount)
+    }
+
+    @Test
+    fun coldCreateRegistersOwnerWithoutReleasingIt() {
+        val released = mutableListOf<FakeWebViewOwner>()
+        val registry = MobileWebViewOwnerRegistry<Any, FakeWebViewOwner>(
+            ownerView = FakeWebViewOwner::view,
+            releaseOwner = released::add,
+        )
+        val owner = FakeWebViewOwner(Any())
+
+        registry.register(owner)
+
+        assertSame(owner.view, registry.currentView())
+        assertTrue(released.isEmpty())
+    }
+
+    @Test
+    fun keySwitchReleasesOnlyOldOwnerAndKeepsReplacementCurrent() {
+        val released = mutableListOf<FakeWebViewOwner>()
+        val registry = MobileWebViewOwnerRegistry<Any, FakeWebViewOwner>(
+            ownerView = FakeWebViewOwner::view,
+            releaseOwner = released::add,
+        )
+        val oldOwner = FakeWebViewOwner(Any())
+        val newOwner = FakeWebViewOwner(Any())
+        registry.register(oldOwner)
+        registry.register(newOwner)
+
+        registry.release(oldOwner.view)
+
+        assertEquals(listOf(oldOwner), released)
+        assertSame(newOwner.view, registry.currentView())
+    }
+
+    @Test
+    fun releasingCurrentOwnerClearsBackOwner() {
+        val released = mutableListOf<FakeWebViewOwner>()
+        val registry = MobileWebViewOwnerRegistry<Any, FakeWebViewOwner>(
+            ownerView = FakeWebViewOwner::view,
+            releaseOwner = released::add,
+        )
+        val owner = FakeWebViewOwner(Any())
+        registry.register(owner)
+
+        registry.release(owner.view)
+
+        assertNull(registry.currentView())
+        assertEquals(listOf(owner), released)
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun releasingUnknownOwnerFailsFast() {
+        val registry = MobileWebViewOwnerRegistry<Any, FakeWebViewOwner>(
+            ownerView = FakeWebViewOwner::view,
+            releaseOwner = {},
+        )
+
+        registry.release(Any())
     }
 
     @Test

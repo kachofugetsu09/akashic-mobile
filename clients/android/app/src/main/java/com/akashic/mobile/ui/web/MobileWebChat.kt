@@ -86,6 +86,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
 import com.akashic.mobile.nativeActivityLaunchSucceeded
+import java.util.IdentityHashMap
 
 private const val MOBILE_WEB_URL = "https://appassets.androidplatform.net/assets/mobile.html"
 private const val MOBILE_WEB_PRESENTATION_PREFIX = "https://appassets.androidplatform.net/mobile-webui/"
@@ -161,6 +162,35 @@ internal fun mobileWebUiHealthReady(
     rootRendered: Boolean,
     healthyReported: Boolean,
 ): Boolean = snapshotDelivered && visualFrameReady && rootRendered && healthyReported
+
+/** 在 Compose 调用 release 前按 WebView identity 保留对应 owner。 */
+internal class MobileWebViewOwnerRegistry<T : Any, O : Any>(
+    private val ownerView: (O) -> T,
+    private val releaseOwner: (O) -> Unit,
+) {
+    private val owners = IdentityHashMap<T, O>()
+    private var currentView: T? = null
+
+    fun register(owner: O) {
+        val view = ownerView(owner)
+        check(owners.put(view, owner) == null) { "WebView owner was registered twice" }
+        currentView = view
+    }
+
+    fun release(view: T) {
+        val owner = checkNotNull(owners.remove(view)) { "Unknown WebView release owner" }
+        releaseOwner(owner)
+        if (currentView === view) currentView = null
+    }
+
+    fun currentView(): T? = currentView
+}
+
+private data class MobileWebUiOwner(
+    val webView: WebView,
+    val healthGate: MobileWebUiHealthGate,
+    val snapshotPump: MobileSnapshotPump,
+)
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -245,6 +275,21 @@ internal fun MobileWebChat(
     var webHistoryActive by remember { mutableStateOf(false) }
     var webReady by remember { mutableStateOf(false) }
     var activeHealthGate by remember { mutableStateOf<MobileWebUiHealthGate?>(null) }
+    val webViewOwners = remember {
+        MobileWebViewOwnerRegistry<WebView, MobileWebUiOwner>(
+            ownerView = MobileWebUiOwner::webView,
+            releaseOwner = { owner ->
+                // 1. 先停掉与该 view 绑定的异步任务和回调
+                owner.healthGate.cancel()
+                WebViewCompat.removeWebMessageListener(owner.webView, MOBILE_WEB_TRANSPORT_NAME)
+                owner.webView.stopLoading()
+                owner.snapshotPump.cancel()
+
+                // 2. 最后销毁已从 Compose 层 release 的 view
+                owner.webView.destroy()
+            },
+        )
+    }
     var sessionStarted by remember(mobileWebUiServerId) {
         mutableStateOf(mobileWebUiSessionStarted)
     }
@@ -698,6 +743,7 @@ internal fun MobileWebChat(
                                         }
                                     }
                                     currentWebView.post {
+                                        if (!leaseStillCurrent()) return@post
                                         currentWebView.evaluateJavascript(
                                             "window.AkashicMobile?.receiveShareResult(" +
                                                 "${JSONObject.quote(requestId)},$launched)",
@@ -718,6 +764,7 @@ internal fun MobileWebChat(
                         reportSendResult = { requestId, accepted ->
                             if (admissionRef.get() || generationRef.get() == null) {
                                 currentWebView.post {
+                                    if (!leaseStillCurrent()) return@post
                                     currentWebView.evaluateJavascript(
                                         "window.AkashicMobile?.receiveSendResult(" +
                                             "${JSONObject.quote(requestId)},$accepted)",
@@ -764,7 +811,6 @@ internal fun MobileWebChat(
                         },
                         onTimeout = { failMobileWebUiActivation("health_timeout") },
                     )
-                    activeHealthGate = healthGate
                     newWebView.apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = false
@@ -782,13 +828,24 @@ internal fun MobileWebChat(
                             assetLoader,
                             onExternalActivityLaunched = onNativeActivityResultLaunched,
                             allowExternalNavigation = mobileExternalNavigationAllowed(candidate),
-                            onMainFrameStarted = { post {
-                                webLoadError = null
-                                webReady = false
-                            } },
+                            isLeaseCurrent = { callbackView -> leaseStillCurrent(callbackView) },
+                            onMainFrameStarted = {
+                                val callbackView = this
+                                if (leaseStillCurrent(callbackView)) {
+                                    callbackView.post {
+                                        if (!leaseStillCurrent(callbackView)) return@post
+                                        webLoadError = null
+                                        webReady = false
+                                    }
+                                }
+                            },
                             onMainFrameError = { message ->
-                                if (leaseStillCurrent()) {
-                                    post { webLoadError = message }
+                                val callbackView = this
+                                if (leaseStillCurrent(callbackView)) {
+                                    callbackView.post {
+                                        if (!leaseStillCurrent(callbackView)) return@post
+                                        webLoadError = message
+                                    }
                                     if (candidate) failMobileWebUiActivation("render_failed")
                                     else recoverCommittedMobileWebUi("render_failed", mobileWebUiServerId, leaseGeneration)
                                 }
@@ -825,12 +882,22 @@ internal fun MobileWebChat(
                             }
                         }
                         webView = this
-                        snapshotPump = MobileSnapshotPump(
+                        val newSnapshotPump = MobileSnapshotPump(
                             this,
                             mediaRegistry,
                             onFirstSnapshot = { healthGate.markSnapshot() },
                         )
-                        pluginUiBridge = PluginUiWebBridge(this)
+                        val newPluginUiBridge = PluginUiWebBridge(this)
+                        snapshotPump = newSnapshotPump
+                        pluginUiBridge = newPluginUiBridge
+                        activeHealthGate = healthGate
+                        webViewOwners.register(
+                            MobileWebUiOwner(
+                                webView = this,
+                                healthGate = healthGate,
+                                snapshotPump = newSnapshotPump,
+                            ),
+                        )
                         loadUrl(
                             if (activeGeneration == null) {
                                 mobileWebUrl(BuildConfig.VERSION_CODE)
@@ -845,6 +912,17 @@ internal fun MobileWebChat(
                         )
                     }
                     newWebView
+                },
+                onRelease = { releasedView ->
+                    webViewOwners.release(releasedView)
+                    if (webView === releasedView) {
+                        webView = null
+                        snapshotPump = null
+                        pluginUiBridge = null
+                        activeHealthGate = null
+                        webHistoryActive = false
+                        webReady = false
+                    }
                 },
             )
         }
@@ -883,6 +961,7 @@ internal fun MobileWebChat(
         if (current == null) {
             onBackAtRoot()
         } else {
+            check(webViewOwners.currentView() === current) { "WebView owner was released" }
             current.evaluateJavascript(
                 "window.AkashicMobile?.navigateBack?.() ?? false",
             ) { result ->
@@ -899,28 +978,10 @@ internal fun MobileWebChat(
     }
     BackHandler(enabled = webHistoryActive) {
         val current = requireNotNull(webView) { "Web history owner is unavailable" }
+        check(webViewOwners.currentView() === current) { "Web history owner was released" }
         check(current.canGoBack()) { "Web history active without a back entry" }
         webHistoryActive = false
         current.goBack()
-    }
-    DisposableEffect(webView) {
-        val current = webView
-        val currentPump = snapshotPump
-        val currentHealthGate = activeHealthGate
-        onDispose {
-            currentHealthGate?.cancel()
-            if (current != null) {
-                WebViewCompat.removeWebMessageListener(current, MOBILE_WEB_TRANSPORT_NAME)
-                current.stopLoading()
-                current.destroy()
-            }
-            currentPump?.cancel()
-            if (webView === current) {
-                snapshotPump = null
-                pluginUiBridge = null
-                activeHealthGate = null
-            }
-        }
     }
     DisposableEffect(Unit) {
         onDispose {
@@ -1426,7 +1487,9 @@ private class MobileWebUiHealthGate(
     }
 
     fun markSnapshot() {
-        if (!enabled || !snapshotDelivered.compareAndSet(false, true)) return
+        if (!enabled || completed.get() || !isLeaseCurrent() ||
+            !snapshotDelivered.compareAndSet(false, true)
+        ) return
         if (callbackPosted.compareAndSet(false, true)) {
             WebViewCompat.postVisualStateCallback(
                 webView,
@@ -1443,7 +1506,7 @@ private class MobileWebUiHealthGate(
     }
 
     fun markHealthy() {
-        if (!enabled || !isLeaseCurrent()) return
+        if (!enabled || completed.get() || !isLeaseCurrent()) return
         healthyReported.set(true)
         if (rootCheckStarted.compareAndSet(false, true)) {
             webView.evaluateJavascript(
@@ -1505,6 +1568,7 @@ private class MobileWebClient(
     private val assetLoader: WebViewAssetLoader,
     private val onExternalActivityLaunched: () -> Unit,
     private val allowExternalNavigation: Boolean,
+    private val isLeaseCurrent: (WebView) -> Boolean,
     private val onMainFrameStarted: WebView.() -> Unit,
     private val onMainFrameError: WebView.(String) -> Unit,
     private val onRendererGone: () -> Unit,
@@ -1513,16 +1577,17 @@ private class MobileWebClient(
 
     override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
         Log.i(MOBILE_WEB_LOG_TAG, "page started: $url")
+        if (!isLeaseCurrent(view)) return
         pageGeneration += 1
         view.onMainFrameStarted()
     }
 
     override fun onPageFinished(view: WebView, url: String) {
         Log.i(MOBILE_WEB_LOG_TAG, "page finished: $url")
-        if (!isMobileWebUrl(url)) return
+        if (!isMobileWebUrl(url) || !isLeaseCurrent(view)) return
         val generation = pageGeneration
         view.postDelayed({
-            if (generation != pageGeneration) return@postDelayed
+            if (generation != pageGeneration || !isLeaseCurrent(view)) return@postDelayed
             view.evaluateJavascript(
                 """document.getElementById('root')?.childElementCount > 0""",
             ) { rendered ->
@@ -1538,7 +1603,7 @@ private class MobileWebClient(
         error: WebResourceErrorCompat,
     ) {
         Log.e(MOBILE_WEB_LOG_TAG, "resource error: ${request.url} ${error.errorCode} ${error.description}")
-        if (request.isForMainFrame || request.isCriticalAppAsset()) {
+        if (isLeaseCurrent(view) && (request.isForMainFrame || request.isCriticalAppAsset())) {
             view.onMainFrameError("资源加载失败: ${request.url.path} (${error.description})")
         }
     }
@@ -1548,7 +1613,7 @@ private class MobileWebClient(
         request: WebResourceRequest,
         errorResponse: WebResourceResponse,
     ) {
-        if (request.isForMainFrame || request.isCriticalAppAsset()) {
+        if (isLeaseCurrent(view) && (request.isForMainFrame || request.isCriticalAppAsset())) {
             Log.e(
                 MOBILE_WEB_LOG_TAG,
                 "critical HTTP error: ${request.url} ${errorResponse.statusCode} ${errorResponse.reasonPhrase}",
@@ -1561,7 +1626,7 @@ private class MobileWebClient(
 
     override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
         Log.e(MOBILE_WEB_LOG_TAG, "renderer terminated didCrash=${detail.didCrash()}")
-        onRendererGone()
+        if (isLeaseCurrent(view)) onRendererGone()
         return true
     }
 
@@ -1588,6 +1653,7 @@ private class MobileWebClient(
                 url.path?.startsWith("/mobile-webui/") == true)
 
     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+        if (!isLeaseCurrent(view)) return true
         return when (mobileNavigationAction(request.url.toString(), request.isForMainFrame)) {
             MobileNavigationAction.ALLOW_INTERNAL -> false
             MobileNavigationAction.BLOCK -> true
