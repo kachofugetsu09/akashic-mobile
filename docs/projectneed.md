@@ -164,7 +164,7 @@ Preview 优先于 Stable；一次成功 Resolve 中两者不兼容或不存在�
 
 candidate 由 application/process-scope attempt lease 持有，与已提交 serving 和 asset handler 当前 presentation 分权。Activity 旋转/配置重建时必须继续同一 candidate lease 和 `admission=false`；切换 server 必须在新 server 首帧前同步建立新 UI session。candidate 健康前不得打开系统外链 Activity。若健康窗口中 Resolve 得到不同 Target，立即废止旧 attempt 并恢复已提交 serving/baseline，不得等旧 candidate 超时或自报健康后再处理。
 
-WebUI 发起的发送与插件查询必须由当前 WebView owner 收敛为一个明确成功或失败结果。candidate、过期 lease、关闭的 admission 或无法入主线程队列都必须显式拒绝，不能静默丢弃并让页面永久等待；旧 WebView 的迟到成功不得改变新 owner。embedded baseline 使用 `generationRef=null` 作为合法代际身份，必须保留重新配对、设置和发送等恢复 bridge 的可达性。
+WebUI 发起的发送与插件查询，在发起 WebView 生命周期仍有效时，必须由当前 WebView owner 收敛为一个明确成功或失败结果。candidate、过期 lease、关闭的 admission 或无法入主线程队列都必须显式拒绝，不能静默丢弃并让仍存活的页面永久等待；旧 WebView 的迟到成功不得改变新 owner。owner release 销毁发起 WebView 时，该页面的 pending 随页面取消，结果不得转投新的 owner。embedded baseline 使用 `generationRef=null` 作为合法代际身份，必须保留重新配对、设置和发送等恢复 bridge 的可达性。
 
 ### MOB-UI-004 UI-only 更新与 Android 二进制发行分开
 

@@ -77,7 +77,7 @@ embedded baseline 永远保留在 APK；远端目标未就绪、离线、不兼�
 
 ## WebView bridge 完成语义
 
-发送和插件查询是带副作用或占用页面 pending 的交互，原生 bridge 为每个 request 保证一个 terminal result。健康候选只允许握手；如果页面在 candidate、旧 lease、关闭 admission 或主线程队列不可用时请求动作，bridge 立即向发起 WebView 返回失败，不排队、不静默丢弃，也不把旧页面的迟到成功投给新页面。
+发送和插件查询是带副作用或占用页面 pending 的交互；在发起 WebView 生命周期仍有效时，原生 bridge 为每个 request 保证一个 terminal result。健康候选只允许握手；如果页面在 candidate、旧 lease、关闭 admission 或主线程队列不可用时请求动作，bridge 立即向发起 WebView 返回失败，不排队、不静默丢弃，也不把旧页面的迟到成功投给新页面。owner release 销毁发起 WebView 时，该页面的 pending 随页面取消，结果不得转投新的 owner。
 
 ```text
 WebUI request

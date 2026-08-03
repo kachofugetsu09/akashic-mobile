@@ -25,7 +25,7 @@
 11. candidate 由 application/process-scope attempt lease 持有，与已提交 serving 和 asset handler 当前 presentation 分权。Activity 重建不能提升 candidate；server switch 必须同步建立新 UI session；candidate 健康前 bridge 副作用和系统外链均关闭。健康窗口中 desired Target 变化时立即废止旧 attempt 并恢复已提交 serving/baseline。
 12. 保存源码、构建成功、文件 watcher 或重启 Core 都不改变 `ReleaseView`。Stable、Preview、清除、提升和回滚必须由名称明确的发布命令提交；客户端只消费提交后的选择。
 13. capability 是配对声明的一部分。首个需要 `mobile-webui-ota-v1` 的 Android binary 对旧授权执行一次显式重新配对，不由服务端按版本号补写设备记录；重新配对保留业务数据与按服务端隔离的可重建缓存。未来连接级 renegotiation 另立协议合同。
-14. WebUI 的发送和插件查询采用 terminal receipt：当前 owner 接受或拒绝后必须恰好回一个结果。candidate、过期 lease 和关闭 admission 只拒绝副作用，不得静默挂起页面；embedded baseline 的空 generation ref 是合法 owner，必须能执行恢复动作。
+14. WebUI 的发送和插件查询采用 terminal receipt：在发起 WebView 生命周期仍有效时，当前 owner 接受或拒绝后必须恰好回一个结果。candidate、过期 lease 和关闭 admission 只拒绝副作用，不得静默挂起仍存活的页面；owner release 销毁发起 WebView 时，该页面的 pending 随页面取消，结果不得转投新的 owner。embedded baseline 的空 generation ref 是合法 owner，必须能执行恢复动作。
 
 ## 理由
 
