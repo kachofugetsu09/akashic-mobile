@@ -7,6 +7,42 @@ import org.junit.Test
 
 class MobileWebChatSendTest {
     @Test
+    fun candidatePluginQueryReportsErrorWithoutRunningWork() {
+        val errors = mutableListOf<Pair<String, String>>()
+        var dispatchCount = 0
+        var workCount = 0
+
+        mobileWebUiDispatchPluginQuery<Unit>(
+            requestId = "plugin-candidate",
+            isLeaseCurrent = { false },
+            dispatch = { _, _ -> dispatchCount += 1 },
+            work = { workCount += 1 },
+            reportError = { requestId, message -> errors += requestId to message },
+        )
+
+        assertEquals(0, dispatchCount)
+        assertEquals(0, workCount)
+        assertEquals(listOf("plugin-candidate" to "插件界面当前不可用"), errors)
+    }
+
+    @Test
+    fun pluginQueryAdmissionRejectionReportsErrorWithoutRunningWork() {
+        val errors = mutableListOf<Pair<String, String>>()
+        var workCount = 0
+
+        mobileWebUiDispatchPluginQuery<Unit>(
+            requestId = "plugin-admission",
+            isLeaseCurrent = { true },
+            dispatch = { _, reject -> reject() },
+            work = { workCount += 1 },
+            reportError = { requestId, message -> errors += requestId to message },
+        )
+
+        assertEquals(0, workCount)
+        assertEquals(listOf("plugin-admission" to "插件界面当前不可用"), errors)
+    }
+
+    @Test
     fun admissionRejectionReportsFalseWithoutRunningSendWork() {
         val results = mutableListOf<Boolean>()
         var workCount = 0

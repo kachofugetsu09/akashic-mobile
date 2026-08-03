@@ -149,6 +149,29 @@ internal fun <T> mobileWebUiDispatchSend(
     )
 }
 
+/** 在 lease 与 bridge admission 边界上调度插件查询，并把拒绝转换为明确错误。 */
+internal fun <T> mobileWebUiDispatchPluginQuery(
+    requestId: String,
+    isLeaseCurrent: () -> Boolean,
+    dispatch: (((T) -> Unit), () -> Unit) -> Unit,
+    work: (T) -> Unit,
+    reportError: (String, String) -> Unit,
+) {
+    fun reject() = reportError(requestId, "插件界面当前不可用")
+
+    // 1. 过期 lease 不得触发插件副作用
+    if (!isLeaseCurrent()) {
+        reject()
+        return
+    }
+
+    // 2. admission 拒绝必须返回 WebUI 可消费的错误
+    dispatch(
+        { context -> work(context) },
+        ::reject,
+    )
+}
+
 internal fun mobileWebUiLeaseCallbackAllowed(
     callbackView: Any,
     currentView: Any?,
@@ -983,7 +1006,7 @@ internal fun MobileWebChat(
                         },
                         setWebHistoryActive = { active -> currentWebView.post { webHistoryActive = active } },
                         reportSendResult = { callbackView, requestId, accepted ->
-                            callbackView.post {
+                            val deliver = Runnable {
                                 val result = accepted &&
                                     leaseStillCurrent(callbackView) &&
                                     (admissionRef.get() || generationRef.get() == null)
@@ -992,6 +1015,11 @@ internal fun MobileWebChat(
                                         "${JSONObject.quote(requestId)},$result)",
                                     null,
                                 )
+                            }
+                            if (!callbackView.post(deliver) &&
+                                webViewOwners.currentView() === callbackView
+                            ) {
+                                android.os.Handler(android.os.Looper.getMainLooper()).post(deliver)
                             }
                         },
                         reportPluginUiError = { requestId, message ->
@@ -1551,12 +1579,11 @@ private class MobileWebBridge(
         cacheMode: String,
         transportMode: String,
     ) {
-        if (!isLeaseCurrent()) {
-            rejectPluginUiQuery(requestId)
-            return
-        }
-        dispatchPluginUi(
-            { callbacks ->
+        mobileWebUiDispatchPluginQuery(
+            requestId = requestId,
+            isLeaseCurrent = isLeaseCurrent,
+            dispatch = dispatchPluginUi,
+            work = { callbacks ->
                 callbacks.onPluginUiQuery(
                     requestId,
                     ownerId,
@@ -1570,7 +1597,7 @@ private class MobileWebBridge(
                     transportMode,
                 )
             },
-            { rejectPluginUiQuery(requestId) },
+            reportError = { id, message -> reportPluginUiError(id, message) },
         )
     }
 
