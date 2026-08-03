@@ -641,6 +641,10 @@ class MobileWebUiStoreInstrumentedTest {
         partialDirectory.resolve("$digest.meta").writeText(
             "{\"sha256\":\"$digest\",\"bytes\":${content.size}}",
         )
+        val orphanPayload = ByteArray(64 * 1024) { 'x'.code.toByte() }
+        val orphanDigest = contentDigest(orphanPayload)
+        val orphanBlob = root.resolve(serverHash()).resolve("blobs").resolve(orphanDigest)
+        orphanBlob.writeBytes(orphanPayload.copyOf().also { it[0] = 'y'.code.toByte() })
         val oldGeneration = requireNotNull(database.mobileWebUi().getGeneration(SERVER_ID, oldTarget.generationId))
         val oldDirectory = requireNotNull(root.resolve(serverHash()).resolve(oldGeneration.manifestPath).parentFile)
         val oldBlob = root.resolve(serverHash()).resolve("blobs").resolve(emptyDigest())
@@ -651,7 +655,9 @@ class MobileWebUiStoreInstrumentedTest {
         val report = store.collectGarbage(SERVER_ID, maxBytes = budget)
 
         assertTrue(report.removedGenerations > 0)
+        assertTrue(report.unownedFiles > 0)
         assertFalse(oldDirectory.exists())
+        assertTrue(orphanBlob.isFile)
         assertEquals(1, report.removedBlobs)
         val admission = store.prepareDownloadSpace(
             SERVER_ID,
@@ -662,6 +668,10 @@ class MobileWebUiStoreInstrumentedTest {
         assertTrue(admission.allowed)
         assertEquals((content.size - prefix.size).toLong(), admission.requiredBytes)
         assertTrue(admission.serverBytes + admission.requiredBytes <= budget)
+        assertEquals(
+            root.resolve(serverHash()).walkTopDown().filter(File::isFile).sumOf(File::length),
+            admission.serverBytes,
+        )
     }
 
     @Test

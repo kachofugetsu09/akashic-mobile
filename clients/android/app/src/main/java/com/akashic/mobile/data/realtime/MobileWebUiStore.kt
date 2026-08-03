@@ -318,14 +318,8 @@ class MobileWebUiStore(
             state?.attemptingGenerationId,
         )
         val partialRemovedBytes = reconcilePartials(serverId, state ?: baselineState(serverId))
-        val retainedPartialBytes = serverDirectory(serverId).resolve("partials")
-            .walkTopDown()
-            .filter(File::isFile)
-            .sumOf(File::length)
         val generations = dao.listGenerations(serverId).sortedByDescending { it.lastUsedAt }.toMutableList()
-        var totalBytes = generations.sumOf { generationDirectoryBytes(serverId, it.generationId) } +
-            dao.listBlobs(serverId).sumOf { blobFile(serverId, it.sha256).length() } +
-            retainedPartialBytes + orphanGenerations.remainingBytes
+        var totalBytes = derivedServerBytesLocked(serverId)
         var removedGenerations = orphanGenerations.removedGenerations
         var removedBytes = partialRemovedBytes + orphanBlobs.removedBytes + orphanGenerations.removedBytes
         var blockedGenerations = orphanGenerations.blockedGenerations
