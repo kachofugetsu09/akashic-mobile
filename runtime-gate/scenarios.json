@@ -187,6 +187,36 @@
       "provider_test": "tests/mobile_realtime/test_channel.py::test_runtime_document_commands_use_bound_read_service",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/RuntimeInspectionCoordinatorTest.kt",
       "consumer_test": "refreshProjectsAllListsAndOpensMarkdownDetail"
+    },
+    {
+      "id": "mobile-webui-canonical-manifest",
+      "provider_test": "tests/mobile_webui/test_publication.py::test_golden_manifest_and_derived_ids",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MobileWebUiProtocolTest.kt",
+      "consumer_test": "canonical manifest derives generation and target identity"
+    },
+    {
+      "id": "mobile-webui-release-hint-strict",
+      "provider_test": "tests/mobile_webui/test_publication.py::test_webui_commands_and_hint_are_strict",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MobileWebUiProtocolTest.kt",
+      "consumer_test": "release hint decoder requires a valid selection digest"
+    },
+    {
+      "id": "mobile-webui-https-ticket-range",
+      "provider_test": "tests/mobile_webui/test_gateway_http.py::test_webui_http_headers_ranges_and_ticket_lifecycle",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MobileWebUiCoordinatorTest.kt",
+      "consumer_test": "digestHeadersRequireStrongIdentity"
+    },
+    {
+      "id": "mobile-webui-preview-rollback",
+      "provider_test": "tests/mobile_webui/test_publication.py::test_store_preview_promotion_rollback_gc_and_backup",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/realtime/MobileWebUiStoreInstrumentedTest.kt",
+      "consumer_test": "rollbackAndRejectAtomicallyClearsAttemptAndRejectsCandidate"
+    },
+    {
+      "id": "mobile-webui-revoke-offline-recovery",
+      "provider_test": "tests/mobile_webui/test_gateway_runtime.py::test_revoke_device_commits_offline_and_notifies_active_connection",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/realtime/RealtimeWebSocketClientRevocationTest.kt",
+      "consumer_test": "controlRevokeClosesCurrentRaceBeforeLateFramesCanUseIt"
     }
   ]
 }
