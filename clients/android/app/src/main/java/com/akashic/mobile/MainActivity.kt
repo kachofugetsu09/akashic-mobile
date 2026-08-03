@@ -143,10 +143,14 @@ class MainActivity : ComponentActivity() {
                 val mobileWebUiResetEvent by viewModel.mobileWebUiResetEvent.collectAsStateWithLifecycle()
                 val mobileWebUiWaitForSpace by viewModel.mobileWebUiWaitForSpace.collectAsStateWithLifecycle()
                 val mobileWebUiRetryAvailable by viewModel.mobileWebUiRetryAvailable.collectAsStateWithLifecycle()
+                val pairingRecoveryRequired by viewModel.pairingRecoveryRequired.collectAsStateWithLifecycle()
                 val mobileWebUiApplyGeneration = remember { mutableStateOf<String?>(null) }
                 val mobileWebUiSessionStarted = rememberSaveable { mutableStateOf(false) }
                 val mobileWebUiSessionServerId = rememberSaveable { mutableStateOf<String?>(null) }
                 val mobileWebUiSessionProcessToken = rememberSaveable { mutableStateOf<String?>(null) }
+                val pairingRecoveryNoticeDismissed = rememberSaveable(pairingRecoveryRequired) {
+                    mutableStateOf(false)
+                }
                 val processSessionStarted = mobileWebUiSessionStartedForProcess(
                     savedProcessToken = mobileWebUiSessionProcessToken.value,
                     currentProcessToken = MOBILE_WEB_UI_PROCESS_TOKEN,
@@ -357,6 +361,18 @@ class MainActivity : ComponentActivity() {
                                 .padding(horizontal = 16.dp, vertical = 20.dp),
                             onRetry = { viewModel.retryIncomingShare(requireNotNull(incomingShare).id) },
                             onDiscard = { viewModel.discardIncomingShare(requireNotNull(incomingShare).id) },
+                        )
+                    } else if (pairingRecoveryNoticeVisible(
+                            required = pairingRecoveryRequired,
+                            dismissed = pairingRecoveryNoticeDismissed.value,
+                        )
+                    ) {
+                        PairingRecoveryNotice(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 16.dp, vertical = 20.dp),
+                            onRestartPairing = viewModel::restartPairing,
+                            onDismiss = { pairingRecoveryNoticeDismissed.value = true },
                         )
                     } else if (notificationPermissionNoticeVisible(
                             notificationsEnabled = notificationsEnabled.value,
@@ -613,8 +629,26 @@ private fun NotificationPermissionNotice(
     }
 }
 
+@Composable
+private fun PairingRecoveryNotice(
+    modifier: Modifier = Modifier,
+    onRestartPairing: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Snackbar(
+        modifier = modifier,
+        action = { TextButton(onClick = onRestartPairing) { Text("重新配对") } },
+        dismissAction = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    ) {
+        Text("当前界面需要更新连接能力，请重新配对后继续")
+    }
+}
+
 internal fun notificationPermissionNoticeVisible(
     notificationsEnabled: Boolean,
     permissionRequested: Boolean,
     dismissed: Boolean,
 ): Boolean = !notificationsEnabled && permissionRequested && !dismissed
+
+internal fun pairingRecoveryNoticeVisible(required: Boolean, dismissed: Boolean): Boolean =
+    required && !dismissed

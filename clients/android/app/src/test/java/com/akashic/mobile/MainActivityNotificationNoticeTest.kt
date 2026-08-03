@@ -40,4 +40,11 @@ class MainActivityNotificationNoticeTest {
             ),
         )
     }
+
+    @Test
+    fun pairingRecoveryNoticeHasPriorityAndCanBeDismissedForOneState() {
+        assertTrue(pairingRecoveryNoticeVisible(required = true, dismissed = false))
+        assertFalse(pairingRecoveryNoticeVisible(required = true, dismissed = true))
+        assertFalse(pairingRecoveryNoticeVisible(required = false, dismissed = false))
+    }
 }

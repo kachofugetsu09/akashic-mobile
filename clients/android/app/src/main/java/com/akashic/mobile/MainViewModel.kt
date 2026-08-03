@@ -185,6 +185,7 @@ class MainViewModel(
     val mobileWebUiResetEvent = container.realtimeSession.mobileWebUi.resetEvent
     val mobileWebUiWaitForSpace = container.realtimeSession.mobileWebUi.waitForSpace
     val mobileWebUiRetryAvailable = container.realtimeSession.mobileWebUi.retryAvailable
+    val pairingRecoveryRequired = container.realtimeSession.mobileWebUi.pairingRecoveryRequired
     internal val mobileWebUiCoordinator = container.realtimeSession.mobileWebUi
     private val navigationTarget = MutableStateFlow<NavigationTargetUi?>(null)
     private val pendingNotificationTarget = savedStateHandle.getStateFlow<NotificationTargetRequest?>(

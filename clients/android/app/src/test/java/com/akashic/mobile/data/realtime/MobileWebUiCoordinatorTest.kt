@@ -78,4 +78,28 @@ class MobileWebUiCoordinatorTest {
             classifyMobileWebUiCommandError("capability_required"),
         )
     }
+
+    @Test
+    fun pairingRecoveryOnlyStartsForCapabilityErrorsAndOtherErrorsPreserveState() {
+        assertEquals(
+            true,
+            pairingRecoveryRequiredAfterCommandError(false, "capability_required"),
+        )
+        assertEquals(
+            false,
+            pairingRecoveryRequiredAfterCommandError(false, "unauthorized"),
+        )
+        assertEquals(
+            true,
+            pairingRecoveryRequiredAfterCommandError(true, "unauthorized"),
+        )
+        assertEquals(
+            true,
+            pairingRecoveryRequiredAfterCommandError(true, "temporarily_unavailable"),
+        )
+        assertEquals(
+            false,
+            pairingRecoveryRequiredAfterCommandError(false, null),
+        )
+    }
 }
