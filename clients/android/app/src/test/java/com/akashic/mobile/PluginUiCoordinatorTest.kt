@@ -383,6 +383,49 @@ class PluginUiCoordinatorTest {
     }
 
     @Test
+    fun queryIdentityBoundaryFailuresPublishTerminalErrors() = runBlocking {
+        val root = Files.createTempDirectory("plugin-ui-query-identity-boundary").toFile()
+        try {
+            val assets = PluginUiAssetStore(root.resolve("assets"))
+            val catalogs = PluginUiCatalogStore(root.resolve("catalogs"))
+            val module = "export default { slots: {} };".toByteArray()
+            assets.store(module.sha256(), "module", module.toString(Charsets.UTF_8), module.size)
+            val sent = mutableListOf<Pair<String, String>>()
+            val coordinator = coordinator(root, assets, catalogs, sent)
+            coordinator.onConnectionReady("mobile-lab")
+            coordinator.onReply(
+                catalogReply(
+                    sent.single().second,
+                    catalog(
+                        revision = "1".repeat(64),
+                        items = listOf(catalogItem("observe", module.sha256(), module.size)),
+                    ),
+                ),
+            )
+
+            coordinator.query(
+                "", "owner", "turn.after_answer", "mobile:one", null,
+                "observe", "health.snapshot", "{}", "none", "mobile-lab",
+            )
+            coordinator.query(
+                "request-owner", "x".repeat(129), "turn.after_answer", "mobile:one", null,
+                "observe", "health.snapshot", "{}", "none", "mobile-lab",
+            )
+
+            assertEquals(
+                listOf(
+                    "" to "插件请求 ID 无效",
+                    "request-owner" to "插件 owner ID 无效",
+                ),
+                coordinator.results.take(2).toList().map { it.requestId to it.error },
+            )
+            assertEquals(listOf("plugin.ui.catalog"), sent.map { it.first })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun coalescedImmutableQueriesStillShareTheGlobalPendingLimit() = runBlocking {
         val root = Files.createTempDirectory("plugin-ui-subscriber-limit").toFile()
         try {
