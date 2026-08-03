@@ -62,7 +62,6 @@ private data class MobileWebUiResetMarker(
     val physicalDeleted: Boolean,
 )
 
-// Android bionic 的各架构头文件定义 O_DIRECTORY 为八进制 040000。
 /** 让 reset 根目录的 journal 变更在掉电后仍可恢复。 */
 private fun fsyncMobileWebUiDirectory(directory: File) {
     // 1. 使用 API 26+ POSIX bridge 打开目录，不硬编码架构相关的 O_DIRECTORY。
