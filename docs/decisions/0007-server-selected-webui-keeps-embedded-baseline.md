@@ -2,7 +2,7 @@
 
 - 状态：accepted
 - 日期：2026-08-03
-- 关联：`MOB-OWN-002`、`MOB-DATA-005`、`MOB-XREPO-004`、`MOB-REPO-001`、`MOB-UI-002`～`MOB-UI-004`
+- 关联：`MOB-OWN-002`、`MOB-DATA-005`、`MOB-PAIR-003`、`MOB-PLUGIN-004`、`MOB-XREPO-004`、`MOB-REPO-001`、`MOB-UI-002`～`MOB-UI-004`
 - amends：[0005](0005-shared-webui-source-lives-in-core-repository.md)
 - Core 决策：`akasic-agent/docs/decisions/0022-mobile-webui-uses-server-selected-generations.md`
 
@@ -24,6 +24,8 @@
 10. `Resolve/Ensure` 只有 `Ready`、`RetryAfter`、`WaitFor(trigger)` 和 `RejectTarget` 四种结果。同 Target 的空间等待和永久 reject 不因前台、重连或重复 hint 自动下载；必须等 Target/兼容指纹变化或名称明确的用户动作。手动重试只清除当前 `ReleaseView` 按 Preview→Stable 选出的确切 rejected Target，不匹配旧发布遗留 reject。重置记录该 Target 的 `manual_reset`，立即回到 baseline，不自动重下同一 Target。
 11. candidate 由 application/process-scope attempt lease 持有，与已提交 serving 和 asset handler 当前 presentation 分权。Activity 重建不能提升 candidate；server switch 必须同步建立新 UI session；candidate 健康前 bridge 副作用和系统外链均关闭。健康窗口中 desired Target 变化时立即废止旧 attempt 并恢复已提交 serving/baseline。
 12. 保存源码、构建成功、文件 watcher 或重启 Core 都不改变 `ReleaseView`。Stable、Preview、清除、提升和回滚必须由名称明确的发布命令提交；客户端只消费提交后的选择。
+13. capability 是配对声明的一部分。首个需要 `mobile-webui-ota-v1` 的 Android binary 对旧授权执行一次显式重新配对，不由服务端按版本号补写设备记录；重新配对保留业务数据与按服务端隔离的可重建缓存。未来连接级 renegotiation 另立协议合同。
+14. WebUI 的发送和插件查询采用 terminal receipt：当前 owner 接受或拒绝后必须恰好回一个结果。candidate、过期 lease 和关闭 admission 只拒绝副作用，不得静默挂起页面；embedded baseline 的空 generation ref 是合法 owner，必须能执行恢复动作。
 
 ## 理由
 
@@ -46,6 +48,8 @@ embedded baseline 保留 APK 的离线、可复现和恢复能力；不可变 ma
 
 这不是自造一套“每次启动等网络”的热更新：它采用 [Expo 的异步下载、后续启动应用](https://docs.expo.dev/eas-update/download-updates/)和 [runtime compatibility](https://docs.expo.dev/eas-update/runtime-versions/)，采用 [Ionic 的逐文件摘要差量](https://ionic.io/docs/appflow/deploy/differentials/)，并以 [WebViewAssetLoader 的本地 HTTPS origin](https://developer.android.com/reference/androidx/webkit/WebViewAssetLoader)承载已验证资源。Compose host 按 Android 官方的 [WebView in Compose 生命周期实践](https://developer.android.com/develop/ui/compose/migrate/interoperability-apis/wrap-webview-in-compose)在 `AndroidView.onRelease` 中释放已经退出 composition 的确切 WebView，不用观察可变引用的 effect 猜测 view 生命周期。Web→Native 不使用会暴露给所有 frame 的 `addJavascriptInterface`；采用可校验 origin/main-frame 的消息 envelope，风险依据见 [Android WebView native bridge security](https://developer.android.com/privacy-and-security/risks/insecure-webview-native-bridges)。这些来源只提供不变量，具体 owner、删除权限、激活 fence 和回退语义仍由本决定与 Core 设计共同拥有。
 
+能力变化只在清楚的协议边界生效也不是移动端特例：[Language Server Protocol](https://github.com/microsoft/language-server-protocol/blob/gh-pages/_specifications/lsp/3.18/specification.md)在 initialization 交换能力，[SSH Transport](https://www.rfc-editor.org/rfc/rfc4253.html)在每条连接的 key exchange 协商算法。本轮为降低一次性迁移复杂度，使用已有的配对边界重新声明 capability；这不等价于把“每次能力变化都重配对”确立为长期最佳方案，未来 renegotiation 必须同时定义授权、降级和旧客户端语义。
+
 Google Play 现行政策允许 WebView/解释器中的 JavaScript 例外，但同时要求运行时加载的解释代码不得促成政策违规，并明确禁止从 Play 外下载 dex/JAR/.so；因此本决定只允许静态 Web 资源，不把它等同于“已经保证通过商店审核”，也不在本轮改动 GitHub APK updater。政策边界见 [Device and Network Abuse](https://support.google.com/googleplay/android-developer/answer/16559646?hl=en)。
 
 ## 持久化影响
@@ -62,6 +66,7 @@ Google Play 现行政策允许 WebView/解释器中的 JavaScript 例外，但�
 - RealtimeSession 增加 capability、Resolve/prepare 与 hint 路由；协议 snapshot 和 Runtime Contract 必须固定已合并 Core commit/tree/hash。
 - WebView host 增加 generation-specific asset handler、activation health fence 和 renderer recovery；页面不能接触票据、服务端 URL、任意文件或缓存写权限。
 - 设置入口可以显示当前来源、立即应用、清理未使用资源、精确重试当前被拒 Target 和重置当前服务端 UI 缓存；重置后必须由用户点“重新检查”才可重下同一 Target。GitHub APK 更新入口继续独立存在。
+- capability 缺失时由原生 Snackbar 提供不依赖 WebView bridge 的重新配对入口；点击后进入扫码页，旧提示不再覆盖 PairingScreen。重新配对只清授权运行态，插件旧内存 owner 立即失效，磁盘缓存和业务状态继续保留。
 - 未来 Swift/iOS 客户端可以消费同一 Core schema、ReleaseView 与内容摘要，但 WKWebView、native bridge、cache、activation fence 和系统能力仍由 Swift 客户端单独拥有；Android Room 或进程状态不能成为跨平台真源。
 - reset 使用缓存根下的 `<hash>.reset.json`、`<hash>.reset.json.tmp` 与 `<hash>.reset-trash` sibling 路径协调物理文件和 Room 两个提交面，其中 `hash=sha256(server_id)`。每次 marker rename/delete、live→trash rename 和 trash 删除后都同步缓存根目录；同步失败保留 journal 与 Room owner。崩溃恢复先关闭该 server 的进程 presentation，再校验 journal 的 server/Target/fingerprint，完成物理删除后才重放 Room baseline/reject；若只剩 journal 清理失败，用户可见结果必须区分“重置已提交、清理待完成”与“重置失败”。
 
@@ -70,6 +75,8 @@ Google Play 现行政策允许 WebView/解释器中的 JavaScript 例外，但�
 - embedded baseline 在未配对、离线、无发布、目标不兼容和资源损坏时都能冷启动。
 - 隔离 Gateway 发布 Preview/Stable 后，run-specific 真机包无需 APK 更新即可在下一 UI session 使用；连续发布只展示最新 desired。
 - partial、进程死亡、旧 callback、renderer termination、重复 hint、server switch、revoke、低空间、GC 与 reset 的负向用例不产生混合 generation或业务状态变化。
+- candidate/admission 拒绝会给发送与插件查询返回明确失败；embedded baseline 的重新配对 bridge 可达，旧 WebView 迟到回执不能解除新页面的 pending。
+- Core 插件 reconcile 连续失败时不推进 revision、不发 catalog hint；同 revision 恢复成功后只发布一次最终目录通知。
 - Core/Android 共用的 schema 2 golden manifest 覆盖 `.js/.mjs/.cjs/.css` 与未知后缀；两端固定 MIME map、canonical bytes、generation/manifest/target digest 必须一致。
 - v12 数据真实迁移到新 schema 后，消息、outbox、草稿、附件、阅读位置、配对与密钥引用逐项保留。
 - 正式 package、正式 Gateway、正式 workspace 和 GitHub updater 在隔离验收前后保持不变。

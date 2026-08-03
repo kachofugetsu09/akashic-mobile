@@ -47,6 +47,14 @@ cd clients/android
 
 客户端不直接打开远程页面。资源经当前配对身份授权下载、完整校验后进入 app-private cache，再由本地可信 HTTPS origin 加载；未配对、离线、无发布、不兼容、下载失败或激活失败时继续使用已提交 UI 或 embedded baseline。完整合同与 edge case 矩阵由 Core 的 `docs/design/server-published-mobile-webui.md`、本仓库的 `docs/decisions/0007-*` 和 `docs/projectneed.md` 共同约束。现有 GitHub APK 检查、下载和安装入口保持独立且原样保留。
 
+### 首次 OTA 升级与重新配对
+
+首次从没有 `mobile-webui-ota-v1` 声明的旧授权升级时，需要明确重新配对一次。App 收到 `capability_required` 后会显示原生“重新配对”操作；它不依赖 WebView bridge，点击后进入扫码页。重新配对不会清除服务端会话、手机消息投影、outbox、草稿、附件、阅读位置、插件资源或已验证 WebUI 缓存，不需要清应用数据或让服务端删除设备历史。
+
+发送和插件查询在 WebUI candidate 激活窗口不会再无限等待：原生未准入时立即回明确失败，页面恢复按钮并保留草稿；消息一旦进入本地 outbox，断线或进程恢复继续使用同一 command id 幂等重放。重新配对前旧服务端的插件内存目录立即失效，新授权同步完成后再从保留的按服务端缓存校验并激活。
+
+通知权限提示可以关闭；“开启”会先打开应用通知页，厂商 ROM 不支持时回退到应用详情页，两种系统入口都不可用才显示错误。
+
 ## WebUI Pilot APK
 
 真机视觉验收使用独立包名和应用名，不覆盖正式 Akashic：
@@ -97,7 +105,7 @@ ADB 报告写入 `clients/android/build/reports/debug-diagnostics/<时间戳>/`�
 
 ```bash
 cd clients/android
-./scripts/publish-release.sh 0.8.17
+./scripts/publish-release.sh 0.8.18
 ```
 
 发布脚本会构建并验证签名，上传 APK、R8 mapping 和 `SHA256SUMS`。签名材料仍只从本机凭据或受保护 CI secret 读取，不进入仓库或 Release。

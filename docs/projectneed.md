@@ -72,6 +72,12 @@ manifest/blob 本地验证、删除或 WebUI metadata 写入失败时，WebUI co
 
 重新配对同一服务端时应继续识别并恢复已有本地状态。配对另一服务端时，旧服务端资料保持独立，不得作为建立新连接的副作用被清除。
 
+### MOB-PAIR-003 配对能力声明只在明确边界更新
+
+服务端授权记录中的设备 capability 来自配对声明，不得由普通重连、客户端版本号或服务端推断静默改写。当前授权缺少客户端必需 capability 时必须 fail-loud，并提供原生“重新配对”入口；重新配对只替换授权身份与连接 profile，继续保留消息投影、outbox、草稿、附件、阅读位置、设备侧可重建缓存和服务端历史。
+
+重新配对开始时，移动端必须立即停止旧服务端插件目录的查询与发布并清空其进程内 catalog owner；按服务端隔离的插件 catalog 与 asset 磁盘缓存继续保留，只有新授权完成同步后才能重新激活。未来若引入连接级 capability renegotiation，必须作为独立协议语义审批，不能把一次性兼容迁移扩张成隐式授权更新。
+
 ### MOB-DEL-001 破坏性清除必须另行定义和确认
 
 普通连接、配对、同步和修复路径不得拥有整服务器级联删除能力。若未来增加“忘记此服务器的本地资料”，必须作为名称明确的独立破坏性功能，先定义影响清单、未完成工作的处理、设备密钥策略、恢复与审计；它永远不代表删除服务端内容。
@@ -91,6 +97,10 @@ manifest/blob 本地验证、删除或 WebUI metadata 写入失败时，WebUI co
 插件目录、资源版本、查询授权、取消和实时事件继续使用已认证 WebSocket。只有插件 module 显式声明 HTTPS 时，移动端才把只读查询正文发送到当前活动 endpoint 派生的同源 HTTPS 地址；未声明的插件保持既有 WebSocket 内联查询，不能被客户端静默迁移或 fallback。
 
 HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system trust，拒绝 absolute path、redirect 和超过固定上限的响应。短期 ticket、HTTP response 和 result cache 都是可重建消费者状态，不得提升为服务端插件事实；Native 到 WebView 的 catalog 与 result 使用异步消息桥，不能通过同步 JavaScript 注入大 JSON。
+
+### MOB-PLUGIN-004 插件目录通知只跟随已确认重载
+
+核心插件 watcher 只有在当前 revision 完成 reconcile 后才能发布移动端 catalog changed 通知。扫描或 reconcile 失败时保留上一个已确认 revision 并继续有界轮询；不得推进 revision、发布失败状态对应的 hint，或要求移动端通过清缓存恢复。移动端重连仍主动拉取当前 catalog，非持久 hint 只负责缩短已连接设备看到成功变更的延迟。
 
 ## 6. 跨仓库兼容性
 
@@ -153,6 +163,8 @@ Preview 优先于 Stable；一次成功 Resolve 中两者不兼容或不存在�
 `Resolve/Ensure` 只能产生 `Ready`、`RetryAfter`、`WaitFor(trigger)` 或 `RejectTarget`。同 Target 进入 `WaitFor(space)` 后，前台、重连和普通 hint 可重新 Resolve 当前选择，但不得重复 prepare/manifest/blob；只有 Target 变化、显式清理、用户明确重试、reset 或 revoke 才解除等待。同 Target 的永久 reject 只能由 Target/兼容指纹变化，或用户对当前 `ReleaseView` 按 Preview→Stable 选出的确切 rejected Target 显式重试解除，不轮询。旧 ReleaseView 遗留的 reject 不得让设置页显示幽灵重试入口，也不得因用户重试新 Target 而被顺带清除。
 
 candidate 由 application/process-scope attempt lease 持有，与已提交 serving 和 asset handler 当前 presentation 分权。Activity 旋转/配置重建时必须继续同一 candidate lease 和 `admission=false`；切换 server 必须在新 server 首帧前同步建立新 UI session。candidate 健康前不得打开系统外链 Activity。若健康窗口中 Resolve 得到不同 Target，立即废止旧 attempt 并恢复已提交 serving/baseline，不得等旧 candidate 超时或自报健康后再处理。
+
+WebUI 发起的发送与插件查询必须由当前 WebView owner 收敛为一个明确成功或失败结果。candidate、过期 lease、关闭的 admission 或无法入主线程队列都必须显式拒绝，不能静默丢弃并让页面永久等待；旧 WebView 的迟到成功不得改变新 owner。embedded baseline 使用 `generationRef=null` 作为合法代际身份，必须保留重新配对、设置和发送等恢复 bridge 的可达性。
 
 ### MOB-UI-004 UI-only 更新与 Android 二进制发行分开
 
