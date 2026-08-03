@@ -2,7 +2,7 @@ package com.akashic.mobile
 
 import android.content.ActivityNotFoundException
 
-/** Run an external activity launch and notify the presentation owner only after it succeeds. */
+/** 执行一次外部 Activity 启动；仅在成功后通知展示 owner。 */
 internal fun nativeActivityLaunchSucceeded(
     launch: () -> Unit,
     onSuccess: () -> Unit,

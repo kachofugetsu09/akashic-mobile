@@ -16,7 +16,7 @@ import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 
-/** Protocol values exchanged by the authenticated mobile WebUI release lane. */
+/** 已认证移动端 WebUI release lane 交换的协议值。 */
 @Serializable
 data class MobileWebUiReleaseView(
     @SerialName("server_id") val serverId: String,
@@ -107,7 +107,7 @@ data class MobileWebUiContentGrant(
     @SerialName("expires_at") val expiresAt: String,
 )
 
-/** Validate a content ticket before it reaches the HTTP Authorization header. */
+/** 在内容 ticket 进入 HTTP Authorization header 前校验它。 */
 internal fun validateMobileWebUiContentGrant(
     grant: MobileWebUiContentGrant,
     target: MobileWebUiTarget,
@@ -252,7 +252,7 @@ internal val MOBILE_WEB_UI_JSON = Json {
     isLenient = false
 }
 
-/** Decode OTA release payloads with the strict field-presence and unknown-field contract. */
+/** 按严格的字段存在性和未知字段合同解码 OTA 发布 payload。 */
 internal fun decodeMobileWebUiReleaseView(payload: JsonObject): MobileWebUiReleaseView {
     require("stable" in payload && "preview" in payload) {
         "WebUI release response 必须显式包含 stable 和 preview"
@@ -260,7 +260,7 @@ internal fun decodeMobileWebUiReleaseView(payload: JsonObject): MobileWebUiRelea
     return MOBILE_WEB_UI_JSON.decodeFromJsonElement(MobileWebUiReleaseView.serializer(), payload)
 }
 
-/** Decode a release hint without allowing a partial or malformed selection digest. */
+/** 解码发布 hint，禁止部分或格式错误的 selection digest。 */
 internal fun decodeMobileWebUiReleaseChangedPayload(payload: JsonObject): MobileWebUiReleaseChangedPayload {
     val decoded = MOBILE_WEB_UI_JSON.decodeFromJsonElement(
         MobileWebUiReleaseChangedPayload.serializer(),
@@ -273,7 +273,7 @@ internal fun decodeMobileWebUiReleaseChangedPayload(payload: JsonObject): Mobile
     return decoded
 }
 
-/** Validate a release target at the authenticated protocol boundary. */
+/** 在已认证协议边界校验发布目标。 */
 internal fun validateMobileWebUiTarget(target: MobileWebUiTarget, expectedServerId: String? = null) {
     require(MOBILE_WEB_UI_TARGET.matches(target.targetKey)) { "WebUI target_key 无效" }
     require(MOBILE_WEB_UI_GENERATION.matches(target.generationId)) { "WebUI generation_id 无效" }
@@ -303,7 +303,7 @@ internal fun validateMobileWebUiTarget(target: MobileWebUiTarget, expectedServer
     }
 }
 
-/** Validate a release view without ordering by sequence or wall clock. */
+/** 校验发布视图，但不按 sequence 或墙上时钟排序。 */
 internal fun validateMobileWebUiReleaseView(view: MobileWebUiReleaseView, expectedServerId: String) {
     require(view.serverId == expectedServerId) { "WebUI release server_id 不匹配" }
     require(MOBILE_WEB_UI_EPOCH.matches(view.releaseEpoch)) { "WebUI release_epoch 无效" }
@@ -319,7 +319,7 @@ internal fun validateMobileWebUiReleaseView(view: MobileWebUiReleaseView, expect
     require(view.selectionDigest == expectedDigest) { "WebUI selection_digest 不一致" }
 }
 
-/** Validate schema-2 manifest and its reproducibility evidence before writing any file. */
+/** 在写入任何文件前，校验 schema-2 manifest 及其可复现性证据。 */
 internal fun validateMobileWebUiManifest(manifest: MobileWebUiManifest) {
     require(manifest.schemaVersion == MOBILE_WEB_UI_MANIFEST_SCHEMA) {
         "不支持的 WebUI manifest schema: ${manifest.schemaVersion}"

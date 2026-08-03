@@ -28,7 +28,7 @@ data class SocketCandidateId(val generation: Long, val ordinal: Int)
 interface RealtimeSocketListener {
     fun onOpen(candidateId: SocketCandidateId, endpoint: ServerEndpoint)
 
-    /** Called synchronously when the socket owner revokes the current race generation. */
+    /** socket owner 撤销当前竞态 generation 时同步调用。 */
     fun onRevoked(candidateId: SocketCandidateId, code: Int, reason: String)
 
     fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope)
@@ -122,12 +122,12 @@ class RealtimeWebSocketClient(
         return true
     }
 
-    /** Return whether a candidate generation is still owned by this socket client. */
+    /** 返回候选 generation 是否仍由此 socket client 持有。 */
     fun isGenerationCurrent(generation: Long): Boolean = synchronized(lock) {
         state?.generation == generation
     }
 
-    /** Close every socket in a generation and invalidate it before reconnect logic can run. */
+    /** 在重连逻辑运行前关闭 generation 的所有 socket 并使其失效。 */
     fun closeGeneration(generation: Long, code: Int = CLOSE_REVOKED, reason: String = "device revoked"): Boolean =
         closeGenerationIfOwned(generation, null, code, reason)
 
@@ -447,7 +447,7 @@ class RealtimeWebSocketClient(
         current.winner == candidateId
     }
 
-    /** Invalidate a generation before notifying the session about device revocation. */
+    /** 在通知 session 设备撤销前，使 generation 失效。 */
     private fun revokeGeneration(generation: Long, candidateId: SocketCandidateId): Boolean {
         return closeGenerationIfOwned(generation, candidateId, CLOSE_REVOKED, "device revoked")
     }

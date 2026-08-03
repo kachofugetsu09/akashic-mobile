@@ -12,7 +12,7 @@ import kotlinx.serialization.json.decodeFromJsonElement
 const val WIRE_PROTOCOL_VERSION = 1
 const val MAX_JSON_FRAME_BYTES = 256 * 1024
 
-/** Reject duplicate object members before kotlinx.serialization would silently keep the last value. */
+/** 在 kotlinx.serialization 静默保留最后一个值前拒绝重复对象成员。 */
 internal fun requireNoDuplicateJsonKeys(text: String) {
     JsonDuplicateKeyScanner(text).scan()
 }

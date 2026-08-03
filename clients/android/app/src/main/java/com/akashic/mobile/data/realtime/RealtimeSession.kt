@@ -55,6 +55,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
@@ -81,6 +82,9 @@ data class MobileSessionState(
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
+
+internal fun decodeDeviceRevocationReason(payload: JsonObject): String =
+    jsonStringValue(payload["reason"]).orEmpty()
 
 internal enum class NotificationTargetOpenResult {
     OPENED,
@@ -472,7 +476,7 @@ class RealtimeSession(
         }
     }
 
-    /** Recheck the current WebUI release once when the activity returns to foreground. */
+    /** Activity 回到前台时，重新检查当前 WebUI 发布一次。 */
     fun onForeground() {
         scope.launch {
             mutex.withLock {
@@ -1961,7 +1965,7 @@ class RealtimeSession(
                     "device.revoked" -> {
                         handleDeviceRevoked(
                             currentGeneration(),
-                            envelope.payload["reason"]?.jsonPrimitive?.content.orEmpty(),
+                            decodeDeviceRevocationReason(envelope.payload),
                         )
                     }
                     else -> error("Unexpected authenticated control: ${envelope.type}")
@@ -2649,7 +2653,7 @@ class RealtimeSession(
         )
     }
 
-    /** Latch revocation before the callback acquires the session mutex, blocking reconnect races. */
+    /** 在回调获取 session mutex 前锁存撤销状态，阻断重连竞态。 */
     private fun markDeviceRevokedImmediately(generation: Long): Long? {
         if (deviceRevoked) {
             return pendingRevokedGeneration

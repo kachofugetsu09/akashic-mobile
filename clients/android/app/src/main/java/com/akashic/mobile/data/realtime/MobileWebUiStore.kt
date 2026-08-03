@@ -1,5 +1,8 @@
 package com.akashic.mobile.data.realtime
 
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.database.sqlite.SQLiteException
 import android.webkit.WebResourceResponse
 import com.akashic.mobile.data.local.MobileWebUiBlobEntity
@@ -59,7 +62,38 @@ private data class MobileWebUiResetMarker(
     val physicalDeleted: Boolean,
 )
 
-/** Owns immutable per-server WebUI files and the small Room pointer metadata. */
+private const val MOBILE_WEB_UI_O_DIRECTORY = 0x10000
+
+/** 让 reset 根目录的 journal 变更在掉电后仍可恢复。 */
+private fun fsyncMobileWebUiDirectory(directory: File) {
+    // 1. 使用 API 26+ POSIX bridge 打开目录。
+    val descriptor = try {
+        Os.open(
+            directory.absolutePath,
+            OsConstants.O_RDONLY or MOBILE_WEB_UI_O_DIRECTORY,
+            0,
+        )
+    } catch (error: ErrnoException) {
+        throw IOException("无法打开 WebUI reset 根目录进行 fsync: $directory", error)
+    }
+
+    // 2. 独立执行 fsync 和 close，并保留首个失败。
+    var failure: IOException? = null
+    try {
+        Os.fsync(descriptor)
+    } catch (error: ErrnoException) {
+        failure = IOException("无法 fsync WebUI reset 根目录: $directory", error)
+    }
+    try {
+        Os.close(descriptor)
+    } catch (error: ErrnoException) {
+        val closeFailure = IOException("无法关闭 WebUI reset 根目录 fd: $directory", error)
+        if (failure == null) failure = closeFailure else failure.addSuppressed(closeFailure)
+    }
+    failure?.let { throw it }
+}
+
+/** 持有每个服务端的不可变 WebUI 文件及少量 Room 指针元数据。 */
 class MobileWebUiStore(
     private val root: File,
     private val dao: MobileWebUiDao,
@@ -69,6 +103,7 @@ class MobileWebUiStore(
     private val deleteDirectory: (File) -> Boolean = { it.deleteRecursively() },
     private val deleteResetMarker: (File) -> Boolean = { it.delete() },
     private val renameFile: (File, File) -> Boolean = { source, target -> source.renameTo(target) },
+    private val syncRootDirectory: () -> Unit = { fsyncMobileWebUiDirectory(root) },
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
 
@@ -89,7 +124,7 @@ class MobileWebUiStore(
         require(root.isDirectory) { "WebUI 缓存根目录不是目录: $root" }
     }
 
-    /** Execute one server-scoped operation without parallel pointer or file commits. */
+    /** 执行一个服务端范围内的操作，禁止并行提交指针或文件。 */
     suspend fun <T> withServerLock(serverId: String, block: suspend () -> T): T {
         val mutex = locks.computeIfAbsent(serverId) { Mutex() }
         mutex.lock()
@@ -154,7 +189,7 @@ class MobileWebUiStore(
         }
     }
 
-    /** Drop the durable remote serving pointer when release selection is baseline-only. */
+    /** 发布选择仅为 baseline 时，清除持久化的远程 serving 指针。 */
     suspend fun clearServingToBaseline(serverId: String) = withServerLock(serverId) {
         val state = dao.getState(serverId) ?: baselineState(serverId)
         dao.upsertState(
@@ -171,7 +206,7 @@ class MobileWebUiStore(
         setCommittedServing(null, null)
     }
 
-    /** Clear serving only when the same server-owned state still selects the baseline. */
+    /** 仅当同一服务端拥有的状态仍选择 baseline 时清除 serving。 */
     suspend fun applyDesiredBaselineForSession(serverId: String): Boolean = withServerLock(serverId) {
         val state = dao.getState(serverId) ?: return@withServerLock false
         if (state.desiredChannel != "baseline") return@withServerLock false
@@ -256,7 +291,7 @@ class MobileWebUiStore(
         true
     }
 
-    /** Prune only unpinned derived generations/blobs after a complete reference scan. */
+    /** 完整扫描引用后，只裁切未固定的派生 generation/blob。 */
     suspend fun collectGarbage(
         serverId: String,
         maxGenerations: Int = 4,
@@ -349,7 +384,7 @@ class MobileWebUiStore(
         )
     }
 
-    /** Enforce the process-wide derived WebUI budget while preserving every durable pointer. */
+    /** 在保留所有持久化指针的同时，执行进程级派生 WebUI 预算。 */
     suspend fun collectGlobalGarbage(maxBytes: Long = 512L * 1024 * 1024): MobileWebUiGcReport {
         require(maxBytes > 0) { "WebUI global GC budget 无效" }
         var removedGenerations = 0
@@ -475,7 +510,7 @@ class MobileWebUiStore(
         return MobileWebUiGcReport(removedGenerations, removedBlobs, removedBytes, blockedGenerations, unownedFiles)
     }
 
-    /** Reclaim derived cache first, then admit a manifest only when disk and budgets cover missing blobs. */
+    /** 先回收派生缓存；只有磁盘和预算覆盖缺失 blob 时才允许 manifest。 */
     suspend fun prepareDownloadSpace(
         serverId: String,
         manifest: MobileWebUiManifest,
@@ -517,7 +552,7 @@ class MobileWebUiStore(
         }
     }
 
-    /** Return a verified manifest only when its canonical bytes and every blob agree. */
+    /** 只有 canonical 字节和所有 blob 一致时才返回已验证 manifest。 */
     suspend fun readVerifiedManifest(
         serverId: String,
         target: MobileWebUiTarget,
@@ -525,13 +560,13 @@ class MobileWebUiStore(
         readVerifiedManifestLocked(serverId, target)
     }
 
-    /** Atomically commit a canonical manifest after its digest and target identity are verified. */
+    /** 验证摘要和目标身份后，原子提交 canonical manifest。 */
     suspend fun commitManifest(
         serverId: String,
         target: MobileWebUiTarget,
         bytes: ByteArray,
     ): MobileWebUiManifest = withServerLock(serverId) {
-        // 1. Validate the wire bytes before touching the cache.
+        // 1. 在接触缓存前校验 wire 字节。
         validateMobileWebUiTarget(target, serverId)
         require(bytes.size.toLong() == target.manifestSizeBytes) { "WebUI manifest 长度不一致" }
         require(bytes.sha256() == target.manifestDigest) { "WebUI manifest 摘要不一致" }
@@ -543,7 +578,7 @@ class MobileWebUiStore(
             "WebUI manifest 不是 canonical JSON"
         }
 
-        // 2. Publish only the immutable generation directory; blobs remain CAS objects.
+        // 2. 只发布不可变 generation 目录；blob 仍是 CAS 对象。
         val generation = generationDirectory(serverId, target.generationId)
         if (generation.exists()) {
             val existing = generation.resolve("manifest.json")
@@ -571,14 +606,14 @@ class MobileWebUiStore(
         manifest
     }
 
-    /** Return the durable offset of a digest-bound partial blob, deleting mismatched partials. */
+    /** 返回摘要绑定的 partial blob 持久化 offset，并删除不匹配的 partial。 */
     suspend fun blobOffset(serverId: String, sha256: String, bytes: Long): Long =
         withServerLock(serverId) {
             validateBlobRequest(sha256, bytes)
             blobOffsetLocked(serverId, sha256, bytes)
         }
 
-    /** Discard only a resumable partial blob after a server range validator failed. */
+    /** 仅在服务端 Range validator 失败后丢弃可续传的 partial blob。 */
     suspend fun resetBlobPartial(serverId: String, sha256: String, bytes: Long) =
         withServerLock(serverId) {
             validateBlobRequest(sha256, bytes)
@@ -588,7 +623,7 @@ class MobileWebUiStore(
             if (metadata.exists() && !deletePartialFile(metadata)) throw IOException("无法删除 WebUI partial 元数据: $sha256")
         }
 
-    /** Append one digest-bound range and publish the blob only after a complete hash check. */
+    /** 追加一个摘要绑定的 range，完整哈希校验后才发布 blob。 */
     suspend fun appendBlob(
         serverId: String,
         sha256: String,
@@ -613,7 +648,7 @@ class MobileWebUiStore(
         next
     }
 
-    /** Publish an empty blob after proving its digest, since empty ranges have no chunk to append. */
+    /** 空 range 没有可追加 chunk；证明摘要后直接发布空 blob。 */
     suspend fun ensureEmptyBlob(serverId: String, sha256: String): Boolean = withServerLock(serverId) {
         validateBlobRequest(sha256, 0)
         val blob = blobFile(serverId, sha256)
@@ -647,7 +682,7 @@ class MobileWebUiStore(
             true
         }
 
-    /** Verify and open one candidate lease while its durable attempt marker is still owned. */
+    /** 在持久化 attempt marker 仍归属当前 owner 时，校验并打开一个候选租约。 */
     suspend fun openAttempt(
         serverId: String,
         generationId: String,
@@ -687,7 +722,7 @@ class MobileWebUiStore(
             state.attemptingGenerationId == generationId && state.attemptingNonce == nonce
         }
 
-    /** Cancel a candidate only when its exact process lease is still current, preserving its cache. */
+    /** 只有精确的进程租约仍有效时才取消候选，并保留其缓存。 */
     suspend fun rollbackAttempt(serverId: String, generationId: String, nonce: String): Boolean =
         withServerLock(serverId) {
             val state = dao.getState(serverId) ?: return@withServerLock false
@@ -752,7 +787,7 @@ class MobileWebUiStore(
             setCommittedServing(Serving(serverId, generationId), manifest)
         }
 
-    /** Roll back a candidate and reject its exact target in one durable transaction. */
+    /** 在一个持久化事务中回滚候选并拒绝其精确目标。 */
     suspend fun rollbackAttemptAndReject(
         serverId: String,
         generationId: String,
@@ -777,7 +812,7 @@ class MobileWebUiStore(
         rollbackAndRejectLocked(serverId, generationId, nonce, fingerprint, reason)
     }
 
-    /** Reject a committed serving generation and atomically move to its verified fallback. */
+    /** 拒绝已提交的 serving generation，并原子切换到已验证 fallback。 */
     suspend fun rejectServingAndRollback(
         serverId: String,
         generationId: String,
@@ -799,7 +834,7 @@ class MobileWebUiStore(
         rollbackAndRejectLocked(serverId, generationId, null, fingerprint, reason)
     }
 
-    /** Reject a serving candidate and force the durable presentation back to baseline. */
+    /** 拒绝 serving 候选，并强制持久化展示回到 baseline。 */
     suspend fun rejectServingAndBaseline(
         serverId: String,
         generationId: String,
@@ -901,7 +936,7 @@ class MobileWebUiStore(
         )
     }
 
-    /** Restore only the durable serving pointer; an arbitrary cached generation cannot become serving. */
+    /** 只恢复持久化 serving 指针；任意缓存 generation 都不能直接成为 serving。 */
     suspend fun restoreCommittedServing(serverId: String): Boolean = withServerLock(serverId) {
         val state = dao.getState(serverId)
         val generationId = state?.servingGenerationId
@@ -949,7 +984,7 @@ class MobileWebUiStore(
 
     fun servingGenerationId(): String? = activeServing?.generationId
 
-    /** Reconcile only derived files; no business Room rows are touched. */
+    /** 只对账派生文件；不触碰业务 Room 行。 */
     suspend fun reconcile(serverId: String) = withServerLock(serverId) {
         reconcilePendingReset(serverId)
         val serverRoot = serverDirectory(serverId)
@@ -1199,9 +1234,7 @@ class MobileWebUiStore(
         val temporary = resetMarkerTemporaryFile(serverId)
         val trash = resetTrashDirectory(serverId)
         if (!markerFile.exists() && !trash.exists()) {
-            if (temporary.exists() && !temporary.delete()) {
-                throw IOException("无法清理 WebUI reset marker 临时文件: $temporary")
-            }
+            deleteResetTemporaryFile(temporary)
             return
         }
         if (activeServing?.serverId == serverId || attemptState.value?.serverId == serverId) {
@@ -1219,18 +1252,22 @@ class MobileWebUiStore(
         require(marker.createdAt > 0) {
             "WebUI reset marker 状态无效"
         }
-        if (temporary.exists() && !temporary.delete()) {
-            throw IOException("无法清理 WebUI reset marker 临时文件: $temporary")
-        }
+        deleteResetTemporaryFile(temporary)
         val directory = serverDirectory(serverId)
         if (directory.exists() && trash.exists()) {
             throw IOException("WebUI reset marker 同时存在 live 与 trash 目录")
         }
-        if (directory.exists() && !renameFile(directory, trash)) {
-            throw IOException("无法恢复待重置 WebUI 缓存: $directory")
+        if (directory.exists()) {
+            if (!renameFile(directory, trash)) {
+                throw IOException("无法恢复待重置 WebUI 缓存: $directory")
+            }
+            syncRootDirectory()
         }
-        if (trash.exists() && !deleteDirectory(trash)) {
-            throw IOException("无法完成待恢复 WebUI reset: $trash")
+        if (trash.exists()) {
+            if (!deleteDirectory(trash)) {
+                throw IOException("无法完成待恢复 WebUI reset: $trash")
+            }
+            syncRootDirectory()
         }
         if (!marker.physicalDeleted) {
             writeResetMarker(markerFile, marker.copy(physicalDeleted = true))
@@ -1251,6 +1288,7 @@ class MobileWebUiStore(
         if (!deleteResetMarker(markerFile)) {
             throw MobileWebUiResetCleanupPendingException("WebUI reset 已提交，清理 marker 待重试: $markerFile")
         }
+        syncRootDirectory()
     }
 
     private fun reconcileOrphanStaging(serverId: String) {
@@ -1275,7 +1313,7 @@ class MobileWebUiStore(
         return manifest
     }
 
-    /** Explicitly clear only this server's derived WebUI cache and pointers. */
+    /** 显式清除此服务端的派生 WebUI 缓存和指针。 */
     suspend fun resetServer(
         serverId: String,
         manualRejectTarget: MobileWebUiTarget? = null,
@@ -1316,28 +1354,37 @@ class MobileWebUiStore(
         )
         val markerFile = resetMarkerFile(serverId)
         val trash = resetTrashDirectory(serverId)
-        // 1. Stop serving this server before touching its files; partial deletion cannot leave a live WebView target.
+        // 1. 接触文件前停止 serving；部分删除不能留下可用的 WebView 目标。
         if (activeServing?.serverId == serverId || attemptState.value?.serverId == serverId) {
             attemptState.value = null
             setCommittedServing(null, null)
         }
         if (markerFile.exists() || trash.exists()) throw IOException("WebUI reset 已有未完成事务")
-        // 2. Persist a recoverable reset intent before moving or deleting any cache.
+        // 2. 移动或删除任何缓存前，持久化可恢复的 reset 意图。
         ensureDirectory(root, "无法创建 WebUI reset marker 目录")
         writeResetMarker(markerFile, marker)
-        if (directory.exists() && !renameFile(directory, trash)) {
-            throw IOException("无法移动待重置 WebUI 缓存: $directory")
+        if (directory.exists()) {
+            if (!renameFile(directory, trash)) {
+                throw IOException("无法移动待重置 WebUI 缓存: $directory")
+            }
+            syncRootDirectory()
         }
-        // 3. Remove the trash; if this fails the marker and Room owners remain for recovery.
-        if (trash.exists() && !deleteDirectory(trash)) {
-            throw IOException("无法重置 WebUI 缓存: $trash")
+        // 3. 删除 trash；失败时保留 marker 和 Room owner 以便恢复。
+        if (trash.exists()) {
+            if (!deleteDirectory(trash)) {
+                throw IOException("无法重置 WebUI 缓存: $trash")
+            }
+            syncRootDirectory()
         }
-        // 4. Record physical completion before clearing Room owners; a later DB failure is replayable.
+        // 4. 清理物理文件后记录完成状态；后续 DB 失败仍可重放。
         writeResetMarker(markerFile, marker.copy(physicalDeleted = true))
-        // 5. Only after physical cleanup succeeds clear pointers and write the manual reject.
+        // 5. 只有物理清理成功后，才清除指针并写入手动拒绝。
         dao.resetServerDurableState(serverId, baselineState(serverId), manualReject)
-        if (markerFile.exists() && !deleteResetMarker(markerFile)) {
-            throw MobileWebUiResetCleanupPendingException("WebUI reset 已提交，清理 marker 待重试: $markerFile")
+        if (markerFile.exists()) {
+            if (!deleteResetMarker(markerFile)) {
+                throw MobileWebUiResetCleanupPendingException("WebUI reset 已提交，清理 marker 待重试: $markerFile")
+            }
+            syncRootDirectory()
         }
     }
 
@@ -1593,11 +1640,18 @@ class MobileWebUiStore(
     private fun resetTrashDirectory(serverId: String): File =
         root.resolve("${serverId.sha256()}.reset-trash")
 
+    private fun deleteResetTemporaryFile(file: File): Boolean {
+        if (!file.exists()) return false
+        if (!file.delete()) {
+            throw IOException("无法清理 WebUI reset marker 临时文件: $file")
+        }
+        syncRootDirectory()
+        return true
+    }
+
     private fun writeResetMarker(file: File, marker: MobileWebUiResetMarker) {
         val temporary = file.resolveSibling("${file.name}.tmp")
-        if (temporary.exists() && !temporary.delete()) {
-            throw IOException("无法清理 WebUI reset marker 临时文件: $temporary")
-        }
+        deleteResetTemporaryFile(temporary)
         FileOutputStream(temporary, false).use { output ->
             output.write(MOBILE_WEB_UI_JSON.encodeToString(marker).toByteArray())
             output.fd.sync()
@@ -1605,6 +1659,7 @@ class MobileWebUiStore(
         if (!renameFile(temporary, file)) {
             throw IOException("无法原子提交 WebUI reset marker: $file")
         }
+        syncRootDirectory()
     }
 
     private fun generationDirectory(serverId: String, generationId: String): File =

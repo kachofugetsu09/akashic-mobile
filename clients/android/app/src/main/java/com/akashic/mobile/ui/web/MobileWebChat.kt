@@ -467,7 +467,7 @@ internal fun MobileWebChat(
         }
     }
 
-    // Reset/revoke is an explicit native-owned boundary; ordinary release changes stay on the current UI.
+    // Reset/revoke 是原生拥有的边界；普通发布变化继续沿用当前界面。
     LaunchedEffect(mobileWebUiServerId, mobileWebUiServingGeneration, mobileWebUiResetEvent) {
         if (!shouldConsumeMobileWebUiResetEvent(
                 lastHandledEvent = lastHandledResetEvent,

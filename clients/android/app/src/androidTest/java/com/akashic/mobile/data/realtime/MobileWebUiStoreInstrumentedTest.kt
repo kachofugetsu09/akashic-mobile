@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import org.junit.After
@@ -111,6 +112,47 @@ class MobileWebUiStoreInstrumentedTest {
         assertEquals(null, state.servingGenerationId)
         val reject = database.mobileWebUi().getReject(SERVER_ID, target.targetKey, FINGERPRINT)
         assertEquals("manual_reset", reject?.reason)
+    }
+
+    @Test
+    fun resetFsyncsRootAfterEachJournalMutation() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+        var syncCalls = 0
+        val durableStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            syncRootDirectory = { syncCalls += 1 },
+        )
+
+        durableStore.resetServer(SERVER_ID, manualRejectTarget = target, fingerprint = FINGERPRINT)
+
+        assertEquals(5, syncCalls)
+        assertEquals("baseline", database.mobileWebUi().getState(SERVER_ID)?.desiredChannel)
+    }
+
+    @Test
+    fun resetRootFsyncFailureLeavesJournalAndRoomOwners() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            syncRootDirectory = { throw IOException("injected root fsync failure") },
+        )
+
+        assertThrows(IOException::class.java) {
+            runBlocking {
+                failingStore.resetServer(SERVER_ID, manualRejectTarget = target, fingerprint = FINGERPRINT)
+            }
+        }
+
+        val state = requireNotNull(database.mobileWebUi().getState(SERVER_ID))
+        assertEquals(target.generationId, state.servingGenerationId)
+        assertEquals(target.generationId, state.desiredGenerationId)
+        assertNull(database.mobileWebUi().getReject(SERVER_ID, target.targetKey, FINGERPRINT))
+        assertTrue(root.resolve("${serverHash()}.reset.json").isFile)
+        assertTrue(root.resolve(serverHash()).isDirectory)
     }
 
     @Test
@@ -712,6 +754,48 @@ class MobileWebUiStoreInstrumentedTest {
         assertNull(database.mobileWebUi().getReject(SERVER_ID, preview.targetKey, FINGERPRINT))
         assertNotNull(database.mobileWebUi().getReject(SERVER_ID, old.targetKey, FINGERPRINT))
         assertFalse(coordinator.retryAvailable.value)
+        coordinatorJob.cancel()
+    }
+
+    @Test
+    fun contentPrepareReplyTypeMismatchClearsEnsureAndRechecksRelease() = runBlocking {
+        val target = targetFor(validManifest())
+        val commandIds = listOf("release-1", "prepare-1", "release-2")
+        var commandIndex = 0
+        val errors = mutableListOf<String>()
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> commandIds[commandIndex++] },
+            startHttp = { },
+            onError = errors::add,
+            onRetryTrigger = { },
+        )
+
+        coordinator.restoreLocal(SERVER_ID)
+        coordinator.resolve(SERVER_ID)
+        assertTrue(coordinator.onReply(releaseReply("release-1", releaseView(target))))
+        assertEquals(2, commandIndex)
+
+        assertTrue(
+            coordinator.onReply(
+                WireEnvelope(
+                    v = WIRE_PROTOCOL_VERSION,
+                    kind = WireKind.REPLY,
+                    type = "unexpected.reply",
+                    id = "prepare-1",
+                    connectionEpoch = 1,
+                    payload = JsonObject(emptyMap()),
+                ),
+            ),
+        )
+        assertEquals(3, commandIndex)
+        assertTrue(errors.any { it.contains("content.prepare reply type") })
+
+        assertTrue(coordinator.onReply(releaseReply("release-2", releaseView(null))))
+        assertNull(database.mobileWebUi().getState(SERVER_ID)?.desiredGenerationId)
         coordinatorJob.cancel()
     }
 

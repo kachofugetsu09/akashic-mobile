@@ -14,6 +14,17 @@ import kotlinx.serialization.json.put
 class MobileWebUiProtocolTest {
     @Test
     fun `HTTP error parser accepts only string codes at the trust boundary`() {
+        assertEquals("message", jsonStringValue(JsonPrimitive("message")))
+        assertNull(jsonStringValue(JsonObject(emptyMap())))
+        assertNull(jsonStringValue(JsonPrimitive(1)))
+        assertEquals(
+            "operator revoked",
+            decodeDeviceRevocationReason(JsonObject(mapOf("reason" to JsonPrimitive("operator revoked")))),
+        )
+        assertEquals(
+            "",
+            decodeDeviceRevocationReason(JsonObject(mapOf("reason" to JsonObject(emptyMap())))),
+        )
         assertEquals(
             "resource_not_found",
             decodeMobileWebUiHttpErrorCode("""{"code":"resource_not_found"}""".toByteArray()),

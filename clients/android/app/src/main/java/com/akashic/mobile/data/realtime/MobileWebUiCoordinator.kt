@@ -48,7 +48,7 @@ internal fun classifyMobileWebUiCommandError(code: String?): MobileWebUiCommandA
     else -> MobileWebUiCommandAction.REPORT_UNKNOWN
 }
 
-/** Classify an authenticated WebUI HTTP response without throwing into realtime ownership. */
+/** 在不把错误抛入 realtime owner 的前提下，分类已认证的 WebUI HTTP 响应。 */
 internal fun classifyMobileWebUiHttp(
     kind: String,
     statusCode: Int,
@@ -69,7 +69,7 @@ internal fun classifyMobileWebUiHttp(
     else -> MobileWebUiHttpAction.RETRY_AFTER
 }
 
-/** Decode only string error codes from an untrusted WebUI HTTP error body. */
+/** 在不可信的 WebUI HTTP 错误正文边界只解码字符串错误码。 */
 internal fun decodeMobileWebUiHttpErrorCode(body: ByteArray): String? {
     if (body.isEmpty()) return null
     return try {
@@ -87,7 +87,7 @@ internal fun decodeMobileWebUiHttpErrorCode(body: ByteArray): String? {
     }
 }
 
-private fun jsonStringValue(value: JsonElement?): String? =
+internal fun jsonStringValue(value: JsonElement?): String? =
     (value as? JsonPrimitive)?.takeIf { it.isString }?.content
 
 private const val MOBILE_WEB_UI_MAX_RETRIES = 3
@@ -98,7 +98,7 @@ private val MOBILE_WEB_UI_ERROR_JSON = Json {
     explicitNulls = true
 }
 
-/** Resolves one server release, ensures immutable blobs, and leaves activation to the UI session boundary. */
+/** 解析一个服务端发布，确保不可变 blob 存在，并把激活留给 UI 会话边界。 */
 internal class MobileWebUiCoordinator(
     private val store: MobileWebUiStore,
     private val scope: CoroutineScope,
@@ -184,7 +184,7 @@ internal class MobileWebUiCoordinator(
         }
     }
 
-    /** Restore only the durable committed WebUI before the first UI composition. */
+    /** 只在首次 UI 组合前恢复持久化的已提交 WebUI。 */
     suspend fun restoreLocal(serverId: String): Boolean {
         cancelForeignAttemptBeforeRestore(serverId)
         currentServerId = serverId
@@ -241,7 +241,7 @@ internal class MobileWebUiCoordinator(
         return restored
     }
 
-    /** Finish the previous server's process-owned candidate before handing presentation to another server. */
+    /** 在把展示交给另一个服务端前，完成前一个服务端由进程持有的候选版本。 */
     private suspend fun cancelForeignAttemptBeforeRestore(serverId: String) {
         val activeAttempt = store.attempt.value ?: return
         if (activeAttempt.serverId == serverId) return
@@ -251,8 +251,7 @@ internal class MobileWebUiCoordinator(
             activeAttempt.nonce,
         )
         if (rolledBack || store.attempt.value != activeAttempt) return
-        // The process lease outlived its durable marker; recover the old server before
-        // restoring the new one so a later return cannot inherit a stale attempting row.
+        // 进程租约已超过持久 marker；先恢复旧服务端，再恢复新服务端，避免稍后返回时继承陈旧 attempting 行。
         store.reconcile(activeAttempt.serverId)
         check(store.attempt.value != activeAttempt) {
             "WebUI server handoff left a stale candidate lease for ${activeAttempt.serverId}"
@@ -283,7 +282,7 @@ internal class MobileWebUiCoordinator(
         resolve(serverId)
     }
 
-    /** Resolve current release pointers; hints never apply a target directly. */
+    /** 解析当前发布指针；hint 不能直接应用目标。 */
     fun resolve(serverId: String? = currentServerId) {
         val selectedServer = serverId ?: return
         if (selectedServer != currentServerId) return
@@ -337,7 +336,7 @@ internal class MobileWebUiCoordinator(
         pendingCommandKind = MOBILE_WEB_UI_RELEASE_GET
     }
 
-    /** Route authenticated WebSocket replies to the single release/prepare owner. */
+    /** 把已认证的 WebSocket 回复路由到唯一的 release/prepare owner。 */
     suspend fun onReply(envelope: WireEnvelope): Boolean {
         val id = envelope.id ?: return false
         if (id != pendingCommandId) return false
@@ -356,8 +355,8 @@ internal class MobileWebUiCoordinator(
                     if (envelope.type.endsWith(".error")) {
                         handleCommandError(
                             null,
-                            envelope.payload["code"]?.jsonPrimitive?.content,
-                            envelope.payload["message"]?.jsonPrimitive?.content ?: "WebUI 发布检查失败",
+                            jsonStringValue(envelope.payload["code"]),
+                            jsonStringValue(envelope.payload["message"]) ?: "WebUI 发布检查失败",
                         )
                         return true
                     }
@@ -386,15 +385,18 @@ internal class MobileWebUiCoordinator(
             }
             MOBILE_WEB_UI_CONTENT_PREPARE -> {
                 if (envelope.type != "$MOBILE_WEB_UI_CONTENT_PREPARE.ok" && envelope.type != "$MOBILE_WEB_UI_CONTENT_PREPARE.error") {
+                    val context = ensure
+                    ensure = null
                     onError("WebUI content.prepare reply type 不匹配")
+                    resolve(context?.serverId ?: currentServerId)
                     return true
                 }
                 val context = ensure ?: return true
                 if (envelope.type.endsWith(".error")) {
                     handleCommandError(
                         context,
-                        envelope.payload["code"]?.jsonPrimitive?.content,
-                        envelope.payload["message"]?.jsonPrimitive?.content ?: "WebUI 内容授权失败",
+                        jsonStringValue(envelope.payload["code"]),
+                        jsonStringValue(envelope.payload["message"]) ?: "WebUI 内容授权失败",
                     )
                     return true
                 }
@@ -427,7 +429,7 @@ internal class MobileWebUiCoordinator(
         }
     }
 
-    /** Deliver an HTTP result to the matching manifest/blob operation. */
+    /** 把 HTTP 结果交给匹配的 manifest/blob 操作。 */
     suspend fun onHttpResponse(requestId: String, response: MobileWebUiHttpResponse) {
         val pending = pendingHttp ?: return
         if (pending.requestId != requestId) return
@@ -476,7 +478,7 @@ internal class MobileWebUiCoordinator(
         if (isCurrent(pending.context)) scheduleRetryAfter(pending.context, message)
     }
 
-    /** Convert an owner-side storage failure into the same bounded retry state as HTTP failure. */
+    /** 把 owner 存储失败转换为与 HTTP 失败相同的有界重试状态。 */
     fun onOwnerFailure(requestId: String, message: String) {
         val pending = pendingHttp ?: return
         if (pending.requestId != requestId) return
@@ -486,7 +488,7 @@ internal class MobileWebUiCoordinator(
 
     suspend fun state(serverId: String): MobileWebUiStateEntity? = store.state(serverId)
 
-    /** Apply a server-selected baseline only at the next real UI session boundary. */
+    /** 只在下一个真实 UI 会话边界应用服务端选择的 baseline。 */
     suspend fun applyDesiredBaselineForSession(serverId: String): Boolean {
         if (serverId != currentServerId) return false
         val applied = store.applyDesiredBaselineForSession(serverId)
@@ -534,7 +536,7 @@ internal class MobileWebUiCoordinator(
         retryAvailableState.value = resetTarget != null
     }
 
-    /** Revoke remote presentation immediately while retaining verified cache files. */
+    /** 立即撤销远程展示，但保留已验证的缓存文件。 */
     suspend fun revokeServer(serverId: String) {
         if (serverId != currentServerId) return
         invalidateOwner()
@@ -546,7 +548,7 @@ internal class MobileWebUiCoordinator(
         store.clearServingToBaseline(serverId)
     }
 
-    /** Clear only the exact manual-reset rejection after an explicit user retry. */
+    /** 只有用户显式重试时，才清除精确的手动 reset 拒绝记录。 */
     suspend fun retryCurrentUi(serverId: String): Boolean {
         if (serverId != currentServerId) return false
         manualRetryRequested = true
