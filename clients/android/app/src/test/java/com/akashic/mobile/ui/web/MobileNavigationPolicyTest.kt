@@ -59,6 +59,12 @@ class MobileNavigationPolicyTest {
     }
 
     @Test
+    fun candidateWebUiCannotLaunchExternalActivityBeforeCommit() {
+        assertFalse(mobileExternalNavigationAllowed(candidate = true))
+        assertTrue(mobileExternalNavigationAllowed(candidate = false))
+    }
+
+    @Test
     fun remoteLeaseUrlAndTransportAdmissionAreGenerationBound() {
         val serverId = "server-a"
         val generation = "a".repeat(64)

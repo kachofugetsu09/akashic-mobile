@@ -3,7 +3,6 @@ package com.akashic.mobile.ui.web
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -54,6 +53,7 @@ import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.data.realtime.MobileWebUiStore
 import com.akashic.mobile.data.realtime.MobileWebUiCoordinator
+import com.akashic.mobile.data.realtime.MobileWebUiAttemptLease
 import com.akashic.mobile.data.realtime.MobileWebUiResetEvent
 import com.akashic.mobile.data.realtime.pluginui.PluginUiAssetStore
 import com.akashic.mobile.data.realtime.pluginui.PluginUiWebBridge
@@ -85,6 +85,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONObject
+import com.akashic.mobile.nativeActivityLaunchSucceeded
 
 private const val MOBILE_WEB_URL = "https://appassets.androidplatform.net/assets/mobile.html"
 private const val MOBILE_WEB_PRESENTATION_PREFIX = "https://appassets.androidplatform.net/mobile-webui/"
@@ -133,6 +134,17 @@ internal fun shouldStartMobileWebUiCandidate(
 ): Boolean = readyGeneration != null && readyGeneration != servingGeneration &&
     (!sessionStarted || (explicitApply && canReplaceUi))
 
+internal fun mobileWebUiApplyCanBeConsumed(
+    explicitApply: Boolean,
+    durableAttemptCreated: Boolean,
+): Boolean = explicitApply && durableAttemptCreated
+
+internal fun mobileWebUiCandidateLeaseAllowed(
+    sessionStarted: Boolean,
+    sessionEpoch: Long,
+    presentationEpoch: Long,
+): Boolean = sessionStarted && sessionEpoch == presentationEpoch
+
 internal fun mobileWebUiEmbeddedAssetsEnabled(activeGeneration: String?): Boolean =
     activeGeneration == null
 
@@ -163,6 +175,7 @@ internal fun MobileWebChat(
     mobileWebUiStore: MobileWebUiStore? = null,
     mobileWebUiServerId: String? = null,
     mobileWebUiServingGeneration: String? = null,
+    mobileWebUiAttemptLease: MobileWebUiAttemptLease? = null,
     mobileWebUiReadyGeneration: String? = null,
     mobileWebUiResetEvent: MobileWebUiResetEvent? = null,
     mobileWebUiPresentationEpoch: Long = 0L,
@@ -232,17 +245,69 @@ internal fun MobileWebChat(
     var webHistoryActive by remember { mutableStateOf(false) }
     var webReady by remember { mutableStateOf(false) }
     var activeHealthGate by remember { mutableStateOf<MobileWebUiHealthGate?>(null) }
-    var activeGeneration by remember(mobileWebUiServerId) { mutableStateOf(mobileWebUiServingGeneration) }
-    var activeAttempt by remember(mobileWebUiServerId) { mutableStateOf<MobileWebUiAttempt?>(null) }
+    var sessionStarted by remember(mobileWebUiServerId) {
+        mutableStateOf(mobileWebUiSessionStarted)
+    }
+    var sessionEpoch by remember(mobileWebUiServerId) {
+        mutableStateOf(mobileWebUiPresentationEpoch)
+    }
+    val sessionBoundaryAtComposition = !mobileWebUiCandidateLeaseAllowed(
+        sessionStarted,
+        sessionEpoch,
+        mobileWebUiPresentationEpoch,
+    )
+    val initialAttempt = if (!sessionBoundaryAtComposition) mobileWebUiAttemptLease
+        ?.takeIf { it.serverId == mobileWebUiServerId }
+        ?.let { MobileWebUiAttempt(it.serverId, it.generationId, it.nonce) }
+    else null
+    var activeAttempt by remember(mobileWebUiServerId, sessionBoundaryAtComposition) { mutableStateOf(initialAttempt) }
+    var activeGeneration by remember(mobileWebUiServerId, sessionBoundaryAtComposition) {
+        mutableStateOf(activeAttempt?.generationId ?: mobileWebUiServingGeneration)
+    }
     var rendererRebuildToken by remember { mutableStateOf(0) }
     var rendererFailure by remember { mutableStateOf<MobileWebUiRendererFailure?>(null) }
-    val generationRef = remember(mobileWebUiServerId) { AtomicReference<String?>(mobileWebUiServingGeneration) }
-    val admissionRef = remember(mobileWebUiServerId) { AtomicBoolean(mobileWebUiServingGeneration != null) }
+    val generationRef = remember(mobileWebUiServerId, sessionBoundaryAtComposition) {
+        AtomicReference<String?>(activeAttempt?.generationId ?: mobileWebUiServingGeneration)
+    }
+    val admissionRef = remember(mobileWebUiServerId, sessionBoundaryAtComposition) {
+        AtomicBoolean(activeAttempt == null)
+    }
     val healthCommitStarted = remember { AtomicBoolean(false) }
     val webViewKey = when {
         activeAttempt != null -> "candidate:${activeAttempt!!.serverId}:${activeAttempt!!.generationId}:${activeAttempt!!.nonce}"
         activeGeneration != null -> "serving:${mobileWebUiServerId}:${activeGeneration}:$rendererRebuildToken"
         else -> "baseline"
+    }
+
+    LaunchedEffect(
+        mobileWebUiServerId,
+        mobileWebUiAttemptLease,
+        mobileWebUiServingGeneration,
+        sessionStarted,
+        sessionEpoch,
+        mobileWebUiPresentationEpoch,
+    ) {
+        val lease = if (!sessionBoundaryAtComposition) mobileWebUiAttemptLease
+            ?.takeIf { it.serverId == mobileWebUiServerId }
+            ?.let { MobileWebUiAttempt(it.serverId, it.generationId, it.nonce) }
+        else null
+        if (lease != null) {
+            if (activeAttempt != lease) {
+                activeHealthGate?.cancel()
+                activeAttempt = lease
+                activeGeneration = lease.generationId
+                generationRef.set(lease.generationId)
+                admissionRef.set(false)
+                webReady = false
+            }
+        } else if (activeAttempt != null) {
+            activeHealthGate?.cancel()
+            activeAttempt = null
+            activeGeneration = mobileWebUiServingGeneration
+            generationRef.set(mobileWebUiServingGeneration)
+            admissionRef.set(true)
+            webReady = false
+        }
     }
 
     val callbacks by rememberUpdatedState(
@@ -285,12 +350,6 @@ internal fun MobileWebChat(
     )
 
     val activationFinished = remember { AtomicBoolean(false) }
-    var sessionStarted by remember(mobileWebUiServerId) {
-        mutableStateOf(mobileWebUiSessionStarted)
-    }
-    var sessionEpoch by remember(mobileWebUiServerId) {
-        mutableStateOf(mobileWebUiPresentationEpoch)
-    }
     var lastHandledResetEvent by remember {
         mutableStateOf<MobileWebUiResetEvent?>(null)
     }
@@ -299,6 +358,8 @@ internal fun MobileWebChat(
         mobileWebUiServerId,
         mobileWebUiPresentationEpoch,
         mobileWebUiApplyGeneration,
+        mobileWebUiAttemptLease,
+        mobileWebUiCanReplaceUi,
     ) {
         val sessionBoundary = !sessionStarted || sessionEpoch != mobileWebUiPresentationEpoch
         if (sessionEpoch != mobileWebUiPresentationEpoch) {
@@ -324,6 +385,24 @@ internal fun MobileWebChat(
             admissionRef.set(true)
             webReady = false
         }
+        val restoredLease = activeAttempt
+        if (restoredLease != null) {
+            val attemptCurrent = withContext(Dispatchers.IO) {
+                coordinator.isAttemptCurrent(
+                    restoredLease.serverId,
+                    restoredLease.generationId,
+                    restoredLease.nonce,
+                )
+            }
+            if (!attemptCurrent) {
+                activeHealthGate?.cancel()
+                activeAttempt = null
+                activeGeneration = servingGeneration
+                generationRef.set(servingGeneration)
+                admissionRef.set(true)
+                webReady = false
+            }
+        }
         if (sessionBoundary) {
             val baselineApplied = withContext(Dispatchers.IO) {
                 coordinator.applyDesiredBaselineForSession(serverId)
@@ -348,12 +427,20 @@ internal fun MobileWebChat(
             explicitApply = explicitApply,
             canReplaceUi = mobileWebUiCanReplaceUi,
         )
-        if (explicitApply) onMobileWebUiApplyHandled(canStart)
         if (!sessionStarted) {
             sessionStarted = true
             onMobileWebUiSessionStarted()
         }
-        if (!canStart || activeAttempt != null) return@LaunchedEffect
+        if (!canStart) {
+            if (explicitApply && requestedGeneration == null) onMobileWebUiApplyHandled(false)
+            return@LaunchedEffect
+        }
+        if (activeAttempt != null) {
+            if (mobileWebUiApplyCanBeConsumed(explicitApply, durableAttemptCreated = true)) {
+                onMobileWebUiApplyHandled(true)
+            }
+            return@LaunchedEffect
+        }
         if (
             requestedGeneration != null &&
             requestedGeneration != servingGeneration
@@ -363,6 +450,7 @@ internal fun MobileWebChat(
             }
             if (nonce == null) {
                 coordinator.invalidateReady(requestedGeneration)
+                if (explicitApply) onMobileWebUiApplyHandled(false)
                 return@LaunchedEffect
             }
             activeAttempt = MobileWebUiAttempt(serverId, requestedGeneration, nonce)
@@ -373,6 +461,9 @@ internal fun MobileWebChat(
             admissionRef.set(false)
             webReady = false
             webLoadError = null
+            if (mobileWebUiApplyCanBeConsumed(explicitApply, durableAttemptCreated = true)) {
+                onMobileWebUiApplyHandled(true)
+            }
         }
     }
 
@@ -410,30 +501,30 @@ internal fun MobileWebChat(
                     attempt.nonce,
                     reason,
                 )
-            } catch (error: IllegalArgumentException) {
-                Log.e(MOBILE_WEB_LOG_TAG, "WebUI activation rollback rejected: ${error.message}")
-                rollbackError = "WebUI 回滚失败：${error.message.orEmpty()}"
-            } catch (error: IllegalStateException) {
-                Log.e(MOBILE_WEB_LOG_TAG, "WebUI activation rollback failed: ${error.message}")
-                rollbackError = "WebUI 回滚失败：${error.message.orEmpty()}"
             } catch (error: IOException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI activation rollback storage failed: ${error.message}")
-                rollbackError = "WebUI 回滚暂不可用，已回到内置界面"
+                rollbackError = "WebUI 候选界面已隔离，回滚暂不可用：${error.message.orEmpty()}"
             } catch (error: android.database.sqlite.SQLiteException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI activation rollback database failed: ${error.message}")
-                rollbackError = "WebUI 回滚暂不可用，已回到内置界面"
+                rollbackError = "WebUI 候选界面已隔离，回滚暂不可用：本地数据库暂不可用"
             } catch (error: SecurityException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI activation rollback permission failed: ${error.message}")
-                rollbackError = "WebUI 回滚暂不可用，已回到内置界面"
-            } finally {
-                withContext(Dispatchers.Main) {
+                rollbackError = "WebUI 候选界面已隔离，回滚暂不可用：缓存无权访问"
+            }
+            withContext(Dispatchers.Main) {
+                if (rollbackError == null) {
                     admissionRef.set(true)
                     activeAttempt = null
-                    activeGeneration = rollbackError?.let { null } ?: fallbackGeneration
+                    activeGeneration = fallbackGeneration
                     generationRef.set(activeGeneration)
                     healthCommitStarted.set(false)
                     webReady = false
-                    if (rollbackError != null) webLoadError = rollbackError
+                } else {
+                    admissionRef.set(false)
+                    activeGeneration = attempt.generationId
+                    generationRef.set(attempt.generationId)
+                    webReady = false
+                    webLoadError = rollbackError
                 }
             }
         }
@@ -460,34 +551,38 @@ internal fun MobileWebChat(
         }
         rendererFailure = null
         shareScope.launch {
-            val fallback = try {
-                mobileWebUiCoordinator?.rejectServing(
+            try {
+                val fallback = mobileWebUiCoordinator?.rejectServing(
                     serverId,
                     generation,
                     reason,
                     forceBaseline = false,
                 )
+                withContext(Dispatchers.Main) {
+                    activeGeneration = fallback
+                    generationRef.set(fallback)
+                    admissionRef.set(true)
+                    webReady = false
+                    webLoadError = null
+                }
             } catch (error: IOException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery storage failed: ${error.message}")
-                null
+                withContext(Dispatchers.Main) {
+                    webReady = false
+                    webLoadError = "WebUI 回滚暂不可用：${error.message.orEmpty()}"
+                }
             } catch (error: android.database.sqlite.SQLiteException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery database failed: ${error.message}")
-                null
+                withContext(Dispatchers.Main) {
+                    webReady = false
+                    webLoadError = "WebUI 回滚暂不可用：本地数据库暂不可用"
+                }
             } catch (error: SecurityException) {
                 Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery permission failed: ${error.message}")
-                null
-            } catch (error: IllegalArgumentException) {
-                Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery rejected: ${error.message}")
-                null
-            } catch (error: IllegalStateException) {
-                Log.e(MOBILE_WEB_LOG_TAG, "WebUI serving recovery state failed: ${error.message}")
-                null
-            }
-            withContext(Dispatchers.Main) {
-                activeGeneration = fallback
-                generationRef.set(fallback)
-                admissionRef.set(true)
-                webReady = false
+                withContext(Dispatchers.Main) {
+                    webReady = false
+                    webLoadError = "WebUI 回滚暂不可用：缓存无权访问"
+                }
             }
         }
     }
@@ -597,8 +692,9 @@ internal fun MobileWebChat(
                                             Toast.makeText(context, "分享文件准备失败，请重试", Toast.LENGTH_SHORT).show()
                                             false
                                         } else {
-                                            onNativeActivityResultLaunched()
-                                            launchPlainTextShare(context, prepared)
+                                            val launched = launchPlainTextShare(context, prepared)
+                                            if (launched) onNativeActivityResultLaunched()
+                                            launched
                                         }
                                     }
                                     currentWebView.post {
@@ -654,12 +750,6 @@ internal fun MobileWebChat(
                                         activeAttempt = null
                                         webLoadError = null
                                     }
-                                } catch (_: IllegalArgumentException) {
-                                    healthCommitStarted.set(false)
-                                    failMobileWebUiActivation("healthy_rejected")
-                                } catch (_: IllegalStateException) {
-                                    healthCommitStarted.set(false)
-                                    failMobileWebUiActivation("healthy_rejected")
                                 } catch (_: IOException) {
                                     healthCommitStarted.set(false)
                                     failMobileWebUiActivation("healthy_storage_retry")
@@ -691,6 +781,7 @@ internal fun MobileWebChat(
                             context,
                             assetLoader,
                             onExternalActivityLaunched = onNativeActivityResultLaunched,
+                            allowExternalNavigation = mobileExternalNavigationAllowed(candidate),
                             onMainFrameStarted = { post {
                                 webLoadError = null
                                 webReady = false
@@ -1413,6 +1504,7 @@ private class MobileWebClient(
     private val context: Context,
     private val assetLoader: WebViewAssetLoader,
     private val onExternalActivityLaunched: () -> Unit,
+    private val allowExternalNavigation: Boolean,
     private val onMainFrameStarted: WebView.() -> Unit,
     private val onMainFrameError: WebView.(String) -> Unit,
     private val onRendererGone: () -> Unit,
@@ -1500,10 +1592,12 @@ private class MobileWebClient(
             MobileNavigationAction.ALLOW_INTERNAL -> false
             MobileNavigationAction.BLOCK -> true
             MobileNavigationAction.OPEN_EXTERNAL -> {
-                try {
-                    onExternalActivityLaunched()
-                    context.startActivity(Intent(Intent.ACTION_VIEW, request.url))
-                } catch (_: ActivityNotFoundException) {
+                if (!allowExternalNavigation) return true
+                val launched = nativeActivityLaunchSucceeded(
+                    launch = { context.startActivity(Intent(Intent.ACTION_VIEW, request.url)) },
+                    onSuccess = onExternalActivityLaunched,
+                )
+                if (!launched) {
                     Toast.makeText(context, "没有可打开此链接的应用", Toast.LENGTH_SHORT).show()
                 }
                 true
@@ -1513,6 +1607,8 @@ private class MobileWebClient(
 }
 
 internal enum class MobileNavigationAction { ALLOW_INTERNAL, OPEN_EXTERNAL, BLOCK }
+
+internal fun mobileExternalNavigationAllowed(candidate: Boolean): Boolean = !candidate
 
 internal fun mobileWebBackHandled(javascriptResult: String?): Boolean = javascriptResult == "true"
 

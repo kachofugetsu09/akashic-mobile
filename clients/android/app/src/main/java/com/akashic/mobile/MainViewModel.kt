@@ -180,9 +180,11 @@ class MainViewModel(
     val pluginUiAssetStore = container.pluginUiAssetStore
     val mobileWebUiStore = container.mobileWebUiStore
     val mobileWebUiServing = container.mobileWebUiStore.serving
+    val mobileWebUiAttempt = container.mobileWebUiStore.attempt
     val mobileWebUiReadyGeneration = container.realtimeSession.mobileWebUi.readyGeneration
     val mobileWebUiResetEvent = container.realtimeSession.mobileWebUi.resetEvent
     val mobileWebUiWaitForSpace = container.realtimeSession.mobileWebUi.waitForSpace
+    val mobileWebUiRetryAvailable = container.realtimeSession.mobileWebUi.retryAvailable
     internal val mobileWebUiCoordinator = container.realtimeSession.mobileWebUi
     private val navigationTarget = MutableStateFlow<NavigationTargetUi?>(null)
     private val pendingNotificationTarget = savedStateHandle.getStateFlow<NotificationTargetRequest?>(

@@ -58,8 +58,11 @@ private val MOBILE_WEB_UI_PROCESS_TOKEN = UUID.randomUUID().toString()
 internal fun mobileWebUiSessionStartedForProcess(
     savedProcessToken: String?,
     currentProcessToken: String,
+    savedServerId: String?,
+    currentServerId: String?,
     savedSessionStarted: Boolean,
-): Boolean = savedSessionStarted && savedProcessToken == currentProcessToken
+): Boolean = savedSessionStarted && savedProcessToken == currentProcessToken &&
+    savedServerId != null && savedServerId == currentServerId
 
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
@@ -134,9 +137,11 @@ class MainActivity : ComponentActivity() {
                 val incomingShare by viewModel.incomingShare.collectAsStateWithLifecycle()
                 val pluginUiCatalog by viewModel.pluginUiCatalog.collectAsStateWithLifecycle()
                 val mobileWebUiServing by viewModel.mobileWebUiServing.collectAsStateWithLifecycle()
+                val mobileWebUiAttempt by viewModel.mobileWebUiAttempt.collectAsStateWithLifecycle()
                 val mobileWebUiReadyGeneration by viewModel.mobileWebUiReadyGeneration.collectAsStateWithLifecycle()
                 val mobileWebUiResetEvent by viewModel.mobileWebUiResetEvent.collectAsStateWithLifecycle()
                 val mobileWebUiWaitForSpace by viewModel.mobileWebUiWaitForSpace.collectAsStateWithLifecycle()
+                val mobileWebUiRetryAvailable by viewModel.mobileWebUiRetryAvailable.collectAsStateWithLifecycle()
                 val mobileWebUiApplyGeneration = remember { mutableStateOf<String?>(null) }
                 val mobileWebUiSessionStarted = rememberSaveable { mutableStateOf(false) }
                 val mobileWebUiSessionServerId = rememberSaveable { mutableStateOf<String?>(null) }
@@ -144,6 +149,8 @@ class MainActivity : ComponentActivity() {
                 val processSessionStarted = mobileWebUiSessionStartedForProcess(
                     savedProcessToken = mobileWebUiSessionProcessToken.value,
                     currentProcessToken = MOBILE_WEB_UI_PROCESS_TOKEN,
+                    savedServerId = mobileWebUiSessionServerId.value,
+                    currentServerId = session.serverId,
                     savedSessionStarted = mobileWebUiSessionStarted.value,
                 )
                 LaunchedEffect(Unit) {
@@ -161,8 +168,13 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     if (shouldRequestNotificationPermission()) {
                         markNotificationPermissionRequested()
-                        markNativeActivityResultLaunched()
-                        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        if (!nativeActivityLaunchSucceeded(
+                                launch = { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) },
+                                onSuccess = ::markNativeActivityResultLaunched,
+                            )
+                        ) {
+                            Toast.makeText(this@MainActivity, "无法打开通知权限请求", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
                 LaunchedEffect(session.hasProfile) {
@@ -236,6 +248,8 @@ class MainActivity : ComponentActivity() {
                             mobileWebUiServingGeneration = mobileWebUiServing
                                 ?.takeIf { it.serverId == session.serverId }
                                 ?.generationId,
+                            mobileWebUiAttemptLease = mobileWebUiAttempt
+                                ?.takeIf { it.serverId == session.serverId },
                             mobileWebUiReadyGeneration = mobileWebUiReadyGeneration,
                             mobileWebUiResetEvent = mobileWebUiResetEvent,
                             mobileWebUiPresentationEpoch = mobileWebUiPresentationEpoch.value,
@@ -253,7 +267,15 @@ class MainActivity : ComponentActivity() {
                             onReloadFromServer = viewModel::reloadFromServer,
                             onExportDiagnostics = ::shareDiagnostics,
                             onOpenSettings = { settingsOpen.value = true },
-                            onAttach = { attachmentPicker.launch(arrayOf("*/*")) },
+                            onAttach = {
+                                if (!nativeActivityLaunchSucceeded(
+                                        launch = { attachmentPicker.launch(arrayOf("*/*")) },
+                                        onSuccess = ::markNativeActivityResultLaunched,
+                                    )
+                                ) {
+                                    Toast.makeText(this@MainActivity, "无法打开文件选择器", Toast.LENGTH_SHORT).show()
+                                }
+                            },
                             onRemoveAttachment = viewModel::removeAttachment,
                             onRetryAttachment = viewModel::retryAttachment,
                             onContinueMeteredTransfer = viewModel::continueLargeTransfersOnMeteredNetwork,
@@ -267,20 +289,38 @@ class MainActivity : ComponentActivity() {
                             onOpenDownloadedAttachment = { attachmentId ->
                                 withCachedAttachment(this@MainActivity, conversation, attachmentId) {
                                     viewModel.touchDownloadedAttachment(attachmentId)
-                                    openCachedAttachment(this@MainActivity, it)
+                                    openCachedAttachment(
+                                        this@MainActivity,
+                                        it,
+                                        ::markNativeActivityResultLaunched,
+                                    )
                                 }
                             },
                             onShareDownloadedAttachment = { attachmentId ->
                                 withCachedAttachment(this@MainActivity, conversation, attachmentId) {
                                     viewModel.touchDownloadedAttachment(attachmentId)
-                                    shareCachedAttachment(this@MainActivity, it)
+                                    shareCachedAttachment(
+                                        this@MainActivity,
+                                        it,
+                                        ::markNativeActivityResultLaunched,
+                                    )
                                 }
                             },
                             onSaveDownloadedAttachment = { attachmentId ->
                                 withCachedAttachment(this@MainActivity, conversation, attachmentId) {
                                     viewModel.touchDownloadedAttachment(attachmentId)
                                     pendingSave.value = it
-                                    attachmentSaver.launch(it.filename)
+                                    if (!nativeActivityLaunchSucceeded(
+                                            launch = { attachmentSaver.launch(it.filename) },
+                                            onSuccess = ::markNativeActivityResultLaunched,
+                                        )
+                                    ) {
+                                        Toast.makeText(
+                                            this@MainActivity,
+                                            "无法打开保存位置选择器",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
                                 }
                             },
                             onDismissError = viewModel::dismissError,
@@ -333,6 +373,7 @@ class MainActivity : ComponentActivity() {
                             mobileWebUiServerId = session.serverId,
                             mobileWebUiReadyGeneration = mobileWebUiReadyGeneration,
                             mobileWebUiWaitForSpace = mobileWebUiWaitForSpace,
+                            mobileWebUiRetryAvailable = mobileWebUiRetryAvailable,
                             mobileWebUiCanReplaceUi = settingsOpen.value,
                             onCollectMobileWebUi = viewModel::collectMobileWebUiGarbage,
                             onResetMobileWebUi = viewModel::resetMobileWebUi,
@@ -431,28 +472,42 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openNotificationSettings() {
-        markNativeActivityResultLaunched()
-        startActivity(
-            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                data = "package:$packageName".toUri()
-                putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-            },
-        )
+        if (!nativeActivityLaunchSucceeded(
+                launch = {
+                    startActivity(
+                        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            data = "package:$packageName".toUri()
+                            putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                        },
+                    )
+                },
+                onSuccess = ::markNativeActivityResultLaunched,
+            )
+        ) {
+            Toast.makeText(this, "系统通知设置页面不可用", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun shareDiagnostics() {
-        markNativeActivityResultLaunched()
         val report = CrashDiagnostics.exportReport(application)
-        startActivity(
-            Intent.createChooser(
-                Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_SUBJECT, "Akashic Mobile ${BuildConfig.VERSION_NAME} 诊断报告")
-                    putExtra(Intent.EXTRA_TEXT, report)
+        if (!nativeActivityLaunchSucceeded(
+                launch = {
+                    startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_SUBJECT, "Akashic Mobile ${BuildConfig.VERSION_NAME} 诊断报告")
+                                putExtra(Intent.EXTRA_TEXT, report)
+                            },
+                            "导出诊断报告",
+                        ),
+                    )
                 },
-                "导出诊断报告",
-            ),
-        )
+                onSuccess = ::markNativeActivityResultLaunched,
+            )
+        ) {
+            Toast.makeText(this, "没有可导出诊断报告的应用", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun markNativeActivityResultLaunched() {

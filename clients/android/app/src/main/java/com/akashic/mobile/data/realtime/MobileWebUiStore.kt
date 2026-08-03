@@ -1,5 +1,6 @@
 package com.akashic.mobile.data.realtime
 
+import android.database.sqlite.SQLiteException
 import android.webkit.WebResourceResponse
 import com.akashic.mobile.data.local.MobileWebUiBlobEntity
 import com.akashic.mobile.data.local.MobileWebUiDao
@@ -22,6 +23,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.encodeToString
 
 data class MobileWebUiServing(val serverId: String, val generationId: String)
+data class MobileWebUiAttemptLease(val serverId: String, val generationId: String, val nonce: String)
+data class MobileWebUiRollbackResult(
+    val generationId: String?,
+    val fallbackUnavailable: Boolean,
+)
 data class MobileWebUiGcReport(
     val removedGenerations: Int,
     val removedBlobs: Int,
@@ -39,6 +45,18 @@ data class MobileWebUiSpaceAdmission(
     val globalBytes: Long,
     val globalBudgetBytes: Long,
     val blockedReason: String? = null,
+    val targetKey: String? = null,
+)
+
+class MobileWebUiResetCleanupPendingException(message: String) : IOException(message)
+
+@kotlinx.serialization.Serializable
+private data class MobileWebUiResetMarker(
+    val serverId: String,
+    val targetKey: String?,
+    val fingerprint: String?,
+    val createdAt: Long,
+    val physicalDeleted: Boolean,
 )
 
 /** Owns immutable per-server WebUI files and the small Room pointer metadata. */
@@ -46,6 +64,11 @@ class MobileWebUiStore(
     private val root: File,
     private val dao: MobileWebUiDao,
     private val nativeBuild: Int,
+    private val deletePhysicalFile: (File) -> Boolean = { it.delete() },
+    private val deletePartialFile: (File) -> Boolean = { it.delete() },
+    private val deleteDirectory: (File) -> Boolean = { it.deleteRecursively() },
+    private val deleteResetMarker: (File) -> Boolean = { it.delete() },
+    private val renameFile: (File, File) -> Boolean = { source, target -> source.renameTo(target) },
 ) {
     private val locks = ConcurrentHashMap<String, Mutex>()
 
@@ -57,10 +80,12 @@ class MobileWebUiStore(
 
     private val servingState = MutableStateFlow<MobileWebUiServing?>(null)
     val serving: StateFlow<MobileWebUiServing?> = servingState.asStateFlow()
+    private val attemptState = MutableStateFlow<MobileWebUiAttemptLease?>(null)
+    val attempt: StateFlow<MobileWebUiAttemptLease?> = attemptState.asStateFlow()
 
     init {
         require(nativeBuild > 0) { "WebUI native build 必须为正数" }
-        check(root.exists() || root.mkdirs()) { "无法创建 WebUI 缓存根目录: $root" }
+        if (!root.exists() && !root.mkdirs()) throw IOException("无法创建 WebUI 缓存根目录: $root")
         require(root.isDirectory) { "WebUI 缓存根目录不是目录: $root" }
     }
 
@@ -77,7 +102,22 @@ class MobileWebUiStore(
 
     suspend fun state(serverId: String): MobileWebUiStateEntity? = dao.getState(serverId)
 
-    suspend fun hasManualReset(serverId: String): Boolean = dao.hasManualResetReject(serverId)
+    fun hasPendingReset(serverId: String): Boolean =
+        resetMarkerFile(serverId).exists() ||
+            resetMarkerTemporaryFile(serverId).exists() ||
+            resetTrashDirectory(serverId).exists()
+
+    suspend fun reconcilePendingResetIfNeeded(serverId: String) = withServerLock(serverId) {
+        reconcilePendingReset(serverId)
+    }
+
+    suspend fun isPermanentlyRejected(
+        serverId: String,
+        target: MobileWebUiTarget,
+        fingerprint: String,
+    ): Boolean = withServerLock(serverId) {
+        dao.getReject(serverId, target.targetKey, fingerprint)?.retryAfter == null
+    }
 
     suspend fun hasVerifiedGeneration(serverId: String, generationId: String): Boolean =
         withServerLock(serverId) {
@@ -127,7 +167,8 @@ class MobileWebUiStore(
                 updatedAt = System.currentTimeMillis(),
             ),
         )
-        setServing(null, null)
+        attemptState.value = null
+        setCommittedServing(null, null)
     }
 
     /** Clear serving only when the same server-owned state still selects the baseline. */
@@ -144,7 +185,8 @@ class MobileWebUiStore(
                 updatedAt = System.currentTimeMillis(),
             ),
         )
-        setServing(null, null)
+        attemptState.value = null
+        setCommittedServing(null, null)
         true
     }
 
@@ -186,10 +228,11 @@ class MobileWebUiStore(
         rejected.retryAfter == null || rejected.retryAfter > System.currentTimeMillis()
     }
 
-    suspend fun clearManualResetReject(serverId: String, target: MobileWebUiTarget, fingerprint: String) =
+    suspend fun clearReject(serverId: String, target: MobileWebUiTarget, fingerprint: String) =
         withServerLock(serverId) {
-            val reject = dao.getReject(serverId, target.targetKey, fingerprint) ?: return@withServerLock
-            if (reject.reason == "manual_reset") dao.deleteReject(serverId, target.targetKey, fingerprint)
+            if (dao.getReject(serverId, target.targetKey, fingerprint) != null) {
+                dao.deleteReject(serverId, target.targetKey, fingerprint)
+            }
         }
 
     suspend fun rejectGeneration(
@@ -221,6 +264,7 @@ class MobileWebUiStore(
     ): MobileWebUiGcReport = withServerLock(serverId) {
         require(maxGenerations >= 1 && maxBytes > 0) { "WebUI GC budget 无效" }
         val orphanBlobs = reconcileOrphanBlobs(serverId)
+        val orphanGenerations = collectOrphanGenerations(serverId)
         val state = dao.getState(serverId)
         val pinned = setOfNotNull(
             state?.servingGenerationId,
@@ -231,17 +275,18 @@ class MobileWebUiStore(
         val partialRemovedBytes = reconcilePartials(serverId, state ?: baselineState(serverId))
         val generations = dao.listGenerations(serverId).sortedByDescending { it.lastUsedAt }.toMutableList()
         var totalBytes = generations.sumOf { generationDirectoryBytes(serverId, it.generationId) } +
-            dao.listBlobs(serverId).sumOf { blobFile(serverId, it.sha256).length() }
-        var removedGenerations = 0
-        var removedBytes = partialRemovedBytes + orphanBlobs.removedBytes
-        var blockedGenerations = 0
-        var unownedFiles = orphanBlobs.unownedFiles
+            dao.listBlobs(serverId).sumOf { blobFile(serverId, it.sha256).length() } +
+            orphanGenerations.remainingBytes
+        var removedGenerations = orphanGenerations.removedGenerations
+        var removedBytes = partialRemovedBytes + orphanBlobs.removedBytes + orphanGenerations.removedBytes
+        var blockedGenerations = orphanGenerations.blockedGenerations
+        var unownedFiles = orphanBlobs.unownedFiles + orphanGenerations.unownedFiles
         for (generation in generations.toList().asReversed()) {
             if (generation.generationId in pinned) continue
             if (generations.size <= maxGenerations && totalBytes <= maxBytes) break
             val directory = generationDirectory(serverId, generation.generationId)
             val bytes = generationDirectoryBytes(serverId, generation.generationId)
-            if (directory.exists() && !directory.deleteRecursively()) {
+            if (directory.exists() && !deleteDirectory(directory)) {
                 blockedGenerations += 1
                 unownedFiles += 1
                 continue
@@ -312,6 +357,46 @@ class MobileWebUiStore(
         var removedBytes = 0L
         var blockedGenerations = 0
         var unownedFiles = 0
+        val servers = (
+            dao.listStates().map { it.serverId } +
+                dao.listAllGenerations().map { it.serverId } +
+                dao.listAllBlobs().map { it.serverId }
+            )
+            .toSet()
+        val profileRoots = dao.listKnownServerIds().map { it.sha256() }.toSet()
+        val knownServerRoots = servers.map { it.sha256() }.toSet()
+        root.listFiles()?.toList().orEmpty()
+            .filter {
+                it.isDirectory && MOBILE_WEB_UI_SHA256.matches(it.name) &&
+                    it.name !in profileRoots && it.name !in knownServerRoots
+            }
+            .forEach { orphanRoot ->
+                val bytes = orphanRoot.walkTopDown().filter(File::isFile).sumOf(File::length)
+                if (deleteDirectory(orphanRoot)) {
+                    removedBytes += bytes
+                } else {
+                    blockedGenerations += 1
+                    unownedFiles += orphanRoot.walkTopDown().count(File::isFile).coerceAtLeast(1)
+                }
+            }
+        val rootEntries = root.listFiles()?.toList().orEmpty()
+        val unknownRootFiles = rootEntries
+            .filter { it.isDirectory && MOBILE_WEB_UI_SHA256.matches(it.name) && it.name !in knownServerRoots }
+            .sumOf { serverRoot -> serverRoot.walkTopDown().count(File::isFile) }
+        val rootArtifacts = rootEntries
+            .filter { entry ->
+                entry.name !in knownServerRoots &&
+                    !(entry.isDirectory && MOBILE_WEB_UI_SHA256.matches(entry.name))
+            }
+            .sumOf { entry -> if (entry.isDirectory) entry.walkTopDown().count(File::isFile) else 1 }
+        unownedFiles += unknownRootFiles + rootArtifacts
+        servers.forEach { serverId ->
+            val orphan = withServerLock(serverId) { collectOrphanGenerations(serverId) }
+            removedGenerations += orphan.removedGenerations
+            removedBytes += orphan.removedBytes
+            blockedGenerations += orphan.blockedGenerations
+            unownedFiles += orphan.unownedFiles
+        }
         while (derivedBytes() > maxBytes) {
             val candidates = dao.listAllGenerations().sortedBy { it.lastUsedAt }
             var removed = false
@@ -328,8 +413,8 @@ class MobileWebUiStore(
                     if (current == null || current.generationId in pinned) return@withServerLock null
                     val directory = generationDirectory(candidate.serverId, current.generationId)
                     val bytes = generationDirectoryBytes(candidate.serverId, current.generationId)
-                    if (directory.exists() && !directory.deleteRecursively()) {
-                        return@withServerLock GlobalGcResult(0, 0, 0, 1, 0)
+                    if (directory.exists() && !deleteDirectory(directory)) {
+                        return@withServerLock GlobalGcResult(0, 0, 0, 1, 1)
                     }
                     dao.deleteGeneration(candidate.serverId, current.generationId)
                     GlobalGcResult(1, 0, bytes, 0, 0)
@@ -338,6 +423,7 @@ class MobileWebUiStore(
                 removedGenerations += result.generations
                 removedBytes += result.bytes
                 blockedGenerations += result.blocked
+                unownedFiles += result.unownedFiles
                 removed = result.generations > 0
                 if (removed) break
             }
@@ -355,8 +441,6 @@ class MobileWebUiStore(
                 break
             }
         }
-        val servers = (dao.listStates().map { it.serverId } + dao.listAllGenerations().map { it.serverId })
-            .toSet()
         servers.forEach { serverId ->
             withServerLock(serverId) {
                 val refs = referencedBlobDigests(serverId)
@@ -391,10 +475,14 @@ class MobileWebUiStore(
         collectGarbage(serverId, maxBytes = serverBudgetBytes)
         collectGlobalGarbage(maxBytes = globalBudgetBytes)
         return withServerLock(serverId) {
+            val seenDigests = HashSet<String>(manifest.files.size)
             val requiredBytes = manifest.files.sumOf { file ->
-                val blob = blobFile(serverId, file.sha256)
-                if (blob.isFile && blob.length() == file.sizeBytes && blob.sha256() == file.sha256) 0L
-                else file.sizeBytes
+                if (!seenDigests.add(file.sha256)) 0L
+                else {
+                    val blob = blobFile(serverId, file.sha256)
+                    if (blob.isFile && blob.length() == file.sizeBytes && blob.sha256() == file.sha256) 0L
+                    else file.sizeBytes
+                }
             }
             val serverBytes = derivedServerBytesLocked(serverId)
             val globalBytes = derivedBytes()
@@ -453,19 +541,19 @@ class MobileWebUiStore(
             }
         } else {
             val staging = stagingGenerationDirectory(serverId, target.generationId)
-            if (staging.exists()) check(staging.deleteRecursively()) { "无法清理 WebUI manifest staging" }
-            check(staging.parentFile?.mkdirs() != false) { "无法创建 WebUI manifest staging 父目录" }
-            check(staging.mkdirs()) { "无法创建 WebUI manifest staging 目录" }
+            if (staging.exists() && !staging.deleteRecursively()) throw IOException("无法清理 WebUI manifest staging")
+            ensureDirectory(requireNotNull(staging.parentFile), "无法创建 WebUI manifest staging 父目录")
+            ensureDirectory(staging, "无法创建 WebUI manifest staging 目录")
             val temporary = staging.resolve(".manifest.${System.nanoTime()}.tmp")
             FileOutputStream(temporary).use { output ->
                 output.write(bytes)
                 output.fd.sync()
             }
-            check(temporary.renameTo(staging.resolve("manifest.json"))) {
-                "WebUI manifest 临时文件提交失败"
+            if (!renameFile(temporary, staging.resolve("manifest.json"))) {
+                throw IOException("WebUI manifest 临时文件提交失败")
             }
-            check(generation.parentFile?.mkdirs() != false) { "无法创建 WebUI generation 父目录" }
-            check(staging.renameTo(generation)) { "WebUI generation 原子提交失败" }
+            ensureDirectory(requireNotNull(generation.parentFile), "无法创建 WebUI generation 父目录")
+            if (!renameFile(staging, generation)) throw IOException("WebUI generation 原子提交失败")
         }
         val now = System.currentTimeMillis()
         dao.upsertGeneration(manifestEntity(serverId, target, manifest, generation, now))
@@ -485,8 +573,8 @@ class MobileWebUiStore(
             validateBlobRequest(sha256, bytes)
             val part = blobPart(serverId, sha256)
             val metadata = blobPartMetadata(serverId, sha256)
-            if (part.exists()) check(part.delete()) { "无法删除 WebUI partial blob: $sha256" }
-            if (metadata.exists()) check(metadata.delete()) { "无法删除 WebUI partial 元数据: $sha256" }
+            if (part.exists() && !deletePartialFile(part)) throw IOException("无法删除 WebUI partial blob: $sha256")
+            if (metadata.exists() && !deletePartialFile(metadata)) throw IOException("无法删除 WebUI partial 元数据: $sha256")
         }
 
     /** Append one digest-bound range and publish the blob only after a complete hash check. */
@@ -520,7 +608,7 @@ class MobileWebUiStore(
         val blob = blobFile(serverId, sha256)
         if (blob.isFile && blob.length() == 0L && blob.sha256() == sha256) return@withServerLock true
         val part = blobPart(serverId, sha256)
-        check(part.parentFile?.mkdirs() != false) { "无法创建 WebUI empty blob 目录" }
+        ensureDirectory(requireNotNull(part.parentFile), "无法创建 WebUI empty blob 目录")
         FileOutputStream(part, false).use { it.fd.sync() }
         publishBlob(serverId, sha256, 0)
         true
@@ -532,7 +620,7 @@ class MobileWebUiStore(
             val blob = blobFile(serverId, sha256)
             if (!blob.isFile || blob.length() != bytes) return@withServerLock false
             if (blob.sha256() != sha256) {
-                check(blob.delete()) { "无法删除损坏 WebUI blob: $sha256" }
+                if (!blob.delete()) throw IOException("无法删除损坏 WebUI blob: $sha256")
                 dao.deleteBlob(serverId, sha256)
                 return@withServerLock false
             }
@@ -577,9 +665,53 @@ class MobileWebUiStore(
                 updatedAt = System.currentTimeMillis(),
             ),
         )
-        setServing(Serving(serverId, generationId), manifest)
+        attemptState.value = MobileWebUiAttemptLease(serverId, generationId, nonce)
+        setPresentation(Serving(serverId, generationId), manifest)
         true
     }
+
+    suspend fun isAttemptCurrent(serverId: String, generationId: String, nonce: String): Boolean =
+        withServerLock(serverId) {
+            val state = dao.getState(serverId) ?: return@withServerLock false
+            state.attemptingGenerationId == generationId && state.attemptingNonce == nonce
+        }
+
+    /** Cancel a candidate only when its exact process lease is still current, preserving its cache. */
+    suspend fun rollbackAttempt(serverId: String, generationId: String, nonce: String): Boolean =
+        withServerLock(serverId) {
+            val state = dao.getState(serverId) ?: return@withServerLock false
+            if (state.attemptingGenerationId != generationId || state.attemptingNonce != nonce) {
+                if (attemptState.value?.serverId == serverId &&
+                    attemptState.value?.generationId == generationId &&
+                    attemptState.value?.nonce == nonce
+                ) {
+                    attemptState.value = null
+                }
+                return@withServerLock false
+            }
+            val fallbackId = state.fallbackGenerationId
+            val fallback = fallbackId?.let { id ->
+                dao.getGeneration(serverId, id)?.let { generation ->
+                    try {
+                        readVerifiedGeneration(serverId, generation)
+                    } catch (_: IllegalArgumentException) {
+                        null
+                    }
+                }
+            }
+            val nextState = state.copy(
+                servingGenerationId = fallback?.let { fallbackId },
+                fallbackGenerationId = fallback?.let { fallbackId },
+                attemptingGenerationId = null,
+                attemptingNonce = null,
+                attemptingStartedAt = null,
+                updatedAt = System.currentTimeMillis(),
+            )
+            dao.upsertState(nextState)
+            attemptState.value = null
+            setCommittedServing(fallback?.let { Serving(serverId, requireNotNull(fallbackId)) }, fallback)
+            true
+        }
 
     suspend fun commitHealthy(serverId: String, generationId: String, nonce: String) =
         withServerLock(serverId) {
@@ -605,7 +737,8 @@ class MobileWebUiStore(
                 updatedAt = now,
             )
             dao.commitHealthyDurableState(nextState, generationId, now)
-            setServing(Serving(serverId, generationId), manifest)
+            attemptState.value = null
+            setCommittedServing(Serving(serverId, generationId), manifest)
         }
 
     /** Roll back a candidate and reject its exact target in one durable transaction. */
@@ -615,7 +748,21 @@ class MobileWebUiStore(
         nonce: String,
         fingerprint: String,
         reason: String,
-    ): String? = withServerLock(serverId) {
+    ): String? = rollbackAttemptAndRejectResult(
+        serverId,
+        generationId,
+        nonce,
+        fingerprint,
+        reason,
+    ).generationId
+
+    suspend fun rollbackAttemptAndRejectResult(
+        serverId: String,
+        generationId: String,
+        nonce: String,
+        fingerprint: String,
+        reason: String,
+    ): MobileWebUiRollbackResult = withServerLock(serverId) {
         rollbackAndRejectLocked(serverId, generationId, nonce, fingerprint, reason)
     }
 
@@ -625,7 +772,19 @@ class MobileWebUiStore(
         generationId: String,
         fingerprint: String,
         reason: String,
-    ): String? = withServerLock(serverId) {
+    ): String? = rollbackServingAndRejectResult(
+        serverId,
+        generationId,
+        fingerprint,
+        reason,
+    ).generationId
+
+    suspend fun rollbackServingAndRejectResult(
+        serverId: String,
+        generationId: String,
+        fingerprint: String,
+        reason: String,
+    ): MobileWebUiRollbackResult = withServerLock(serverId) {
         rollbackAndRejectLocked(serverId, generationId, null, fingerprint, reason)
     }
 
@@ -657,7 +816,8 @@ class MobileWebUiStore(
             )
         }
         dao.rollbackAndRejectDurableState(nextState, rejection)
-        setServing(null, null)
+        attemptState.value = null
+        setCommittedServing(null, null)
     }
 
     private suspend fun rollbackAndRejectLocked(
@@ -666,27 +826,38 @@ class MobileWebUiStore(
         nonce: String?,
         fingerprint: String,
         reason: String,
-    ): String? {
-        val state = dao.getState(serverId) ?: return null
+    ): MobileWebUiRollbackResult {
+        val state = dao.getState(serverId) ?: return MobileWebUiRollbackResult(null, false)
         val generation = dao.getGeneration(serverId, generationId)
-        val attemptMatches = nonce != null &&
-            state.attemptingGenerationId == generationId && state.attemptingNonce == nonce
-        val servingMatches = state.servingGenerationId == generationId
+        val attemptMatches = state.attemptingGenerationId == generationId &&
+            (nonce == null || state.attemptingNonce == nonce)
+        val servingMatches = state.attemptingGenerationId == null && state.servingGenerationId == generationId
         val shouldRollback = attemptMatches || servingMatches
-        val fallback = state.fallbackGenerationId?.let { fallbackId ->
+        var fallbackUnavailable = false
+        val fallback = if (shouldRollback) state.fallbackGenerationId?.let { fallbackId ->
             dao.getGeneration(serverId, fallbackId)?.let { fallbackGeneration ->
                 try {
                     readVerifiedGeneration(serverId, fallbackGeneration)
                 } catch (_: IllegalArgumentException) {
+                    fallbackUnavailable = true
+                    null
+                } catch (_: IOException) {
+                    fallbackUnavailable = true
+                    null
+                } catch (_: SQLiteException) {
+                    fallbackUnavailable = true
+                    null
+                } catch (_: SecurityException) {
+                    fallbackUnavailable = true
                     null
                 }
             }
-        }
+        } else null
         val healthyFallback = fallback?.let { state.fallbackGenerationId }
         val nextState = if (shouldRollback) {
             state.copy(
-                servingGenerationId = healthyFallback,
-                fallbackGenerationId = if (attemptMatches) healthyFallback else null,
+                servingGenerationId = if (fallbackUnavailable) null else healthyFallback,
+                fallbackGenerationId = if (fallbackUnavailable || attemptMatches) healthyFallback else null,
                 attemptingGenerationId = if (attemptMatches) null else state.attemptingGenerationId,
                 attemptingNonce = if (attemptMatches) null else state.attemptingNonce,
                 attemptingStartedAt = if (attemptMatches) null else state.attemptingStartedAt,
@@ -700,16 +871,23 @@ class MobileWebUiStore(
                 serverId = serverId,
                 targetKey = it.targetKey,
                 compatibilityFingerprint = fingerprint,
-                reason = reason,
+                reason = if (fallbackUnavailable) "fallback_unavailable" else reason,
                 firstRejectedAt = System.currentTimeMillis(),
                 retryAfter = null,
             )
         }
         dao.rollbackAndRejectDurableState(nextState, rejection)
         if (shouldRollback) {
-            setServing(healthyFallback?.let { Serving(serverId, it) }, fallback)
+            attemptState.value = null
+            setCommittedServing(
+                if (fallbackUnavailable) null else healthyFallback?.let { Serving(serverId, it) },
+                if (fallbackUnavailable) null else fallback,
+            )
         }
-        return if (shouldRollback) healthyFallback else state.servingGenerationId
+        return MobileWebUiRollbackResult(
+            generationId = if (shouldRollback) healthyFallback else state.servingGenerationId,
+            fallbackUnavailable = fallbackUnavailable,
+        )
     }
 
     /** Restore only the durable serving pointer; an arbitrary cached generation cannot become serving. */
@@ -717,7 +895,8 @@ class MobileWebUiStore(
         val state = dao.getState(serverId)
         val generationId = state?.servingGenerationId
         if (generationId == null) {
-            setServing(null, null)
+            attemptState.value = null
+            setCommittedServing(null, null)
             return@withServerLock true
         }
         val generation = dao.getGeneration(serverId, generationId)
@@ -729,7 +908,8 @@ class MobileWebUiStore(
             }
         }
         if (manifest != null) {
-            setServing(Serving(serverId, generationId), manifest)
+            attemptState.value = null
+            setCommittedServing(Serving(serverId, generationId), manifest)
             dao.touchGeneration(serverId, generationId, System.currentTimeMillis())
             return@withServerLock true
         }
@@ -749,7 +929,8 @@ class MobileWebUiStore(
                 updatedAt = System.currentTimeMillis(),
             ),
         )
-        setServing(fallbackManifest?.let { Serving(serverId, requireNotNull(fallback).generationId) }, fallbackManifest)
+        attemptState.value = null
+        setCommittedServing(fallbackManifest?.let { Serving(serverId, requireNotNull(fallback).generationId) }, fallbackManifest)
         false
     }
 
@@ -759,12 +940,14 @@ class MobileWebUiStore(
 
     /** Reconcile only derived files; no business Room rows are touched. */
     suspend fun reconcile(serverId: String) = withServerLock(serverId) {
+        reconcilePendingReset(serverId)
         val serverRoot = serverDirectory(serverId)
         reconcileOrphanBlobs(serverId)
-        if (!serverRoot.exists()) return@withServerLock
-        serverRoot.walkTopDown()
+        if (serverRoot.exists()) {
+            serverRoot.walkTopDown()
             .filter { it.isFile && it.name.endsWith(".tmp") }
-            .forEach { check(it.delete()) { "无法删除 WebUI 临时文件: $it" } }
+            .forEach { if (!it.delete()) throw IOException("无法删除 WebUI 临时文件: $it") }
+        }
         reconcileOrphanStaging(serverId)
         val state = dao.getState(serverId) ?: run {
             reconcilePartials(serverId, baselineState(serverId))
@@ -803,13 +986,15 @@ class MobileWebUiStore(
                 )
             }
             dao.recoverAttemptDurableState(recoveredState, rejection)
-            setServing(fallbackManifest?.let { Serving(serverId, requireNotNull(healthyFallback)) }, fallbackManifest)
+            attemptState.value = null
+            setCommittedServing(fallbackManifest?.let { Serving(serverId, requireNotNull(healthyFallback)) }, fallbackManifest)
             return@withServerLock
         }
         val servingGeneration = state.servingGenerationId
         if (servingGeneration != null && dao.getGeneration(serverId, servingGeneration) == null) {
             dao.upsertState(state.copy(servingGenerationId = null))
-            setServing(null, null)
+            attemptState.value = null
+            setCommittedServing(null, null)
         }
     }
 
@@ -850,7 +1035,7 @@ class MobileWebUiStore(
             }
             .forEach {
                 removedBytes += it.length()
-                check(it.delete()) { "无法删除无 owner 的 WebUI partial: $it" }
+                if (!it.delete()) throw IOException("无法删除无 owner 的 WebUI partial: $it")
             }
         return removedBytes
     }
@@ -905,6 +1090,14 @@ class MobileWebUiStore(
         val unownedFiles: Int,
     )
 
+    private data class OrphanGenerationGcResult(
+        val removedGenerations: Int,
+        val removedBytes: Long,
+        val blockedGenerations: Int,
+        val unownedFiles: Int,
+        val remainingBytes: Long,
+    )
+
     private data class BlobReferences(
         val digests: Set<String>,
         val pinnedManifestUnverified: Boolean,
@@ -940,32 +1133,122 @@ class MobileWebUiStore(
     }
 
     private suspend fun derivedBytes(): Long {
-        val generationBytes = dao.listAllGenerations().sumOf {
-            generationDirectoryBytes(it.serverId, it.generationId)
-        }
-        val blobBytes = dao.listStates().map { it.serverId }.toSet().sumOf { serverId ->
-            dao.listBlobs(serverId).sumOf { blob -> blobFile(serverId, blob.sha256).length() }
-        }
-        return generationBytes + blobBytes
+        return root.walkTopDown()
+            .filter(File::isFile)
+            .sumOf(File::length)
     }
 
     private suspend fun derivedServerBytesLocked(serverId: String): Long =
-        dao.listGenerations(serverId).sumOf { generationDirectoryBytes(serverId, it.generationId) } +
-            dao.listBlobs(serverId).sumOf { blobFile(serverId, it.sha256).length() }
+        serverDirectory(serverId).walkTopDown()
+            .filter(File::isFile)
+            .sumOf(File::length)
 
     private suspend fun reconcileOrphanGenerations(serverId: String) {
         val generations = dao.listGenerations(serverId).map { it.generationId }.toSet()
         val directory = serverDirectory(serverId).resolve("generations")
         directory.listFiles()?.toList().orEmpty()
             .filter { it.isDirectory && it.name !in generations }
-            .forEach { check(it.deleteRecursively()) { "无法删除无 Room owner 的 WebUI generation: $it" } }
+            .forEach {
+                if (!deleteDirectory(it)) throw IOException("无法删除无 Room owner 的 WebUI generation: $it")
+            }
+    }
+
+    private suspend fun collectOrphanGenerations(serverId: String): OrphanGenerationGcResult {
+        val generations = dao.listGenerations(serverId).map { it.generationId }.toSet()
+        val directory = serverDirectory(serverId).resolve("generations")
+        var removedGenerations = 0
+        var removedBytes = 0L
+        var blockedGenerations = 0
+        var unownedFiles = 0
+        var remainingBytes = 0L
+        directory.listFiles()?.toList().orEmpty()
+            .filter { it.isDirectory && it.name !in generations }
+            .forEach { orphan ->
+                val bytes = generationDirectoryBytes(serverId, orphan.name)
+                if (deleteDirectory(orphan)) {
+                    removedGenerations += 1
+                    removedBytes += bytes
+                } else {
+                    blockedGenerations += 1
+                    unownedFiles += 1
+                    remainingBytes += bytes
+                }
+            }
+        return OrphanGenerationGcResult(
+            removedGenerations,
+            removedBytes,
+            blockedGenerations,
+            unownedFiles,
+            remainingBytes,
+        )
+    }
+
+    private suspend fun reconcilePendingReset(serverId: String) {
+        val markerFile = resetMarkerFile(serverId)
+        val temporary = resetMarkerTemporaryFile(serverId)
+        val trash = resetTrashDirectory(serverId)
+        if (!markerFile.exists() && !trash.exists()) {
+            if (temporary.exists() && !temporary.delete()) {
+                throw IOException("无法清理 WebUI reset marker 临时文件: $temporary")
+            }
+            return
+        }
+        if (activeServing?.serverId == serverId || attemptState.value?.serverId == serverId) {
+            attemptState.value = null
+            setCommittedServing(null, null)
+        }
+        require(markerFile.isFile) { "WebUI reset marker 缺失: $markerFile" }
+        val marker = MOBILE_WEB_UI_JSON.decodeFromString<MobileWebUiResetMarker>(markerFile.readText())
+        require(marker.serverId == serverId) { "WebUI reset marker server 不匹配" }
+        marker.targetKey?.let { require(MOBILE_WEB_UI_SHA256.matches(it)) { "WebUI reset marker target 无效" } }
+        marker.fingerprint?.let { require(it.isNotBlank() && it.length <= 256) { "WebUI reset marker fingerprint 无效" } }
+        require((marker.targetKey == null) == (marker.fingerprint == null)) {
+            "WebUI reset marker target/fingerprint 必须成对"
+        }
+        require(marker.createdAt > 0) {
+            "WebUI reset marker 状态无效"
+        }
+        if (temporary.exists() && !temporary.delete()) {
+            throw IOException("无法清理 WebUI reset marker 临时文件: $temporary")
+        }
+        val directory = serverDirectory(serverId)
+        if (directory.exists() && trash.exists()) {
+            throw IOException("WebUI reset marker 同时存在 live 与 trash 目录")
+        }
+        if (directory.exists() && !renameFile(directory, trash)) {
+            throw IOException("无法恢复待重置 WebUI 缓存: $directory")
+        }
+        if (trash.exists() && !deleteDirectory(trash)) {
+            throw IOException("无法完成待恢复 WebUI reset: $trash")
+        }
+        if (!marker.physicalDeleted) {
+            writeResetMarker(markerFile, marker.copy(physicalDeleted = true))
+        }
+        val reject = if (marker.targetKey != null) {
+            MobileWebUiRejectEntity(
+                serverId = serverId,
+                targetKey = marker.targetKey,
+                compatibilityFingerprint = requireNotNull(marker.fingerprint),
+                reason = "manual_reset",
+                firstRejectedAt = marker.createdAt,
+                retryAfter = null,
+            )
+        } else {
+            null
+        }
+        dao.resetServerDurableState(serverId, baselineState(serverId), reject)
+        if (!deleteResetMarker(markerFile)) {
+            throw MobileWebUiResetCleanupPendingException("WebUI reset 已提交，清理 marker 待重试: $markerFile")
+        }
     }
 
     private fun reconcileOrphanStaging(serverId: String) {
         val staging = serverDirectory(serverId).resolve("staging")
         staging.listFiles()?.toList().orEmpty()
             .filter { it.isDirectory }
-            .forEach { check(it.deleteRecursively()) { "无法删除无 owner 的 WebUI staging: $it" } }
+            .forEach {
+                if (!it.deleteRecursively()) throw IOException("无法删除无 owner 的 WebUI staging: $it")
+            }
     }
 
     private suspend fun readVerifiedManifestMetadata(
@@ -990,6 +1273,9 @@ class MobileWebUiStore(
     ) = withServerLock(serverId) {
         val manualReject = if (manualRejectTarget != null || manualRejectTargetKey != null) {
             require(fingerprint != null) { "WebUI manual reset 缺少 compatibility fingerprint" }
+            require(fingerprint.isNotBlank() && fingerprint.length <= 256) {
+                "WebUI manual reset compatibility fingerprint 无效"
+            }
             val targetKey = manualRejectTarget?.let {
                 validateMobileWebUiTarget(it, serverId)
                 it.targetKey
@@ -1008,14 +1294,39 @@ class MobileWebUiStore(
         } else {
             null
         }
-        // Room pointer cleanup and the manual-reset marker are one durable transaction.
-        dao.resetServerDurableState(serverId, baselineState(serverId), manualReject)
-        if (activeServing?.serverId == serverId) {
-            setServing(null, null)
-        }
+        reconcilePendingReset(serverId)
         val directory = serverDirectory(serverId)
-        if (directory.exists() && !directory.deleteRecursively()) {
-            throw IOException("无法重置 WebUI 缓存: $directory")
+        val marker = MobileWebUiResetMarker(
+            serverId = serverId,
+            targetKey = manualReject?.targetKey,
+            fingerprint = manualReject?.compatibilityFingerprint,
+            createdAt = manualReject?.firstRejectedAt ?: System.currentTimeMillis(),
+            physicalDeleted = false,
+        )
+        val markerFile = resetMarkerFile(serverId)
+        val trash = resetTrashDirectory(serverId)
+        // 1. Stop serving this server before touching its files; partial deletion cannot leave a live WebView target.
+        if (activeServing?.serverId == serverId || attemptState.value?.serverId == serverId) {
+            attemptState.value = null
+            setCommittedServing(null, null)
+        }
+        if (markerFile.exists() || trash.exists()) throw IOException("WebUI reset 已有未完成事务")
+        // 2. Persist a recoverable reset intent before moving or deleting any cache.
+        ensureDirectory(root, "无法创建 WebUI reset marker 目录")
+        writeResetMarker(markerFile, marker)
+        if (directory.exists() && !renameFile(directory, trash)) {
+            throw IOException("无法移动待重置 WebUI 缓存: $directory")
+        }
+        // 3. Remove the trash; if this fails the marker and Room owners remain for recovery.
+        if (trash.exists() && !deleteDirectory(trash)) {
+            throw IOException("无法重置 WebUI 缓存: $trash")
+        }
+        // 4. Record physical completion before clearing Room owners; a later DB failure is replayable.
+        writeResetMarker(markerFile, marker.copy(physicalDeleted = true))
+        // 5. Only after physical cleanup succeeds clear pointers and write the manual reject.
+        dao.resetServerDurableState(serverId, baselineState(serverId), manualReject)
+        if (markerFile.exists() && !deleteResetMarker(markerFile)) {
+            throw MobileWebUiResetCleanupPendingException("WebUI reset 已提交，清理 marker 待重试: $markerFile")
         }
     }
 
@@ -1107,10 +1418,22 @@ class MobileWebUiStore(
         return target
     }
 
-    private fun setServing(next: Serving?, manifest: MobileWebUiManifest?) {
+    private fun setPresentation(next: Serving?, manifest: MobileWebUiManifest?) {
         activeServing = next
         servingManifest = manifest
+    }
+
+    private fun setDurableServing(next: Serving?) {
         servingState.value = next?.let { MobileWebUiServing(it.serverId, it.generationId) }
+    }
+
+    private fun setCommittedServing(next: Serving?, manifest: MobileWebUiManifest?) {
+        setPresentation(next, manifest)
+        setDurableServing(next)
+    }
+
+    private fun ensureDirectory(directory: File, message: String) {
+        if (!directory.isDirectory && !directory.mkdirs()) throw IOException(message)
     }
 
     private suspend fun blobOffsetLocked(serverId: String, sha256: String, bytes: Long): Long {
@@ -1125,7 +1448,7 @@ class MobileWebUiStore(
             deletePart(part, metadata)
         }
         if (!metadata.isFile) {
-            check(metadata.parentFile?.mkdirs() != false) { "无法创建 WebUI partial metadata 目录" }
+            ensureDirectory(requireNotNull(metadata.parentFile), "无法创建 WebUI partial metadata 目录")
             FileOutputStream(metadata).use { output ->
                 output.write(MOBILE_WEB_UI_JSON.encodeToString(BlobPartMetadata(sha256, bytes)).toByteArray())
                 output.fd.sync()
@@ -1144,11 +1467,11 @@ class MobileWebUiStore(
         require(part.isFile && part.length() == expectedBytes) { "WebUI blob 未完整下载" }
         require(part.sha256() == sha256) { "WebUI blob 摘要不一致" }
         val destination = blobFile(serverId, sha256)
-        check(destination.parentFile?.mkdirs() != false) { "无法创建 WebUI blob 目录" }
+        ensureDirectory(requireNotNull(destination.parentFile), "无法创建 WebUI blob 目录")
         if (destination.exists() && (destination.length() != expectedBytes || destination.sha256() != sha256)) {
-            check(destination.delete()) { "无法删除损坏 WebUI blob" }
+            if (!deletePhysicalFile(destination)) throw IOException("无法删除损坏 WebUI blob")
         }
-        if (!destination.exists()) check(part.renameTo(destination)) { "WebUI blob 原子提交失败" }
+        if (!destination.exists() && !renameFile(part, destination)) throw IOException("WebUI blob 原子提交失败")
         deletePart(part, blobPartMetadata(serverId, sha256))
         val now = System.currentTimeMillis()
         dao.upsertBlob(
@@ -1196,8 +1519,10 @@ class MobileWebUiStore(
             val blob = blobFile(serverId, item.sha256)
             val valid = blob.isFile && blob.length() == item.sizeBytes && blob.sha256() == item.sha256
             if (!valid) {
+                if (blob.isFile && !deletePhysicalFile(blob)) {
+                    throw IOException("无法删除损坏 WebUI blob: ${item.sha256}")
+                }
                 dao.deleteBlob(serverId, item.sha256)
-                if (blob.isFile) blob.delete()
             }
             valid
         }) { "WebUI generation 缺少已验证 blob" }
@@ -1248,6 +1573,29 @@ class MobileWebUiStore(
 
     private fun serverDirectory(serverId: String): File = root.resolve(serverId.sha256())
 
+    private fun resetMarkerFile(serverId: String): File =
+        root.resolve("${serverId.sha256()}.reset.json")
+
+    private fun resetMarkerTemporaryFile(serverId: String): File =
+        root.resolve("${serverId.sha256()}.reset.json.tmp")
+
+    private fun resetTrashDirectory(serverId: String): File =
+        root.resolve("${serverId.sha256()}.reset-trash")
+
+    private fun writeResetMarker(file: File, marker: MobileWebUiResetMarker) {
+        val temporary = file.resolveSibling("${file.name}.tmp")
+        if (temporary.exists() && !temporary.delete()) {
+            throw IOException("无法清理 WebUI reset marker 临时文件: $temporary")
+        }
+        FileOutputStream(temporary, false).use { output ->
+            output.write(MOBILE_WEB_UI_JSON.encodeToString(marker).toByteArray())
+            output.fd.sync()
+        }
+        if (!renameFile(temporary, file)) {
+            throw IOException("无法原子提交 WebUI reset marker: $file")
+        }
+    }
+
     private fun generationDirectory(serverId: String, generationId: String): File =
         serverDirectory(serverId).resolve("generations").resolve(generationId)
 
@@ -1276,8 +1624,8 @@ class MobileWebUiStore(
         file.canonicalFile.relativeTo(serverDirectory(serverId).canonicalFile).path
 
     private fun deletePart(part: File, metadata: File) {
-        if (part.exists()) check(part.delete()) { "无法删除 WebUI partial: $part" }
-        if (metadata.exists()) check(metadata.delete()) { "无法删除 WebUI partial metadata: $metadata" }
+        if (part.exists() && !deletePartialFile(part)) throw IOException("无法删除 WebUI partial: $part")
+        if (metadata.exists() && !deletePartialFile(metadata)) throw IOException("无法删除 WebUI partial metadata: $metadata")
     }
 
     private fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")

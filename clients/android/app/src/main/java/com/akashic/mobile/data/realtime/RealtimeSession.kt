@@ -34,7 +34,9 @@ import com.akashic.mobile.data.realtime.pluginui.PluginUiHttpRequest
 import java.time.Instant
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.min
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineScope
@@ -174,6 +176,15 @@ internal fun shouldRefreshSyncDeadline(
     phaseAfterFrame: ConnectionPhase,
 ): Boolean = phaseBeforeFrame == ConnectionPhase.SYNCING &&
     phaseAfterFrame == ConnectionPhase.SYNCING
+
+internal fun shouldApplyQueuedDeviceRevocation(
+    currentEpoch: Long,
+    queuedEpoch: Long,
+    currentGeneration: Long,
+    queuedGeneration: Long,
+    ownerGenerationCurrent: Boolean,
+): Boolean = currentEpoch == queuedEpoch &&
+    (ownerGenerationCurrent || currentGeneration == queuedGeneration)
 
 internal fun historyStartPage(
     remoteMessageCount: Int,
@@ -371,7 +382,15 @@ class RealtimeSession(
     private var meteredLargeTransferApproved = false
     private var profile: ServerProfileEntity? = null
     private var pendingPairing: PendingPairing? = null
+    @Volatile
     private var deviceRevoked = false
+    @Volatile
+    private var pendingRevokedGeneration: Long? = null
+    @Volatile
+    private var pendingRevocationEpoch: Long? = null
+    private val revocationEpoch = AtomicLong(0)
+    private var deviceRevokeCleanupStarted = false
+    private val revokedGenerations = ConcurrentHashMap.newKeySet<Long>()
     private var pairingConfirmationGeneration: Long? = null
     private val challengedCandidates = mutableSetOf<SocketCandidateId>()
     private val candidateEndpoints = mutableMapOf<SocketCandidateId, ServerEndpoint>()
@@ -493,7 +512,11 @@ class RealtimeSession(
                 mutex.withLock {
                     val qr = PairingQrDecoder.decode(rawQr)
                     check(profile == null) { "Remove the current server before pairing another one" }
+                    revocationEpoch.incrementAndGet()
                     deviceRevoked = false
+                    pendingRevokedGeneration = null
+                    pendingRevocationEpoch = null
+                    deviceRevokeCleanupStarted = false
                     val alias = deviceKeys.aliasForServer(qr.serverId)
                     if (!deviceKeys.contains(alias)) deviceKeys.create(alias)
                     val claim = PairingTranscripts.createClaim(
@@ -541,7 +564,11 @@ class RealtimeSession(
                 pendingPairing = null
                 pairingConfirmationGeneration = null
                 profile = null
+                revocationEpoch.incrementAndGet()
                 deviceRevoked = false
+                pendingRevokedGeneration = null
+                pendingRevocationEpoch = null
+                deviceRevokeCleanupStarted = false
                 resetGenerationState()
                 networkRecovery.reset()
                 stops.reset()
@@ -1046,34 +1073,7 @@ class RealtimeSession(
                 return@launch
             }
             mutex.withLock {
-                try {
-                    mobileWebUi.onHttpResponse(request.requestId, response)
-                } catch (error: IllegalArgumentException) {
-                    mobileWebUi.onOwnerFailure(
-                        request.requestId,
-                        "WebUI HTTP 协议或拒绝状态失败：${error.message}",
-                    )
-                } catch (error: IllegalStateException) {
-                    mobileWebUi.onOwnerFailure(
-                        request.requestId,
-                        "WebUI 下载状态失败：${error.message}",
-                    )
-                } catch (error: IOException) {
-                    mobileWebUi.onOwnerFailure(
-                        request.requestId,
-                        "WebUI 缓存写入失败：${error.message}",
-                    )
-                } catch (error: SQLiteException) {
-                    mobileWebUi.onOwnerFailure(
-                        request.requestId,
-                        "WebUI 缓存数据库暂不可用：${error.message}",
-                    )
-                } catch (error: SecurityException) {
-                    mobileWebUi.onOwnerFailure(
-                        request.requestId,
-                        "WebUI 缓存无权访问：${error.message}",
-                    )
-                }
+                mobileWebUi.onHttpResponse(request.requestId, response)
             }
         }
     }
@@ -1432,6 +1432,10 @@ class RealtimeSession(
         scope.launch {
             mutex.withLock {
                 if (candidateId.generation != currentGeneration()) return@withLock
+                if (deviceRevoked || candidateId.generation in revokedGenerations) {
+                    socket.reject(candidateId, 4403, "device revoked")
+                    return@withLock
+                }
                 candidateEndpoints[candidateId] = endpoint
                 if (
                     !shouldApplyCandidateOpen(
@@ -1457,14 +1461,23 @@ class RealtimeSession(
     }
 
     override fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
+        if (
+            candidateId.generation != currentGeneration() ||
+            candidateId.generation in revokedGenerations ||
+            !socket.isGenerationCurrent(candidateId.generation)
+        ) return
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             mutex.withLock {
+                if (
+                    candidateId.generation != currentGeneration() ||
+                    candidateId.generation in revokedGenerations ||
+                    deviceRevoked ||
+                    !socket.isGenerationCurrent(candidateId.generation)
+                ) return@withLock
                 try {
                     handleEnvelope(candidateId, envelope)
                 } catch (error: IllegalArgumentException) {
                     failCandidateProtocol(candidateId, envelope, error, "连接协议校验失败：${error.message}")
-                } catch (error: IllegalStateException) {
-                    failCandidateProtocol(candidateId, envelope, error, "连接状态校验失败：${error.message}")
                 } catch (error: ArithmeticException) {
                     failCandidateProtocol(candidateId, envelope, error, "连接协议数值溢出")
                 } catch (error: SQLiteException) {
@@ -1479,8 +1492,19 @@ class RealtimeSession(
     }
 
     override fun onBinary(candidateId: SocketCandidateId, chunk: AttachmentChunkCodec.DecodedChunk) {
+        if (
+            candidateId.generation != currentGeneration() ||
+            candidateId.generation in revokedGenerations ||
+            !socket.isGenerationCurrent(candidateId.generation)
+        ) return
         scope.launch(start = CoroutineStart.UNDISPATCHED) {
             mutex.withLock {
+                if (
+                    candidateId.generation != currentGeneration() ||
+                    candidateId.generation in revokedGenerations ||
+                    deviceRevoked ||
+                    !socket.isGenerationCurrent(candidateId.generation)
+                ) return@withLock
                 if (candidateId != activeCandidate) {
                     socket.reject(candidateId, 4406, "binary frame before authentication")
                     return@withLock
@@ -1489,8 +1513,6 @@ class RealtimeSession(
                     downloads.onBinary(chunk)
                 } catch (error: IllegalArgumentException) {
                     failDownloadConnection("附件下载协议校验失败：${error.message}")
-                } catch (error: IllegalStateException) {
-                    failDownloadConnection("附件下载状态失败：${error.message}")
                 } catch (error: IOException) {
                     failDownloadConnection("附件缓存写入失败：${error.message}")
                 } catch (error: SQLiteException) {
@@ -1505,18 +1527,32 @@ class RealtimeSession(
     }
 
     override fun onClosed(candidateId: SocketCandidateId, code: Int, reason: String) {
+        val action = terminalProtocolAction(code)
+        if (action == TerminalProtocolAction.REVOKE_DEVICE) {
+            if (
+                candidateId.generation != currentGeneration() &&
+                candidateId.generation != pendingRevokedGeneration
+            ) return
+            markDeviceRevokedImmediately(candidateId.generation)?.let { epoch ->
+                enqueueDeviceRevocation(candidateId.generation, epoch, reason)
+            }
+            return
+        }
+        if (candidateId.generation != currentGeneration()) return
         scope.launch {
             mutex.withLock {
-                if (candidateId != activeCandidate) return@withLock
-                val action = terminalProtocolAction(code)
-                if (action == TerminalProtocolAction.REVOKE_DEVICE) {
-                    handleDeviceRevoked(reason)
-                } else if (action != null) {
+                if (candidateId == activeCandidate && action != null) {
                     failProtocolConnection(code, action)
-                } else {
+                } else if (candidateId == activeCandidate) {
                     scheduleReconnect("连接关闭：$code $reason")
                 }
             }
+        }
+    }
+
+    override fun onRevoked(candidateId: SocketCandidateId, code: Int, reason: String) {
+        markDeviceRevokedImmediately(candidateId.generation)?.let { epoch ->
+            enqueueDeviceRevocation(candidateId.generation, epoch, reason)
         }
     }
 
@@ -1554,6 +1590,8 @@ class RealtimeSession(
 
     private suspend fun handleEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope) {
         if (candidateId.generation != currentGeneration()) return
+        if (candidateId.generation in revokedGenerations || deviceRevoked) return
+        if (!socket.isGenerationCurrent(candidateId.generation)) return
         if (activeCandidate != null && candidateId != activeCandidate) return
         when (envelope.type) {
             "server.challenge" -> handleChallenge(candidateId, envelope)
@@ -1650,6 +1688,12 @@ class RealtimeSession(
     }
 
     private suspend fun handleAuthAccepted(candidateId: SocketCandidateId, envelope: WireEnvelope) {
+        if (
+            candidateId.generation != currentGeneration() ||
+            candidateId.generation in revokedGenerations ||
+            deviceRevoked ||
+            !socket.isGenerationCurrent(candidateId.generation)
+        ) return
         require(candidateId in challengedCandidates) { "auth.accepted arrived before a verified challenge" }
         require(envelope.kind == WireKind.CONTROL) { "auth.accepted must be a control frame" }
         val accepted = ProtocolCodec.decodePayload<AuthAcceptedPayload>(envelope.payload)
@@ -1908,13 +1952,15 @@ class RealtimeSession(
                     "plugin.ui.changed" -> pluginUi.onCatalogChanged()
                     MOBILE_WEB_UI_RELEASE_CHANGED -> {
                         val serverId = requireNotNull(profile).serverId
-                        require(envelope.payload["server_id"]?.jsonPrimitive?.content == serverId) {
+                        val hint = decodeMobileWebUiReleaseChangedPayload(envelope.payload)
+                        require(hint.serverId == serverId) {
                             "WebUI release hint server_id 不匹配"
                         }
                         mobileWebUi.onControlHint(serverId)
                     }
                     "device.revoked" -> {
                         handleDeviceRevoked(
+                            currentGeneration(),
                             envelope.payload["reason"]?.jsonPrimitive?.content.orEmpty(),
                         )
                     }
@@ -2373,23 +2419,35 @@ class RealtimeSession(
     }
 
     private fun connectQr(qr: PairingQrPayload) {
+        if (deviceRevoked) return
         reconnectJob?.cancel()
         resetGenerationState()
-        currentGenerationValue = socket.connectRace(
+        val generation = socket.connectRace(
             qr.lanEndpoints.lanEndpoints(qr.tlsSpkiPins),
             qr.tunnelEndpoints.tunnelEndpoints(),
         )
+        currentGenerationValue = generation
+        if (deviceRevoked || generation in revokedGenerations) {
+            socket.closeGeneration(generation)
+            return
+        }
         networkRecovery.onGenerationStarted(currentGenerationValue, mutableState.value.transferNetwork)
         armPhaseDeadline(currentGenerationValue, ConnectionDeadlinePhase.CHALLENGE)
     }
 
     private fun connectProfile(value: ServerProfileEntity) {
+        if (deviceRevoked) return
         reconnectJob?.cancel()
         resetGenerationState()
         val pins = json.decodeFromString<List<String>>(value.tlsSpkiPinsJson)
         val lan = json.decodeFromString<List<String>>(value.lanEndpointsJson).lanEndpoints(pins)
         val tunnel = json.decodeFromString<List<String>>(value.tunnelEndpointsJson).tunnelEndpoints()
-        currentGenerationValue = socket.connectRace(lan, tunnel)
+        val generation = socket.connectRace(lan, tunnel)
+        currentGenerationValue = generation
+        if (deviceRevoked || generation in revokedGenerations) {
+            socket.closeGeneration(generation)
+            return
+        }
         networkRecovery.onGenerationStarted(currentGenerationValue, mutableState.value.transferNetwork)
         armPhaseDeadline(currentGenerationValue, ConnectionDeadlinePhase.CHALLENGE)
         mutableState.value = mutableState.value.copy(
@@ -2538,13 +2596,25 @@ class RealtimeSession(
         reconnectJob = scope.launch {
             delay(FullJitterBackoff.nextDelayMillis(retryCount))
             mutex.withLock {
+                if (deviceRevoked) return@withLock
                 pendingPairing?.let { connectQr(it.qr) } ?: profile?.let(::connectProfile)
             }
         }
     }
 
-    private suspend fun handleDeviceRevoked(reason: String) {
+    private suspend fun handleDeviceRevoked(revokedGeneration: Long, reason: String) {
+        if (deviceRevokeCleanupStarted) return
+        val epoch = pendingRevocationEpoch
+        if (epoch != null && revocationEpoch.get() != epoch) return
+        if (pendingRevokedGeneration != null && pendingRevokedGeneration != revokedGeneration) return
+        deviceRevokeCleanupStarted = true
         deviceRevoked = true
+        pendingRevokedGeneration = revokedGeneration
+        if (pendingRevocationEpoch == null) {
+            pendingRevocationEpoch = revocationEpoch.incrementAndGet()
+        }
+        revokedGenerations += revokedGeneration
+        socket.closeGeneration(revokedGeneration, 4403, "device revoked")
         reconnectJob?.cancel()
         reconnectJob = null
         cancelPhaseDeadline()
@@ -2577,6 +2647,38 @@ class RealtimeSession(
             ),
             errorMessage = revokeError ?: "设备配对已撤销：请重新配对${reason.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()}",
         )
+    }
+
+    /** Latch revocation before the callback acquires the session mutex, blocking reconnect races. */
+    private fun markDeviceRevokedImmediately(generation: Long): Long? {
+        if (deviceRevoked) {
+            return pendingRevokedGeneration
+                ?.takeIf { it == generation }
+                ?.let { pendingRevocationEpoch }
+        }
+        deviceRevoked = true
+        pendingRevokedGeneration = generation
+        val epoch = revocationEpoch.incrementAndGet()
+        pendingRevocationEpoch = epoch
+        revokedGenerations += generation
+        reconnectJob?.cancel()
+        return epoch
+    }
+
+    private fun enqueueDeviceRevocation(generation: Long, epoch: Long, reason: String) {
+        scope.launch {
+            mutex.withLock {
+                if (!shouldApplyQueuedDeviceRevocation(
+                        currentEpoch = revocationEpoch.get(),
+                        queuedEpoch = epoch,
+                        currentGeneration = currentGeneration(),
+                        queuedGeneration = generation,
+                        ownerGenerationCurrent = socket.isGenerationCurrent(generation),
+                    )
+                ) return@withLock
+                handleDeviceRevoked(generation, reason)
+            }
+        }
     }
 
     /** 停止永久协议错误，并按错误类型隔离或保留当前 outbox。 */
@@ -2768,6 +2870,7 @@ class RealtimeSession(
         return commandId.takeIf { sent }
     }
 
+    @Volatile
     private var currentGenerationValue = 0L
 
     private fun currentGeneration(): Long = currentGenerationValue

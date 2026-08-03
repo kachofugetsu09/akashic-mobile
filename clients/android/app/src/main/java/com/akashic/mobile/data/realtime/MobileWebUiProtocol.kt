@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonObject
 
 /** Protocol values exchanged by the authenticated mobile WebUI release lane. */
@@ -24,6 +25,12 @@ data class MobileWebUiReleaseView(
     @SerialName("selection_digest") val selectionDigest: String,
     val stable: MobileWebUiTarget?,
     val preview: MobileWebUiTarget?,
+)
+
+@Serializable
+internal data class MobileWebUiReleaseChangedPayload(
+    @SerialName("server_id") val serverId: String,
+    @SerialName("selection_digest") val selectionDigest: String,
 )
 
 @Serializable
@@ -245,6 +252,27 @@ internal val MOBILE_WEB_UI_JSON = Json {
     isLenient = false
 }
 
+/** Decode OTA release payloads with the strict field-presence and unknown-field contract. */
+internal fun decodeMobileWebUiReleaseView(payload: JsonObject): MobileWebUiReleaseView {
+    require("stable" in payload && "preview" in payload) {
+        "WebUI release response 必须显式包含 stable 和 preview"
+    }
+    return MOBILE_WEB_UI_JSON.decodeFromJsonElement(MobileWebUiReleaseView.serializer(), payload)
+}
+
+/** Decode a release hint without allowing a partial or malformed selection digest. */
+internal fun decodeMobileWebUiReleaseChangedPayload(payload: JsonObject): MobileWebUiReleaseChangedPayload {
+    val decoded = MOBILE_WEB_UI_JSON.decodeFromJsonElement(
+        MobileWebUiReleaseChangedPayload.serializer(),
+        payload,
+    )
+    require(decoded.serverId.isNotBlank()) { "WebUI release hint server_id 无效" }
+    require(MOBILE_WEB_UI_SHA256.matches(decoded.selectionDigest)) {
+        "WebUI release hint selection_digest 无效"
+    }
+    return decoded
+}
+
 /** Validate a release target at the authenticated protocol boundary. */
 internal fun validateMobileWebUiTarget(target: MobileWebUiTarget, expectedServerId: String? = null) {
     require(MOBILE_WEB_UI_TARGET.matches(target.targetKey)) { "WebUI target_key 无效" }
@@ -358,15 +386,17 @@ internal fun validateMobileWebUiManifest(manifest: MobileWebUiManifest) {
     }
     val seen = HashSet<String>(manifest.files.size)
     val folded = HashSet<String>(manifest.files.size)
-    val digestMime = HashMap<String, String>(manifest.files.size)
+    val digestMetadata = HashMap<String, Pair<Long, String>>(manifest.files.size)
     var total = 0L
     manifest.files.forEach { file ->
         validateMobileWebUiFile(file)
         val normalized = normalizeMobileWebUiPath(file.path)
         require(seen.add(normalized)) { "WebUI 文件路径重复: ${file.path}" }
         require(folded.add(normalized.casefold())) { "WebUI 文件路径大小写冲突: ${file.path}" }
-        require(digestMime.putIfAbsent(file.sha256, file.mime) in setOf(null, file.mime)) {
-            "WebUI 同一 generation 的 digest MIME 冲突: ${file.sha256}"
+        require(digestMetadata.putIfAbsent(file.sha256, file.sizeBytes to file.mime) in
+            setOf(null, file.sizeBytes to file.mime)
+        ) {
+            "WebUI 同一 generation 的 digest size/MIME 冲突: ${file.sha256}"
         }
         total = Math.addExact(total, file.sizeBytes)
     }

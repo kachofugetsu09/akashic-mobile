@@ -7,6 +7,9 @@ import androidx.room.Upsert
 
 @Dao
 interface MobileWebUiDao {
+    @Query("SELECT serverId FROM server_profiles")
+    suspend fun listKnownServerIds(): List<String>
+
     @Query("SELECT * FROM mobile_webui_state WHERE serverId = :serverId")
     suspend fun getState(serverId: String): MobileWebUiStateEntity?
 
@@ -54,6 +57,9 @@ interface MobileWebUiDao {
 
     @Query("SELECT * FROM mobile_webui_blobs WHERE serverId = :serverId")
     suspend fun listBlobs(serverId: String): List<MobileWebUiBlobEntity>
+
+    @Query("SELECT * FROM mobile_webui_blobs")
+    suspend fun listAllBlobs(): List<MobileWebUiBlobEntity>
 
     @Upsert
     suspend fun upsertBlob(blob: MobileWebUiBlobEntity)
@@ -130,9 +136,4 @@ interface MobileWebUiDao {
         if (rejection != null) upsertReject(rejection)
     }
 
-    @Query(
-        "SELECT EXISTS(SELECT 1 FROM mobile_webui_rejects " +
-            "WHERE serverId = :serverId AND reason = 'manual_reset')",
-    )
-    suspend fun hasManualResetReject(serverId: String): Boolean
 }

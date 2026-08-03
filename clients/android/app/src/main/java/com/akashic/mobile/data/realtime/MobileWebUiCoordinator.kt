@@ -64,7 +64,7 @@ internal fun classifyMobileWebUiHttp(
     statusCode == 500 && errorCode == "release_store_corrupt" -> MobileWebUiHttpAction.RETRY_AFTER
     statusCode == 408 || statusCode == 425 || statusCode == 429 || statusCode in 500..599 ->
         MobileWebUiHttpAction.RETRY_AFTER
-    statusCode in 400..499 -> MobileWebUiHttpAction.REJECT_TARGET
+    statusCode in 400..499 -> MobileWebUiHttpAction.RETRY_AFTER
     else -> MobileWebUiHttpAction.RETRY_AFTER
 }
 
@@ -124,9 +124,13 @@ internal class MobileWebUiCoordinator(
     private var resolveDirty = false
     private var resolveRetryJob: Job? = null
     private var resolveRetryAttempts = 0
+    private val processReconciledServers = mutableSetOf<String>()
+    private var resetRecoveryInFlight = false
 
     private val readyGenerationState = MutableStateFlow<String?>(null)
     val readyGeneration: StateFlow<String?> = readyGenerationState.asStateFlow()
+    private val retryAvailableState = MutableStateFlow(false)
+    val retryAvailable: StateFlow<Boolean> = retryAvailableState.asStateFlow()
     private val waitForSpaceState = MutableStateFlow<MobileWebUiSpaceAdmission?>(null)
     val waitForSpace: StateFlow<MobileWebUiSpaceAdmission?> = waitForSpaceState.asStateFlow()
     private var resetSequence = 0L
@@ -142,6 +146,7 @@ internal class MobileWebUiCoordinator(
             resolveRetryAttempts = 0
             manualRetryRequested = false
             readyGenerationState.value = null
+            retryAvailableState.value = false
             waitForSpaceState.value = null
         }
         currentServerId = serverId
@@ -159,9 +164,49 @@ internal class MobileWebUiCoordinator(
 
     /** Restore only the durable committed WebUI before the first UI composition. */
     suspend fun restoreLocal(serverId: String): Boolean {
+        cancelForeignAttemptBeforeRestore(serverId)
         currentServerId = serverId
-        store.reconcile(serverId)
-        val restored = store.restoreCommittedServing(serverId)
+        val reconcileNow = synchronized(processReconciledServers) {
+            processReconciledServers.add(serverId)
+        }
+        fun rollbackProcessMarker(force: Boolean = false) {
+            if (reconcileNow || force) synchronized(processReconciledServers) {
+                processReconciledServers.remove(serverId)
+            }
+        }
+        val stateBeforeReconcile = try {
+            store.state(serverId)
+        } catch (error: IOException) {
+            rollbackProcessMarker()
+            throw error
+        } catch (error: SQLiteException) {
+            rollbackProcessMarker()
+            throw error
+        } catch (error: SecurityException) {
+            rollbackProcessMarker()
+            throw error
+        }
+        val processAttempt = store.attempt.value?.takeIf { it.serverId == serverId }
+        val ownsDurableAttempt = processAttempt?.let {
+            it.generationId == stateBeforeReconcile?.attemptingGenerationId &&
+                it.nonce == stateBeforeReconcile.attemptingNonce
+        } == true
+        val reconcileRequired = reconcileNow ||
+            (stateBeforeReconcile?.attemptingGenerationId != null && !ownsDurableAttempt)
+        try {
+            if (reconcileRequired) store.reconcile(serverId)
+        } catch (error: IOException) {
+            rollbackProcessMarker(reconcileRequired)
+            throw error
+        } catch (error: SQLiteException) {
+            rollbackProcessMarker(reconcileRequired)
+            throw error
+        } catch (error: SecurityException) {
+            rollbackProcessMarker(reconcileRequired)
+            throw error
+        }
+        val activeAttempt = store.attempt.value?.takeIf { it.serverId == serverId }
+        val restored = if (activeAttempt == null) store.restoreCommittedServing(serverId) else true
         val state = store.state(serverId)
         val desiredGeneration = state?.desiredGenerationId
         if (
@@ -172,6 +217,24 @@ internal class MobileWebUiCoordinator(
             readyGenerationState.value = desiredGeneration
         }
         return restored
+    }
+
+    /** Finish the previous server's process-owned candidate before handing presentation to another server. */
+    private suspend fun cancelForeignAttemptBeforeRestore(serverId: String) {
+        val activeAttempt = store.attempt.value ?: return
+        if (activeAttempt.serverId == serverId) return
+        val rolledBack = store.rollbackAttempt(
+            activeAttempt.serverId,
+            activeAttempt.generationId,
+            activeAttempt.nonce,
+        )
+        if (rolledBack || store.attempt.value != activeAttempt) return
+        // The process lease outlived its durable marker; recover the old server before
+        // restoring the new one so a later return cannot inherit a stale attempting row.
+        store.reconcile(activeAttempt.serverId)
+        check(store.attempt.value != activeAttempt) {
+            "WebUI server handoff left a stale candidate lease for ${activeAttempt.serverId}"
+        }
     }
 
     fun onDisconnected() {
@@ -191,7 +254,6 @@ internal class MobileWebUiCoordinator(
         resolveRetryJob = null
         resolveRetryAttempts = 0
         manualRetryRequested = false
-        waitForSpaceState.value = null
     }
 
     fun onControlHint(serverId: String) {
@@ -203,6 +265,26 @@ internal class MobileWebUiCoordinator(
     fun resolve(serverId: String? = currentServerId) {
         val selectedServer = serverId ?: return
         if (selectedServer != currentServerId) return
+        if (store.hasPendingReset(selectedServer)) {
+            if (!resetRecoveryInFlight) {
+                resetRecoveryInFlight = true
+                scope.launch {
+                    try {
+                        store.reconcilePendingResetIfNeeded(selectedServer)
+                        if (!store.hasPendingReset(selectedServer)) resolve(selectedServer)
+                    } catch (error: IOException) {
+                        onError("WebUI reset 清理尚未完成：${error.message}")
+                    } catch (error: SQLiteException) {
+                        onError("WebUI reset 数据库尚未完成：${error.message}")
+                    } catch (error: SecurityException) {
+                        onError("WebUI reset 缓存无权访问：${error.message}")
+                    } finally {
+                        resetRecoveryInFlight = false
+                    }
+                }
+            }
+            return
+        }
         resolveRetryJob?.cancel()
         resolveRetryJob = null
         resolveRetryAttempts = 0
@@ -258,7 +340,7 @@ internal class MobileWebUiCoordinator(
                         return true
                     }
                     val view = try {
-                        ProtocolCodec.decodePayload<MobileWebUiReleaseView>(envelope.payload)
+                        decodeMobileWebUiReleaseView(envelope.payload)
                     } catch (_: SerializationException) {
                         onError("WebUI 发布检查响应无效")
                         return true
@@ -268,8 +350,8 @@ internal class MobileWebUiCoordinator(
                     }
                     try {
                         handleReleaseView(view)
-                    } catch (_: IllegalArgumentException) {
-                        onError("WebUI 发布选择不符合合同")
+                    } catch (error: IOException) {
+                        scheduleResolveRetry(currentServerId, "WebUI 本地缓存暂不可用：${error.message}")
                     } catch (error: SQLiteException) {
                         scheduleResolveRetry(currentServerId, "WebUI 发布状态写入失败：${error.message}")
                     } catch (error: SecurityException) {
@@ -336,8 +418,6 @@ internal class MobileWebUiCoordinator(
                     HttpKind.BLOB -> handleBlobHttp(pending, response)
                 }
             } catch (_: IllegalArgumentException) {
-                rejectCurrentTargetSafely(pending.context, "wire_invalid")
-            } catch (_: IllegalStateException) {
                 rejectCurrentTargetSafely(pending.context, "wire_invalid")
             } catch (_: IOException) {
                 scheduleRetryAfter(pending.context, "缓存写入失败")
@@ -429,6 +509,7 @@ internal class MobileWebUiCoordinator(
             fingerprint = resetTargetKey?.let { compatibilityFingerprint() },
             manualRejectTargetKey = resetTargetKey,
         )
+        retryAvailableState.value = resetTarget != null
     }
 
     /** Revoke remote presentation immediately while retaining verified cache files. */
@@ -437,6 +518,7 @@ internal class MobileWebUiCoordinator(
         invalidateOwner()
         lastReleaseView = null
         readyGenerationState.value = null
+        retryAvailableState.value = false
         waitForSpaceState.value = null
         emitResetEvent(serverId)
         store.clearServingToBaseline(serverId)
@@ -460,7 +542,14 @@ internal class MobileWebUiCoordinator(
         val nonce = UUID.randomUUID().toString()
         try {
             if (!store.openAttempt(serverId, generationId, nonce, compatibilityFingerprint())) return null
-        } catch (_: IllegalArgumentException) {
+        } catch (error: IOException) {
+            onError("WebUI 候选版本校验失败，当前界面未改变：${error.message}")
+            return null
+        } catch (error: SQLiteException) {
+            onError("WebUI 候选版本状态暂不可用，当前界面未改变：${error.message}")
+            return null
+        } catch (error: SecurityException) {
+            onError("WebUI 候选版本缓存无权访问，当前界面未改变：${error.message}")
             return null
         }
         return nonce
@@ -468,6 +557,12 @@ internal class MobileWebUiCoordinator(
 
     suspend fun commitHealthy(serverId: String, generationId: String, nonce: String) =
         store.commitHealthy(serverId, generationId, nonce)
+
+    suspend fun isAttemptCurrent(serverId: String, generationId: String, nonce: String): Boolean =
+        store.isAttemptCurrent(serverId, generationId, nonce)
+
+    suspend fun rollbackAttempt(serverId: String, generationId: String, nonce: String): Boolean =
+        store.rollbackAttempt(serverId, generationId, nonce)
 
     suspend fun rejectServing(
         serverId: String,
@@ -485,36 +580,76 @@ internal class MobileWebUiCoordinator(
             )
             return null
         }
-        val fallback = store.rejectServingAndRollback(
+        val rollback = store.rollbackServingAndRejectResult(
             serverId,
             generationId,
             compatibilityFingerprint(),
             reason,
         )
+        if (rollback.fallbackUnavailable) {
+            onError("WebUI 回滚版本不可验证，已回到内置界面；请重新检查服务端界面")
+        }
         if (readyGenerationState.value == generationId) readyGenerationState.value = null
-        return fallback
+        return rollback.generationId
     }
 
     private suspend fun handleReleaseView(view: MobileWebUiReleaseView) {
         val serverId = currentServerId ?: return
+        if (store.hasPendingReset(serverId)) {
+            onError("WebUI reset 清理尚未完成，暂不下载新版本")
+            return
+        }
         validateMobileWebUiReleaseView(view, serverId)
         lastReleaseView = view
-        waitForSpaceState.value = null
-        if (manualRetryRequested) {
-            sequenceOf(view.preview, view.stable).filterNotNull().forEach {
-                store.clearManualResetReject(serverId, it, compatibilityFingerprint())
+        val waiting = waitForSpaceState.value
+        val explicitRetry = manualRetryRequested
+        if (explicitRetry) {
+            val candidates = sequenceOf(view.preview, view.stable).filterNotNull().toList()
+            val retryTarget = candidates.firstOrNull {
+                store.isPermanentlyRejected(serverId, it, compatibilityFingerprint())
             }
+            retryTarget?.let { store.clearReject(serverId, it, compatibilityFingerprint()) }
             manualRetryRequested = false
         }
+        retryAvailableState.value = if (explicitRetry) {
+            false
+        } else {
+            sequenceOf(view.preview, view.stable)
+                .filterNotNull()
+                .firstOrNull {
+                    store.isPermanentlyRejected(serverId, it, compatibilityFingerprint())
+                } != null
+        }
         val target = compatibleTarget(serverId, view.preview) ?: compatibleTarget(serverId, view.stable)
+        val activeAttempt = store.attempt.value?.takeIf { it.serverId == serverId }
+        if (activeAttempt != null && (target == null || activeAttempt.generationId != target.generationId)) {
+            try {
+                store.rollbackAttempt(serverId, activeAttempt.generationId, activeAttempt.nonce)
+            } catch (error: IOException) {
+                onError("WebUI 版本切换暂未完成，当前界面未改变：${error.message}")
+                return
+            } catch (error: SQLiteException) {
+                onError("WebUI 版本切换状态暂不可用，当前界面未改变：${error.message}")
+                return
+            } catch (error: SecurityException) {
+                onError("WebUI 版本切换缓存无权访问，当前界面未改变：${error.message}")
+                return
+            }
+        }
         store.setDesired(serverId, view, target)
         if (target == null) {
             ensure = null
             readyGenerationState.value = null
+            waitForSpaceState.value = null
             retryTargetKey = null
             retryAttempts = 0
             return
         }
+        if (!explicitRetry && waiting?.targetKey == target.targetKey) {
+            ensure = null
+            return
+        }
+        waitForSpaceState.value = null
         if (retryTargetKey != target.targetKey) {
             retryTargetKey = target.targetKey
             retryAttempts = 0
@@ -622,7 +757,7 @@ internal class MobileWebUiCoordinator(
         val admission = store.prepareDownloadSpace(context.serverId, manifest)
         if (!admission.allowed) {
             ensure = null
-            waitForSpaceState.value = admission
+            waitForSpaceState.value = admission.copy(targetKey = context.target.targetKey)
             onError(
                 "WebUI 等待缓存空间（${admission.blockedReason}）：" +
                     "需新增 ${admission.requiredBytes} B，可用磁盘 ${admission.usableSpaceBytes} B，" +
@@ -679,12 +814,27 @@ internal class MobileWebUiCoordinator(
         ensure = null
         scope.launch {
             try {
-                store.collectGarbage(context.serverId)
-                store.collectGlobalGarbage()
+                val local = store.collectGarbage(context.serverId)
+                val global = store.collectGlobalGarbage()
+                val report = MobileWebUiGcReport(
+                    removedGenerations = local.removedGenerations + global.removedGenerations,
+                    removedBlobs = local.removedBlobs + global.removedBlobs,
+                    removedBytes = local.removedBytes + global.removedBytes,
+                    blockedGenerations = local.blockedGenerations + global.blockedGenerations,
+                    unownedFiles = local.unownedFiles + global.unownedFiles,
+                )
+                if (report.blockedGenerations > 0 || report.unownedFiles > 0) {
+                    onError(
+                        "WebUI 缓存部分未清理：${report.blockedGenerations} 个版本、" +
+                            "${report.unownedFiles} 个引用仍保留，未假报释放空间",
+                    )
+                }
             } catch (error: IOException) {
                 onError("WebUI 缓存整理失败：${error.message}")
-            } catch (error: IllegalArgumentException) {
-                onError("WebUI 缓存整理失败：${error.message}")
+            } catch (error: SQLiteException) {
+                onError("WebUI 缓存数据库整理失败：${error.message}")
+            } catch (error: SecurityException) {
+                onError("WebUI 缓存整理无权访问：${error.message}")
             }
         }
     }
@@ -707,7 +857,7 @@ internal class MobileWebUiCoordinator(
         require(response.body.isNotEmpty()) { "WebUI blob HTTP 响应为空" }
         val range = requireNotNull(response.contentRange) { "WebUI blob 缺少 Content-Range" }
         val match = Regex("^bytes (\\d+)-(\\d+)/(\\d+)$").matchEntire(range)
-            ?: error("WebUI blob Content-Range 无效")
+            ?: throw IllegalArgumentException("WebUI blob Content-Range 无效")
         require(match.groupValues[1].toLong() == offset)
         require(match.groupValues[2].toLong() == offset + response.body.size - 1)
         require(match.groupValues[3].toLong() == expectedBytes)
@@ -735,8 +885,6 @@ internal class MobileWebUiCoordinator(
         try {
             store.resetBlobPartial(pending.context.serverId, sha256, sizeBytes)
             downloadNextFile(pending.context)
-        } catch (_: IllegalArgumentException) {
-            rejectCurrentTargetSafely(pending.context, "range_reset_invalid")
         } catch (_: IOException) {
             scheduleRetryAfter(pending.context, "partial 清理失败")
         }
@@ -747,23 +895,22 @@ internal class MobileWebUiCoordinator(
         context.manifest?.files?.forEach { file ->
             try {
                 store.resetBlobPartial(context.serverId, file.sha256, file.sizeBytes)
-            } catch (_: IllegalArgumentException) {
-                // Manifest validation already owns the digest/size boundary.
             } catch (_: IOException) {
                 onError("WebUI partial 清理失败：${file.path}")
             }
         }
         store.markRejected(context.serverId, context.target, compatibilityFingerprint(), reason)
         val release = lastReleaseView
+        retryAvailableState.value = release?.let { currentRelease ->
+            sequenceOf(currentRelease.preview, currentRelease.stable)
+                .filterNotNull()
+                .firstOrNull {
+                    store.isPermanentlyRejected(context.serverId, it, compatibilityFingerprint())
+                } != null
+        } ?: false
         val stable = release?.stable
             ?.takeUnless { it.targetKey == context.target.targetKey }
-            ?.let { candidate ->
-                try {
-                    compatibleTarget(context.serverId, candidate)
-                } catch (_: IllegalArgumentException) {
-                    null
-                }
-            }
+            ?.let { candidate -> compatibleTarget(context.serverId, candidate) }
         ensure = null
         readyGenerationState.value = null
         if (release != null && stable != null) {
@@ -867,6 +1014,7 @@ internal class MobileWebUiCoordinator(
         resolveRetryJob = null
         resolveRetryAttempts = 0
         manualRetryRequested = false
+        resetRecoveryInFlight = false
         readyGenerationState.value = null
     }
 
@@ -879,14 +1027,17 @@ internal class MobileWebUiCoordinator(
     }
 
     suspend fun rejectActivation(serverId: String, generationId: String, nonce: String, reason: String): String? {
-        val fallback = store.rollbackAttemptAndReject(
+        val rollback = store.rollbackAttemptAndRejectResult(
             serverId,
             generationId,
             nonce,
             compatibilityFingerprint(),
             reason,
         )
+        if (rollback.fallbackUnavailable) {
+            onError("WebUI 回滚版本不可验证，已回到内置界面；请重新检查服务端界面")
+        }
         if (readyGenerationState.value == generationId) readyGenerationState.value = null
-        return fallback
+        return rollback.generationId
     }
 }

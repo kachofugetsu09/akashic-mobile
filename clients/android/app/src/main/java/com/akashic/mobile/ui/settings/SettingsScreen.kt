@@ -1,6 +1,5 @@
 package com.akashic.mobile.ui.settings
 
-import android.content.ActivityNotFoundException
 import android.database.sqlite.SQLiteException
 import android.content.Intent
 import android.net.Uri
@@ -60,8 +59,10 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.akashic.mobile.BuildConfig
 import com.akashic.mobile.R
+import com.akashic.mobile.nativeActivityLaunchSucceeded
 import com.akashic.mobile.data.realtime.MobileWebUiCoordinator
 import com.akashic.mobile.data.realtime.MobileWebUiGcReport
+import com.akashic.mobile.data.realtime.MobileWebUiResetCleanupPendingException
 import com.akashic.mobile.data.realtime.MobileWebUiSpaceAdmission
 import com.akashic.mobile.data.realtime.MobileWebUiStore
 import com.akashic.mobile.update.AppRelease
@@ -92,6 +93,7 @@ internal fun SettingsScreen(
     mobileWebUiServerId: String? = null,
     mobileWebUiReadyGeneration: String? = null,
     mobileWebUiWaitForSpace: MobileWebUiSpaceAdmission? = null,
+    mobileWebUiRetryAvailable: Boolean = false,
     mobileWebUiCanReplaceUi: Boolean = false,
     onCollectMobileWebUi: suspend (String) -> MobileWebUiGcReport = { error("WebUI GC owner 未提供") },
     onResetMobileWebUi: suspend (String) -> Unit = { error("WebUI reset owner 未提供") },
@@ -106,7 +108,6 @@ internal fun SettingsScreen(
     var updateState by remember { mutableStateOf<UpdateUiState>(UpdateUiState.Idle) }
     var installerResumeInFlight by remember { mutableStateOf(false) }
     var webUiState by remember { mutableStateOf<com.akashic.mobile.data.local.MobileWebUiStateEntity?>(null) }
-    var webUiManualReset by remember { mutableStateOf(false) }
     var webUiGcReport by remember { mutableStateOf<MobileWebUiGcReport?>(null) }
     var webUiBusy by remember { mutableStateOf(false) }
     var showWebUiResetConfirm by remember { mutableStateOf(false) }
@@ -117,7 +118,6 @@ internal fun SettingsScreen(
         val coordinator = mobileWebUiCoordinator
         if (serverId != null && coordinator != null && mobileWebUiStore != null) {
             webUiState = coordinator.state(serverId)
-            webUiManualReset = mobileWebUiStore.hasManualReset(serverId)
         }
     }
 
@@ -131,13 +131,15 @@ internal fun SettingsScreen(
                     updateState = UpdateUiState.PermissionRequired
                     return@launch
                 }
-                onNativeActivityResultLaunched()
-                repository.launchInstaller(context, apk)
-                updateState = UpdateUiState.InstallerOpened
-            } catch (error: ActivityNotFoundException) {
-                updateState = UpdateUiState.Error("系统安装器不可用")
-            } catch (error: SecurityException) {
-                updateState = UpdateUiState.Error("系统拒绝打开安装器：${error.message.orEmpty()}")
+                val launched = nativeActivityLaunchSucceeded(
+                    launch = { repository.launchInstaller(context, apk) },
+                    onSuccess = onNativeActivityResultLaunched,
+                )
+                updateState = if (launched) {
+                    UpdateUiState.InstallerOpened
+                } else {
+                    UpdateUiState.Error("系统安装器不可用")
+                }
             } catch (error: IOException) {
                 updateState = UpdateUiState.Error(error.message ?: "无法恢复待安装更新")
             } finally {
@@ -233,24 +235,28 @@ internal fun SettingsScreen(
                     }
                 },
                 onOpenPermissionSettings = {
-                    updateState = try {
-                        onNativeActivityResultLaunched()
-                        repository.openInstallPermissionSettings(context)
+                    val launched = nativeActivityLaunchSucceeded(
+                        launch = { repository.openInstallPermissionSettings(context) },
+                        onSuccess = onNativeActivityResultLaunched,
+                    )
+                    updateState = if (launched) {
                         UpdateUiState.PermissionRequired
-                    } catch (error: ActivityNotFoundException) {
+                    } else {
                         UpdateUiState.Error("系统安装权限页面不可用")
-                    } catch (error: SecurityException) {
-                        UpdateUiState.Error("系统拒绝打开安装权限页面")
                     }
                 },
                 onOpenReleases = {
-                    updateState = try {
-                        onNativeActivityResultLaunched()
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(AppUpdateRepository.RELEASES_URL)),
-                        )
+                    val launched = nativeActivityLaunchSucceeded(
+                        launch = {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW, Uri.parse(AppUpdateRepository.RELEASES_URL)),
+                            )
+                        },
+                        onSuccess = onNativeActivityResultLaunched,
+                    )
+                    updateState = if (launched) {
                         updateState
-                    } catch (error: ActivityNotFoundException) {
+                    } else {
                         UpdateUiState.Error("没有可打开 GitHub Releases 的应用")
                     }
                 },
@@ -268,7 +274,7 @@ internal fun SettingsScreen(
                     waitForSpace = mobileWebUiWaitForSpace,
                     canReplaceUi = mobileWebUiCanReplaceUi,
                     actionMessage = webUiActionMessage,
-                    manualReset = webUiManualReset,
+                    retryAvailable = mobileWebUiRetryAvailable,
                     onApply = {
                         webUiActionMessage = if (onApplyMobileWebUi()) {
                             "新界面正在当前原生设置入口中验收，完成后会替换会话界面。"
@@ -284,10 +290,6 @@ internal fun SettingsScreen(
                                     webUiGcReport = onCollectMobileWebUi(mobileWebUiServerId)
                                     webUiState = mobileWebUiCoordinator.state(mobileWebUiServerId)
                                 } catch (error: IOException) {
-                                    webUiActionMessage = "清理失败：${error.message.orEmpty()}"
-                                } catch (error: IllegalArgumentException) {
-                                    webUiActionMessage = "清理失败：${error.message.orEmpty()}"
-                                } catch (error: IllegalStateException) {
                                     webUiActionMessage = "清理失败：${error.message.orEmpty()}"
                                 } catch (_: SQLiteException) {
                                     webUiActionMessage = "清理失败：数据库暂不可用"
@@ -305,20 +307,15 @@ internal fun SettingsScreen(
                             scope.launch {
                                 try {
                                     val started = onRetryMobileWebUi(mobileWebUiServerId)
-                                    if (started) webUiManualReset = false
                                     webUiActionMessage = if (started) {
-                                        "已清除当前 UI 的手动重置抑制，正在重新下载。"
+                                        "已请求重新检查服务端界面，正在按需更新。"
                                     } else {
                                         "当前服务端尚未认证，稍后回到前台会重试。"
                                     }
                                 } catch (error: IOException) {
-                                    webUiActionMessage = "重新下载失败：${error.message.orEmpty()}"
-                                } catch (error: IllegalArgumentException) {
-                                    webUiActionMessage = "重新下载失败：${error.message.orEmpty()}"
-                                } catch (error: IllegalStateException) {
-                                    webUiActionMessage = "重新下载失败：${error.message.orEmpty()}"
+                                    webUiActionMessage = "重新检查服务端界面失败：${error.message.orEmpty()}"
                                 } catch (_: SecurityException) {
-                                    webUiActionMessage = "重新下载失败：缓存无权访问"
+                                    webUiActionMessage = "重新检查服务端界面失败：缓存无权访问"
                                 } finally {
                                     webUiBusy = false
                                 }
@@ -335,7 +332,9 @@ internal fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { showWebUiResetConfirm = false },
             title = { Text("重置此服务端 UI 缓存？") },
-            text = { Text("只删除远端 WebUI 缓存，消息、附件和配对信息不会改变。") },
+            text = {
+                Text("立即回到内置界面，只删除此服务端在本机的 WebUI 缓存；消息、附件和配对信息不会改变。相同版本不会自动重下，请点击“重新检查服务端界面”。")
+            },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -347,14 +346,11 @@ internal fun SettingsScreen(
                             try {
                                 onResetMobileWebUi(serverId)
                                 webUiState = coordinator.state(serverId)
-                                webUiManualReset = mobileWebUiStore?.hasManualReset(serverId) == true
                                 webUiGcReport = null
-                                webUiActionMessage = "已重置，等待重新下载当前 UI。"
+                                webUiActionMessage = "已重置，当前会话使用内置界面；相同版本不会自动重下，请点击“重新检查服务端界面”。"
+                            } catch (error: MobileWebUiResetCleanupPendingException) {
+                                webUiActionMessage = "已回到内置界面；缓存清理标记待重试。"
                             } catch (error: IOException) {
-                                webUiActionMessage = "重置失败：${error.message.orEmpty()}"
-                            } catch (error: IllegalArgumentException) {
-                                webUiActionMessage = "重置失败：${error.message.orEmpty()}"
-                            } catch (error: IllegalStateException) {
                                 webUiActionMessage = "重置失败：${error.message.orEmpty()}"
                             } catch (_: SQLiteException) {
                                 webUiActionMessage = "重置失败：数据库暂不可用"
@@ -375,7 +371,7 @@ internal fun SettingsScreen(
 @Composable
 private fun MobileWebUiCard(
     state: com.akashic.mobile.data.local.MobileWebUiStateEntity?,
-    manualReset: Boolean,
+    retryAvailable: Boolean,
     gcReport: MobileWebUiGcReport?,
     busy: Boolean,
     readyGeneration: String?,
@@ -429,15 +425,15 @@ private fun MobileWebUiCard(
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }
-            if (manualReset && readyGeneration == null) {
+            if (retryAvailable) {
                 Text(
-                    "已重置，等待重新下载。",
+                    "服务端界面暂未应用，可手动重新检查当前版本。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 6.dp),
                 )
                 TextButton(onClick = onRetry, enabled = !busy) {
-                    Text("重新下载当前 UI")
+                    Text("重新检查服务端界面")
                 }
             } else if (
                 state?.desiredChannel == "baseline" &&
@@ -461,7 +457,7 @@ private fun MobileWebUiCard(
             }
             gcReport?.let {
                 Text(
-                    "已清理 ${it.removedGenerations} 个版本、${formatBytes(it.removedBytes)}",
+                    mobileWebUiGcSummary(it),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 6.dp),
@@ -480,6 +476,15 @@ private fun MobileWebUiCard(
         }
     }
 }
+
+internal fun mobileWebUiGcSummary(report: MobileWebUiGcReport): String =
+    if (report.blockedGenerations > 0 || report.unownedFiles > 0) {
+        "已清理 ${report.removedGenerations} 个版本、${formatBytes(report.removedBytes)}；" +
+            "部分未清理（${report.blockedGenerations} 个版本、${report.unownedFiles} 个引用），" +
+            "引用已保留，未假报释放空间。"
+    } else {
+        "已清理 ${report.removedGenerations} 个版本、${formatBytes(report.removedBytes)}"
+    }
 
 /** 使用 Material 3 tonal card 表达更新状态和唯一主动作。 */
 @Composable

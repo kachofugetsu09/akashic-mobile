@@ -29,8 +29,25 @@ class MainActivityPresentationEpochTest {
 
     @Test
     fun processRecreationStartsANewUiSessionButRotationKeepsTheSession() {
-        assertFalse(mobileWebUiSessionStartedForProcess("old-process", "new-process", true))
-        assertTrue(mobileWebUiSessionStartedForProcess("same-process", "same-process", true))
-        assertFalse(mobileWebUiSessionStartedForProcess(null, "same-process", true))
+        assertFalse(
+            mobileWebUiSessionStartedForProcess(
+                "old-process", "new-process", "server-a", "server-a", true,
+            ),
+        )
+        assertTrue(
+            mobileWebUiSessionStartedForProcess(
+                "same-process", "same-process", "server-a", "server-a", true,
+            ),
+        )
+        assertFalse(
+            mobileWebUiSessionStartedForProcess(
+                "same-process", "same-process", "server-a", "server-b", true,
+            ),
+        )
+        assertFalse(
+            mobileWebUiSessionStartedForProcess(
+                null, "same-process", "server-a", "server-a", true,
+            ),
+        )
     }
 }

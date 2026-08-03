@@ -210,6 +210,39 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `decodes webui release changed as authenticated control`() {
+        val selectionDigest = "a".repeat(64)
+        val frame = """
+            {
+              "v": 1,
+              "kind": "control",
+              "type": "$MOBILE_WEB_UI_RELEASE_CHANGED",
+              "connection_epoch": 7,
+              "payload": {"server_id": "server-1", "selection_digest": "$selectionDigest"}
+            }
+        """.trimIndent()
+
+        assertEquals(7L, ProtocolCodec.decode(frame).connectionEpoch)
+    }
+
+    @Test
+    fun `release changed is not a durable event type`() {
+        val frame = """
+            {
+              "v": 1,
+              "kind": "event",
+              "type": "$MOBILE_WEB_UI_RELEASE_CHANGED",
+              "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+              "event_seq": 8,
+              "connection_epoch": 7,
+              "payload": {}
+            }
+        """.trimIndent()
+
+        assertThrows(IllegalArgumentException::class.java) { ProtocolCodec.decode(frame) }
+    }
+
+    @Test
     fun `rejects device revoked durable event`() {
         val frame = """
             {

@@ -28,6 +28,9 @@ data class SocketCandidateId(val generation: Long, val ordinal: Int)
 interface RealtimeSocketListener {
     fun onOpen(candidateId: SocketCandidateId, endpoint: ServerEndpoint)
 
+    /** Called synchronously when the socket owner revokes the current race generation. */
+    fun onRevoked(candidateId: SocketCandidateId, code: Int, reason: String)
+
     fun onEnvelope(candidateId: SocketCandidateId, envelope: WireEnvelope)
 
     fun onBinary(candidateId: SocketCandidateId, chunk: AttachmentChunkCodec.DecodedChunk)
@@ -44,6 +47,8 @@ interface RealtimeSocketListener {
 class RealtimeWebSocketClient(
     private val listener: RealtimeSocketListener,
     private val allowInsecureTransport: Boolean,
+    private val openWebSocket: (OkHttpClient, Request, WebSocketListener) -> WebSocket =
+        { client, request, socketListener -> client.newWebSocket(request, socketListener) },
 ) {
     private data class RaceState(
         val generation: Long,
@@ -116,6 +121,15 @@ class RealtimeWebSocketClient(
         losers.forEach { it.close(CLOSE_REPLACED, "authenticated candidate won") }
         return true
     }
+
+    /** Return whether a candidate generation is still owned by this socket client. */
+    fun isGenerationCurrent(generation: Long): Boolean = synchronized(lock) {
+        state?.generation == generation
+    }
+
+    /** Close every socket in a generation and invalidate it before reconnect logic can run. */
+    fun closeGeneration(generation: Long, code: Int = CLOSE_REVOKED, reason: String = "device revoked"): Boolean =
+        closeGenerationIfOwned(generation, null, code, reason)
 
     fun send(candidateId: SocketCandidateId, envelope: WireEnvelope): Boolean {
         val socket = synchronized(lock) { state?.sockets?.get(candidateId) } ?: return false
@@ -343,7 +357,7 @@ class RealtimeWebSocketClient(
         }
         val client = clientFor(endpoint)
         val request = Request.Builder().url(endpoint.url).build()
-        val socket = client.newWebSocket(request, socketListener(candidateId, endpoint))
+        val socket = openWebSocket(client, request, socketListener(candidateId, endpoint))
         synchronized(lock) {
             val current = state
             if (current == null || current.generation != generation || current.winner != null) {
@@ -392,6 +406,13 @@ class RealtimeWebSocketClient(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.w(TAG, "WebSocket closed: id=$candidateId code=$code reason=$reason")
+                if (code == CLOSE_REVOKED) {
+                    if (revokeGeneration(candidateId.generation, candidateId)) {
+                        listener.onRevoked(candidateId, code, reason)
+                        listener.onClosed(candidateId, code, reason)
+                    }
+                    return
+                }
                 val wasWinner = removeCandidate(candidateId, null)
                 if (wasWinner) listener.onClosed(candidateId, code, reason)
                 reportExhaustedIfNeeded(candidateId.generation)
@@ -424,6 +445,30 @@ class RealtimeWebSocketClient(
         current.sockets.remove(candidateId)
         if (error != null) current.lastError = error
         current.winner == candidateId
+    }
+
+    /** Invalidate a generation before notifying the session about device revocation. */
+    private fun revokeGeneration(generation: Long, candidateId: SocketCandidateId): Boolean {
+        return closeGenerationIfOwned(generation, candidateId, CLOSE_REVOKED, "device revoked")
+    }
+
+    private fun closeGenerationIfOwned(
+        generation: Long,
+        candidateId: SocketCandidateId?,
+        code: Int,
+        reason: String,
+    ): Boolean {
+        val sockets = synchronized(lock) {
+            val current = state ?: return false
+            if (current.generation != generation) return false
+            if (candidateId != null && candidateId !in current.sockets) return false
+            state = null
+            generationSequence.incrementAndGet()
+            current.delayedTunnel?.cancel(false)
+            current.sockets.values.toList()
+        }
+        sockets.forEach { socket -> socket.close(code, reason) }
+        return true
     }
 
     private fun reportExhaustedIfNeeded(generation: Long) {
@@ -535,6 +580,7 @@ class RealtimeWebSocketClient(
         const val PING_INTERVAL_SECONDS = 25L
         const val TUNNEL_RACE_DELAY_MILLIS = 750L
         const val CLOSE_REPLACED = 4000
+        const val CLOSE_REVOKED = 4403
         const val CLOSE_PROTOCOL_ERROR = 4406
         const val MAX_PLUGIN_UI_HTTP_RESPONSE_BYTES = 192 * 1024L
         const val MAX_MESSAGE_CONTENT_RANGE_BYTES = 256 * 1024L

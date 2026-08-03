@@ -4,6 +4,11 @@ import java.security.MessageDigest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 class MobileWebUiProtocolTest {
     @Test
@@ -84,6 +89,48 @@ class MobileWebUiProtocolTest {
     }
 
     @Test
+    fun `release decoder rejects missing or unknown fields`() {
+        val digest = mobileWebUiSelectionDigest(SERVER_ID, null, null)
+        val missing = JsonObject(
+            mapOf(
+                "server_id" to JsonPrimitive(SERVER_ID),
+                "release_epoch" to JsonPrimitive("00000000-0000-4000-8000-000000000001"),
+                "sequence" to JsonPrimitive(1),
+                "selection_digest" to JsonPrimitive(digest),
+                "preview" to JsonNull,
+            ),
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            decodeMobileWebUiReleaseView(missing)
+        }
+        val unknown = JsonObject(
+            mapOf(
+                "server_id" to JsonPrimitive(SERVER_ID),
+                "release_epoch" to JsonPrimitive("00000000-0000-4000-8000-000000000001"),
+                "sequence" to JsonPrimitive(1),
+                "selection_digest" to JsonPrimitive(digest),
+                "stable" to JsonNull,
+                "preview" to JsonNull,
+                "unexpected" to JsonPrimitive(true),
+            ),
+        )
+        assertThrows(kotlinx.serialization.SerializationException::class.java) {
+            decodeMobileWebUiReleaseView(unknown)
+        }
+    }
+
+    @Test
+    fun `release hint decoder requires a valid selection digest`() {
+        val payload = buildJsonObject {
+            put("server_id", SERVER_ID)
+            put("selection_digest", "not-a-digest")
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            decodeMobileWebUiReleaseChangedPayload(payload)
+        }
+    }
+
+    @Test
     fun `same digest cannot be advertised with two MIME types in one generation`() {
         val base = validManifest()
         val duplicateMime = base.copy(
@@ -96,6 +143,22 @@ class MobileWebUiProtocolTest {
         ).let { it.copy(generationId = mobileWebUiGenerationIdentityDigest(it)) }
         assertThrows(IllegalArgumentException::class.java) {
             validateMobileWebUiManifest(duplicateMime)
+        }
+    }
+
+    @Test
+    fun `same digest cannot be advertised with two sizes in one generation`() {
+        val base = validManifest()
+        val duplicateSize = base.copy(
+            generationId = "0".repeat(64),
+            files = listOf(
+                base.files.single().copy(path = "empty.txt", sizeBytes = 0),
+                base.files.single().copy(path = "other.txt", sizeBytes = 1),
+            ),
+            fileCount = 2,
+        ).let { it.copy(generationId = mobileWebUiGenerationIdentityDigest(it)) }
+        assertThrows(IllegalArgumentException::class.java) {
+            validateMobileWebUiManifest(duplicateSize)
         }
     }
 
@@ -154,6 +217,26 @@ class MobileWebUiProtocolTest {
         assertThrows(IllegalArgumentException::class.java) {
             validateMobileWebUiContentGrant(valid.copy(expiresAt = "not-a-date"), target)
         }
+    }
+
+    @Test
+    fun `unknown client errors retry while exact missing target rejects`() {
+        assertEquals(
+            MobileWebUiHttpAction.RETRY_AFTER,
+            classifyMobileWebUiHttp("manifest", 404),
+        )
+        assertEquals(
+            MobileWebUiHttpAction.RETRY_AFTER,
+            classifyMobileWebUiHttp("manifest", 403),
+        )
+        assertEquals(
+            MobileWebUiHttpAction.RETRY_AFTER,
+            classifyMobileWebUiHttp("manifest", 400),
+        )
+        assertEquals(
+            MobileWebUiHttpAction.REJECT_TARGET,
+            classifyMobileWebUiHttp("manifest", 404, "resource_not_found"),
+        )
     }
 
     @Test

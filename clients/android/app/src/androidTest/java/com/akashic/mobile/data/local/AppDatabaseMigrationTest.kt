@@ -463,6 +463,13 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
+            execSQL("INSERT INTO conversations VALUES('mobile:legacy', 'server', '迁移会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages VALUES('legacy-message', NULL, 'mobile:legacy', 'assistant', '迁移正文', 'complete', 3, 4, 7, NULL, NULL, NULL)",
+            )
+            execSQL(
+                "INSERT INTO message_content_transfers VALUES('legacy-message', 'server', 'mobile:legacy', 400000, '${"a".repeat(64)}', 262144, 'downloading', 5)",
+            )
             close()
         }
 
@@ -472,8 +479,50 @@ class AppDatabaseMigrationTest {
             true,
             AppDatabase.MIGRATION_12_13,
         ).use { database ->
+            database.query(
+                "SELECT serverId, displayName, deviceId, keyAlias, applicationKeyFingerprint, " +
+                    "lanEndpointsJson, tunnelEndpointsJson, tlsSpkiPinsJson, createdAt " +
+                    "FROM server_profiles WHERE serverId = 'server'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 server profile" }
+                assertEquals("server", cursor.getString(0))
+                assertEquals("电脑", cursor.getString(1))
+                assertEquals("device", cursor.getString(2))
+                assertEquals("alias", cursor.getString(3))
+                assertEquals("pin", cursor.getString(4))
+                assertEquals("[]", cursor.getString(5))
+                assertEquals("[]", cursor.getString(6))
+                assertEquals("[]", cursor.getString(7))
+                assertEquals(1L, cursor.getLong(8))
+            }
+            database.query(
+                "SELECT title, remoteKnown FROM conversations WHERE sessionId = 'mobile:legacy'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 conversation" }
+                assertEquals("迁移会话", cursor.getString(0))
+                assertEquals(1, cursor.getInt(1))
+            }
+            database.query(
+                "SELECT text, deliveryState, serverSeq FROM messages WHERE messageId = 'legacy-message'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 message" }
+                assertEquals("迁移正文", cursor.getString(0))
+                assertEquals("complete", cursor.getString(1))
+                assertEquals(7L, cursor.getLong(2))
+            }
+            database.query(
+                "SELECT transferredBytes, state FROM message_content_transfers WHERE messageId = 'legacy-message'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 message content transfer" }
+                assertEquals(262144L, cursor.getLong(0))
+                assertEquals("downloading", cursor.getString(1))
+            }
             listOf("mobile_webui_state", "mobile_webui_generations", "mobile_webui_blobs", "mobile_webui_rejects")
                 .forEach { table ->
+                    database.query("SELECT COUNT(*) FROM $table").use { cursor ->
+                        check(cursor.moveToFirst())
+                        assertEquals(0, cursor.getInt(0))
+                    }
                     database.query(
                         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '$table'",
                     ).use { cursor ->

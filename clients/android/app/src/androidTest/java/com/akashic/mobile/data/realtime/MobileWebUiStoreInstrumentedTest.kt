@@ -3,17 +3,25 @@ package com.akashic.mobile.data.realtime
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import android.database.sqlite.SQLiteException
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.ServerProfileEntity
 import java.io.File
+import java.io.IOException
 import java.security.MessageDigest
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -106,6 +114,268 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun resetDeleteFailurePreservesRoomOwnersAndDoesNotWriteManualReject() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+        val generation = requireNotNull(database.mobileWebUi().getGeneration(SERVER_ID, target.generationId))
+        val generationDirectory = requireNotNull(root.resolve(serverHash()).resolve(generation.manifestPath).parentFile)
+        val blob = root.resolve(serverHash()).resolve("blobs").resolve(emptyDigest())
+        val trashBlob = root.resolve("${serverHash()}.reset-trash").resolve("blobs").resolve(emptyDigest())
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deleteDirectory = { false },
+        )
+
+        assertThrows(IOException::class.java) {
+            runBlocking {
+                failingStore.resetServer(
+                    SERVER_ID,
+                    manualRejectTarget = target,
+                    fingerprint = FINGERPRINT,
+                )
+            }
+        }
+        val state = requireNotNull(database.mobileWebUi().getState(SERVER_ID))
+        assertEquals(target.generationId, state.servingGenerationId)
+        assertEquals(target.generationId, state.desiredGenerationId)
+        assertNull(database.mobileWebUi().getReject(SERVER_ID, target.targetKey, FINGERPRINT))
+        assertFalse(generationDirectory.exists())
+        assertTrue(root.resolve("${serverHash()}.reset-trash").isDirectory)
+        assertTrue(root.resolve("${serverHash()}.reset.json").isFile)
+        assertFalse(blob.exists())
+        assertTrue(trashBlob.isFile)
+        assertNull(failingStore.serving.value)
+    }
+
+    @Test
+    fun resetDatabaseFailureLeavesMarkerAndReopenReconcilesWithoutServingDeletedFiles() = runBlocking {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        database.close()
+        val databaseFile = context.cacheDir.resolve("mobile-webui-reset-db-${System.nanoTime()}.db")
+        database = Room.databaseBuilder(context, AppDatabase::class.java, databaseFile.absolutePath)
+            .allowMainThreadQueries()
+            .build()
+        database.serverProfiles().upsert(
+            ServerProfileEntity(
+                serverId = SERVER_ID,
+                displayName = "测试电脑",
+                deviceId = "device",
+                keyAlias = "alias",
+                applicationKeyFingerprint = "fingerprint",
+                lanEndpointsJson = "[]",
+                tunnelEndpointsJson = "[]",
+                tlsSpkiPinsJson = "[]",
+                createdAt = 1L,
+            ),
+        )
+        val fileStore = MobileWebUiStore(root, database.mobileWebUi(), nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD)
+        val target = prepareHealthyGeneration(fileStore)
+        database.close()
+
+        val failure = assertThrows(Exception::class.java) {
+            runBlocking {
+                fileStore.resetServer(SERVER_ID, manualRejectTarget = target, fingerprint = FINGERPRINT)
+            }
+        }
+        assertTrue(
+            "closed Room database must fail the reset transaction",
+            failure is IllegalStateException || failure is SQLiteException,
+        )
+        assertNull(fileStore.serving.value)
+        assertTrue(root.resolve("${serverHash()}.reset.json").isFile)
+
+        database = Room.databaseBuilder(context, AppDatabase::class.java, databaseFile.absolutePath)
+            .allowMainThreadQueries()
+            .build()
+        val recoveryStore = MobileWebUiStore(root, database.mobileWebUi(), nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD)
+        recoveryStore.reconcile(SERVER_ID)
+        val state = requireNotNull(database.mobileWebUi().getState(SERVER_ID))
+        assertEquals("baseline", state.desiredChannel)
+        assertNull(state.servingGenerationId)
+        assertNull(database.mobileWebUi().getGeneration(SERVER_ID, target.generationId))
+        assertNull(database.mobileWebUi().getBlob(SERVER_ID, emptyDigest()))
+        assertEquals("manual_reset", database.mobileWebUi().getReject(SERVER_ID, target.targetKey, FINGERPRINT)?.reason)
+        assertFalse(root.resolve("${serverHash()}.reset.json").exists())
+        database.close()
+        databaseFile.delete()
+        databaseFile.resolveSibling("${databaseFile.name}-shm").delete()
+        databaseFile.resolveSibling("${databaseFile.name}-wal").delete()
+        Unit
+    }
+
+    @Test
+    fun resetMarkerDeleteFailureReportsCommittedResetAndReplaysCleanup() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deleteResetMarker = { false },
+        )
+
+        assertThrows(MobileWebUiResetCleanupPendingException::class.java) {
+            runBlocking {
+                failingStore.resetServer(SERVER_ID, manualRejectTarget = target, fingerprint = FINGERPRINT)
+            }
+        }
+        assertEquals("baseline", database.mobileWebUi().getState(SERVER_ID)?.desiredChannel)
+        assertEquals("manual_reset", database.mobileWebUi().getReject(SERVER_ID, target.targetKey, FINGERPRINT)?.reason)
+        assertTrue(root.resolve("${serverHash()}.reset.json").isFile)
+
+        val recoveryStore = MobileWebUiStore(root, database.mobileWebUi(), nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD)
+        recoveryStore.reconcile(SERVER_ID)
+        assertFalse(root.resolve("${serverHash()}.reset.json").exists())
+    }
+
+    @Test
+    fun manifestPublishRenameFailureIsObservableWithoutRoomOwner() = runBlocking {
+        val manifest = validManifest()
+        val target = targetFor(manifest)
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            renameFile = { _, _ -> false },
+        )
+
+        assertThrows(IOException::class.java) {
+            runBlocking { failingStore.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest)) }
+        }
+        assertNull(database.mobileWebUi().getGeneration(SERVER_ID, target.generationId))
+    }
+
+    @Test
+    fun blobPublishRenameAndDestinationDeleteFailuresAreObservable() = runBlocking {
+        val content = "rename-failure".toByteArray()
+        val digest = contentDigest(content)
+        val renameFailStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            renameFile = { _, _ -> false },
+        )
+        assertThrows(IOException::class.java) {
+            runBlocking { renameFailStore.appendBlob(SERVER_ID, digest, content.size.toLong(), 0, content) }
+        }
+        assertFalse(root.resolve(serverHash()).resolve("blobs").resolve(digest).exists())
+
+        val deleteDigest = contentDigest("delete-failure".toByteArray())
+        val deleteContent = "delete-failure".toByteArray()
+        val corruptDestination = root.resolve(serverHash()).resolve("blobs").resolve(deleteDigest)
+        val corruptParent = requireNotNull(corruptDestination.parentFile)
+        assertTrue(corruptParent.isDirectory || corruptParent.mkdirs())
+        corruptDestination.writeText("corrupt")
+        val deleteFailStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deletePartialFile = { false },
+        )
+        assertThrows(IOException::class.java) {
+            runBlocking { deleteFailStore.appendBlob(SERVER_ID, deleteDigest, deleteContent.size.toLong(), 0, deleteContent) }
+        }
+        assertTrue(corruptDestination.isFile)
+    }
+
+    @Test
+    fun partialCleanupFailureIsObservable() = runBlocking {
+        val content = "partial".toByteArray()
+        val digest = contentDigest(content)
+        store.blobOffset(SERVER_ID, digest, content.size.toLong())
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deletePartialFile = { false },
+        )
+
+        assertThrows(IOException::class.java) {
+            runBlocking { failingStore.resetBlobPartial(SERVER_ID, digest, content.size.toLong()) }
+        }
+        Unit
+    }
+
+    @Test
+    fun garbageCollectionRemovesOrphanGenerationWithoutRoomOwner() = runBlocking {
+        prepareHealthyGeneration(store)
+        val orphan = root.resolve(serverHash()).resolve("generations").resolve("orphan-generation")
+        assertTrue(orphan.mkdirs())
+        orphan.resolve("manifest.json").writeText("orphan")
+
+        val report = store.collectGarbage(SERVER_ID, maxGenerations = 4, maxBytes = 256 * 1024 * 1024)
+
+        assertTrue(report.removedGenerations >= 1)
+        assertFalse(orphan.exists())
+    }
+
+    @Test
+    fun garbageCollectionReportsOrphanGenerationDeleteFailureWithoutFalseRemoval() = runBlocking {
+        prepareHealthyGeneration(store)
+        val orphan = root.resolve(serverHash()).resolve("generations").resolve("orphan-generation")
+        assertTrue(orphan.mkdirs())
+        orphan.resolve("manifest.json").writeText("orphan")
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deleteDirectory = { false },
+        )
+
+        val report = failingStore.collectGarbage(SERVER_ID, maxGenerations = 4, maxBytes = 256 * 1024 * 1024)
+
+        assertEquals(0, report.removedGenerations)
+        assertTrue(report.blockedGenerations > 0)
+        assertTrue(report.unownedFiles > 0)
+        assertTrue(orphan.exists())
+    }
+
+    @Test
+    fun publishBlobRoomFailureLeavesOrphanThatRecoveryGcRemoves() = runBlocking {
+        val content = "blob".toByteArray()
+        val digest = contentDigest(content)
+        val failingDao = object : com.akashic.mobile.data.local.MobileWebUiDao by database.mobileWebUi() {
+            override suspend fun upsertBlob(blob: com.akashic.mobile.data.local.MobileWebUiBlobEntity) {
+                throw SQLiteException("injected blob owner failure")
+            }
+        }
+        val failingStore = MobileWebUiStore(root, failingDao, nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD)
+
+        assertThrows(SQLiteException::class.java) {
+            runBlocking { failingStore.appendBlob(SERVER_ID, digest, content.size.toLong(), 0, content) }
+        }
+        val orphan = root.resolve(serverHash()).resolve("blobs").resolve(digest)
+        assertTrue(orphan.isFile)
+        assertNull(database.mobileWebUi().getBlob(SERVER_ID, digest))
+
+        val report = store.collectGarbage(SERVER_ID, maxGenerations = 1, maxBytes = 256 * 1024 * 1024)
+        assertTrue(report.removedBytes >= content.size)
+        assertFalse(orphan.exists())
+    }
+
+    @Test
+    fun globalGarbageCollectionRemovesProfilelessOrphanAndRetainsMalformedRoot() = runBlocking {
+        prepareHealthyGeneration(store)
+        val unknownRoot = root.resolve("a".repeat(64)).resolve("blobs")
+        assertTrue(unknownRoot.mkdirs())
+        val content = "unknown".toByteArray()
+        val digest = contentDigest(content)
+        val unknownBlob = unknownRoot.resolve(digest)
+        unknownBlob.writeBytes(content)
+        val malformed = root.resolve("not-a-server-root")
+        assertTrue(malformed.mkdirs())
+        malformed.resolve("orphan").writeText("keep")
+
+        val report = store.collectGlobalGarbage(maxBytes = 1)
+
+        assertTrue(report.blockedGenerations > 0)
+        assertTrue(report.unownedFiles > 0)
+        assertTrue(report.removedBytes >= content.size)
+        assertFalse(unknownBlob.exists())
+        assertTrue(malformed.exists())
+    }
+
+    @Test
     fun baselineSelectionClearsRemoteServingOnlyAtNextSessionOwnerAction() = runBlocking {
         val target = prepareHealthyGeneration(store)
         store.setDesired(SERVER_ID, releaseView(null), null)
@@ -137,6 +407,18 @@ class MobileWebUiStoreInstrumentedTest {
         assertTrue(allowed.allowed)
         store.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
         assertTrue(store.hasBlob(SERVER_ID, contentDigest(content), content.size.toLong()))
+    }
+
+    @Test
+    fun duplicateDigestCountsOnceForDownloadSpaceAdmission() = runBlocking {
+        val content = "space-test".toByteArray()
+        val manifest = manifestWithDuplicateFile(content)
+        val target = targetFor(manifest)
+        store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        store.setDesired(SERVER_ID, releaseView(target), target)
+
+        val admission = store.prepareDownloadSpace(SERVER_ID, manifest)
+        assertEquals(content.size.toLong(), admission.requiredBytes)
     }
 
     @Test
@@ -173,23 +455,387 @@ class MobileWebUiStoreInstrumentedTest {
         assertEquals("health_timeout", database.mobileWebUi().getReject(SERVER_ID, target.targetKey, FINGERPRINT)?.reason)
     }
 
-    private suspend fun prepareHealthyGeneration(store: MobileWebUiStore): MobileWebUiTarget {
+    @Test
+    fun candidateLeaseIsProcessStateWhileServingRemainsCommitted() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+        store.clearServingToBaseline(SERVER_ID)
+        store.setDesired(SERVER_ID, releaseView(target), target)
+
+        assertTrue(store.openAttempt(SERVER_ID, target.generationId, "candidate", FINGERPRINT))
+        assertEquals(
+            MobileWebUiAttemptLease(SERVER_ID, target.generationId, "candidate"),
+            store.attempt.value,
+        )
+        assertNull(store.serving.value)
+
+        store.commitHealthy(SERVER_ID, target.generationId, "candidate")
+        assertNull(store.attempt.value)
+        assertEquals(MobileWebUiServing(SERVER_ID, target.generationId), store.serving.value)
+    }
+
+    @Test
+    fun corruptBlobDeleteFailurePreservesDatabaseOwner() = runBlocking {
+        val target = prepareHealthyGeneration(store)
+        val digest = emptyDigest()
+        val blob = root.resolve(serverHash()).resolve("blobs").resolve(digest)
+        blob.writeBytes("corrupt".toByteArray())
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deletePhysicalFile = { false },
+        )
+
+        assertThrows(IOException::class.java) {
+            runBlocking { failingStore.readVerifiedManifest(SERVER_ID, target) }
+        }
+        assertTrue(blob.isFile)
+        assertNotNull(database.mobileWebUi().getBlob(SERVER_ID, digest))
+    }
+
+    @Test
+    fun rollbackStorageFailureFallsBackToBaselineAndPreservesBlobOwner() = runBlocking {
+        prepareHealthyGeneration(store)
+        val candidateContent = "rollback-failure".toByteArray()
+        val candidateManifest = manifestWithFile(candidateContent)
+        val candidate = targetFor(candidateManifest)
+        store.commitManifest(SERVER_ID, candidate, mobileWebUiManifestBytes(candidateManifest))
+        store.setDesired(SERVER_ID, releaseView(candidate), candidate)
+        store.appendBlob(
+            SERVER_ID,
+            contentDigest(candidateContent),
+            candidateContent.size.toLong(),
+            0,
+            candidateContent,
+        )
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deletePhysicalFile = { false },
+        )
+        assertTrue(failingStore.openAttempt(SERVER_ID, candidate.generationId, "candidate", FINGERPRINT))
+        val fallbackBlob = root.resolve(serverHash()).resolve("blobs").resolve(emptyDigest())
+        fallbackBlob.writeBytes("corrupt".toByteArray())
+
+        val result = failingStore.rollbackAttemptAndRejectResult(
+            SERVER_ID,
+            candidate.generationId,
+            "candidate",
+            FINGERPRINT,
+            "health_timeout",
+        )
+        val state = requireNotNull(database.mobileWebUi().getState(SERVER_ID))
+        assertTrue(result.fallbackUnavailable)
+        assertNull(state.attemptingGenerationId)
+        assertNull(state.attemptingNonce)
+        assertNull(state.fallbackGenerationId)
+        assertNull(failingStore.attempt.value)
+        assertNull(failingStore.serving.value)
+        assertEquals("fallback_unavailable", database.mobileWebUi().getReject(SERVER_ID, candidate.targetKey, FINGERPRINT)?.reason)
+        assertTrue(fallbackBlob.isFile)
+    }
+
+    @Test
+    fun corruptFallbackManifestIsVisibleAsFallbackUnavailable() = runBlocking {
+        val fallback = prepareHealthyGeneration(store)
+        val candidateContent = "candidate-corrupt-fallback".toByteArray()
+        val candidateManifest = manifestWithFile(candidateContent)
+        val candidate = targetFor(candidateManifest)
+        store.commitManifest(SERVER_ID, candidate, mobileWebUiManifestBytes(candidateManifest))
+        store.setDesired(SERVER_ID, releaseView(candidate), candidate)
+        store.appendBlob(SERVER_ID, contentDigest(candidateContent), candidateContent.size.toLong(), 0, candidateContent)
+        assertTrue(store.openAttempt(SERVER_ID, candidate.generationId, "candidate", FINGERPRINT))
+
+        val fallbackRow = requireNotNull(database.mobileWebUi().getGeneration(SERVER_ID, fallback.generationId))
+        root.resolve(serverHash()).resolve(fallbackRow.manifestPath).writeText("{corrupt")
+
+        val result = store.rollbackAttemptAndRejectResult(
+            SERVER_ID,
+            candidate.generationId,
+            "candidate",
+            FINGERPRINT,
+            "render_failed",
+        )
+
+        assertTrue(result.fallbackUnavailable)
+        assertNull(database.mobileWebUi().getState(SERVER_ID)?.servingGenerationId)
+        assertEquals("fallback_unavailable", database.mobileWebUi().getReject(SERVER_ID, candidate.targetKey, FINGERPRINT)?.reason)
+        assertNull(store.serving.value)
+    }
+
+    @Test
+    fun candidateOpenStorageFailureStaysInCoordinatorOwnerWithObservableError() = runBlocking {
+        val content = "open-failure".toByteArray()
+        val manifest = manifestWithFile(content)
+        val target = targetFor(manifest)
+        val failingStore = MobileWebUiStore(
+            root,
+            database.mobileWebUi(),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            deletePhysicalFile = { false },
+        )
+        failingStore.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifest))
+        failingStore.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
+        failingStore.setDesired(SERVER_ID, releaseView(target), target)
+        val errors = mutableListOf<String>()
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = failingStore,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> null },
+            startHttp = { },
+            onError = errors::add,
+            onRetryTrigger = { },
+        )
+        coordinator.restoreLocal(SERVER_ID)
+        root.resolve(serverHash()).resolve("blobs").resolve(contentDigest(content))
+            .writeBytes("corrupt".toByteArray())
+
+        assertEquals(null, coordinator.openAttempt(SERVER_ID, target.generationId))
+        assertTrue(errors.any { it.contains("候选版本校验失败") })
+        assertNull(database.mobileWebUi().getState(SERVER_ID)?.attemptingGenerationId)
+        coordinatorJob.cancel()
+    }
+
+    @Test
+    fun staleServingRollbackCannotReplaceAnActiveCandidateLease() = runBlocking {
+        val committed = prepareHealthyGeneration(store)
+        val content = "candidate".toByteArray()
+        val candidateManifest = manifestWithFile(content)
+        val candidate = targetFor(candidateManifest)
+        store.commitManifest(SERVER_ID, candidate, mobileWebUiManifestBytes(candidateManifest))
+        store.setDesired(SERVER_ID, releaseView(candidate), candidate)
+        store.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
+        assertTrue(store.openAttempt(SERVER_ID, candidate.generationId, "candidate", FINGERPRINT))
+        assertEquals(committed.generationId, store.serving.value?.generationId)
+        assertEquals(candidate.generationId, store.servingGenerationId())
+
+        assertEquals(
+            committed.generationId,
+            store.rejectServingAndRollback(SERVER_ID, committed.generationId, FINGERPRINT, "stale"),
+        )
+        assertEquals(candidate.generationId, store.attempt.value?.generationId)
+        assertEquals(candidate.generationId, store.servingGenerationId())
+
+        assertEquals(
+            committed.generationId,
+            store.rejectServingAndRollback(SERVER_ID, candidate.generationId, FINGERPRINT, "candidate_failed"),
+        )
+        assertNull(store.attempt.value)
+        assertEquals(committed.generationId, store.serving.value?.generationId)
+        assertEquals(committed.generationId, store.servingGenerationId())
+    }
+
+    @Test
+    fun explicitRetryClearsOnlyTheSelectedTargetRejection() = runBlocking {
+        val first = prepareHealthyGeneration(store)
+        val second = targetFor(manifestWithFile("other".toByteArray()))
+        store.markRejected(SERVER_ID, first, FINGERPRINT, "permanent")
+        store.markRejected(SERVER_ID, second, FINGERPRINT, "permanent")
+
+        store.clearReject(SERVER_ID, first, FINGERPRINT)
+
+        assertNull(database.mobileWebUi().getReject(SERVER_ID, first.targetKey, FINGERPRINT))
+        assertNotNull(database.mobileWebUi().getReject(SERVER_ID, second.targetKey, FINGERPRINT))
+    }
+
+    @Test
+    fun previewRejectFallbackExposesOnlyCurrentReleaseTargetForExplicitRetry() = runBlocking {
+        val stableContent = "stable-current".toByteArray()
+        val previewContent = "preview-current".toByteArray()
+        val oldContent = "old-not-in-release".toByteArray()
+        val stable = targetFor(manifestWithFile(stableContent))
+        val preview = targetFor(manifestWithFile(previewContent))
+        val old = targetFor(manifestWithFile(oldContent))
+        for ((target, content) in listOf(stable to stableContent, preview to previewContent, old to oldContent)) {
+            store.commitManifest(SERVER_ID, target, mobileWebUiManifestBytes(manifestWithFile(content)))
+            store.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
+        }
+        store.markRejected(SERVER_ID, preview, FINGERPRINT, "preview_failed")
+        store.markRejected(SERVER_ID, old, FINGERPRINT, "old_target")
+
+        val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> commandId },
+            startHttp = { },
+            onError = { },
+            onRetryTrigger = { },
+        )
+        val release = releaseView(SERVER_ID, stable, preview)
+        coordinator.restoreLocal(SERVER_ID)
+        coordinator.resolve(SERVER_ID)
+        assertTrue(coordinator.onReply(releaseReply(commandId, release)))
+        assertEquals(stable.generationId, database.mobileWebUi().getState(SERVER_ID)?.desiredGenerationId)
+        assertTrue(coordinator.retryAvailable.value)
+        assertNotNull(database.mobileWebUi().getReject(SERVER_ID, preview.targetKey, FINGERPRINT))
+        assertNotNull(database.mobileWebUi().getReject(SERVER_ID, old.targetKey, FINGERPRINT))
+
+        assertTrue(coordinator.retryCurrentUi(SERVER_ID))
+        coordinator.resolve(SERVER_ID)
+        assertTrue(coordinator.onReply(releaseReply(commandId, release)))
+        assertEquals(preview.generationId, database.mobileWebUi().getState(SERVER_ID)?.desiredGenerationId)
+        assertNull(database.mobileWebUi().getReject(SERVER_ID, preview.targetKey, FINGERPRINT))
+        assertNotNull(database.mobileWebUi().getReject(SERVER_ID, old.targetKey, FINGERPRINT))
+        assertFalse(coordinator.retryAvailable.value)
+        coordinatorJob.cancel()
+    }
+
+    @Test
+    fun reconnectDoesNotReconcileAwayAProcessOwnedCandidateLease() = runBlocking {
+        val coordinatorJob = SupervisorJob()
+        val coordinatorScope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined)
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = coordinatorScope,
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> null },
+            startHttp = { },
+            onError = { },
+            onRetryTrigger = { },
+        )
+        coordinator.restoreLocal(SERVER_ID)
+        val content = "reconnect".toByteArray()
+        val candidateManifest = manifestWithFile(content)
+        val candidate = targetFor(candidateManifest)
+        store.commitManifest(SERVER_ID, candidate, mobileWebUiManifestBytes(candidateManifest))
+        store.setDesired(SERVER_ID, releaseView(candidate), candidate)
+        store.appendBlob(SERVER_ID, contentDigest(content), content.size.toLong(), 0, content)
+        assertTrue(store.openAttempt(SERVER_ID, candidate.generationId, "candidate", FINGERPRINT))
+
+        coordinator.restoreLocal(SERVER_ID)
+
+        assertEquals(candidate.generationId, store.attempt.value?.generationId)
+        assertEquals(candidate.generationId, store.servingGenerationId())
+        coordinatorJob.cancel()
+    }
+
+    @Test
+    fun serverSwitchCancelsOldCandidateBeforeReturningToItsCommittedFallback() = runBlocking {
+        val serverA = SERVER_ID
+        val serverB = "server-2"
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> null },
+            startHttp = { },
+            onError = { },
+            onRetryTrigger = { },
+        )
+        val committedA = prepareHealthyGeneration(store, serverA)
+        coordinator.restoreLocal(serverA)
+        val candidateContent = "server-a-candidate".toByteArray()
+        val candidate = targetFor(manifestWithFile(candidateContent), serverA)
+        store.commitManifest(serverA, candidate, mobileWebUiManifestBytes(manifestWithFile(candidateContent)))
+        store.setDesired(serverA, releaseView(serverA, candidate), candidate)
+        store.appendBlob(
+            serverA,
+            contentDigest(candidateContent),
+            candidateContent.size.toLong(),
+            0,
+            candidateContent,
+        )
+        assertTrue(store.openAttempt(serverA, candidate.generationId, "server-a-candidate", FINGERPRINT))
+        assertEquals(candidate.generationId, store.servingGenerationId())
+
+        // Switching away must durably cancel A before B is allowed to own the process presentation.
+        coordinator.restoreLocal(serverB)
+        assertNull(store.attempt.value)
+        assertNull(store.serving.value)
+        val stateA = requireNotNull(database.mobileWebUi().getState(serverA))
+        assertNull(stateA.attemptingGenerationId)
+        assertNull(stateA.attemptingNonce)
+        assertEquals(committedA.generationId, stateA.servingGenerationId)
+
+        // Returning to A restores only its committed fallback; the rejected candidate is not inherited.
+        coordinator.restoreLocal(serverA)
+        assertEquals(MobileWebUiServing(serverA, committedA.generationId), store.serving.value)
+        assertNull(store.attempt.value)
+
+        // A defensive oracle for a previously lost process lease: durable A attempting state
+        // must still be reconciled even though this process already restored A once.
+        assertTrue(store.openAttempt(serverA, candidate.generationId, "server-a-stale", FINGERPRINT))
+        store.restoreCommittedServing(serverB)
+        assertNull(store.attempt.value)
+        assertNotNull(database.mobileWebUi().getState(serverA)?.attemptingGenerationId)
+        coordinator.restoreLocal(serverA)
+        assertNull(store.attempt.value)
+        assertEquals(MobileWebUiServing(serverA, committedA.generationId), store.serving.value)
+        assertNull(database.mobileWebUi().getState(serverA)?.attemptingGenerationId)
+        coordinatorJob.cancel()
+    }
+
+    @Test
+    fun releaseTargetChangeRollsBackCandidateBeforePreparingNextTarget() = runBlocking {
+        val coordinatorJob = SupervisorJob()
+        val coordinator = MobileWebUiCoordinator(
+            store = store,
+            scope = CoroutineScope(coordinatorJob + Dispatchers.Unconfined),
+            nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD,
+            sendCommand = { _, _ -> "01ARZ3NDEKTSV4RRFFQ69G5FAV" },
+            startHttp = { },
+            onError = { },
+            onRetryTrigger = { },
+        )
+        val committed = prepareHealthyGeneration(store)
+        coordinator.restoreLocal(SERVER_ID)
+        val candidateContent = "candidate-change".toByteArray()
+        val candidateManifest = manifestWithFile(candidateContent)
+        val candidate = targetFor(candidateManifest)
+        store.commitManifest(SERVER_ID, candidate, mobileWebUiManifestBytes(candidateManifest))
+        store.setDesired(SERVER_ID, releaseView(candidate), candidate)
+        store.appendBlob(SERVER_ID, contentDigest(candidateContent), candidateContent.size.toLong(), 0, candidateContent)
+        assertTrue(store.openAttempt(SERVER_ID, candidate.generationId, "candidate", FINGERPRINT))
+
+        val nextTarget = targetFor(manifestWithFile("next".toByteArray()))
+        val nextView = releaseView(nextTarget)
+        coordinator.resolve(SERVER_ID)
+        val reply = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.REPLY,
+            type = "$MOBILE_WEB_UI_RELEASE_GET.ok",
+            id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            connectionEpoch = 1,
+            payload = MOBILE_WEB_UI_JSON.encodeToJsonElement(nextView).jsonObject,
+        )
+        assertTrue(coordinator.onReply(reply))
+
+        assertNull(store.attempt.value)
+        assertEquals(committed.generationId, store.servingGenerationId())
+        assertEquals(nextTarget.generationId, database.mobileWebUi().getState(SERVER_ID)?.desiredGenerationId)
+        coordinatorJob.cancel()
+    }
+
+    private suspend fun prepareHealthyGeneration(
+        store: MobileWebUiStore,
+        serverId: String = SERVER_ID,
+    ): MobileWebUiTarget {
         val manifest = validManifest()
         val bytes = mobileWebUiManifestBytes(manifest)
-        val target = targetFor(manifest)
-        store.commitManifest(SERVER_ID, target, bytes)
-        store.ensureEmptyBlob(SERVER_ID, emptyDigest())
-        store.setDesired(SERVER_ID, releaseView(target), target)
-        assertTrue(store.openAttempt(SERVER_ID, target.generationId, NONCE, FINGERPRINT))
-        store.commitHealthy(SERVER_ID, target.generationId, NONCE)
+        val target = targetFor(manifest, serverId)
+        store.commitManifest(serverId, target, bytes)
+        store.ensureEmptyBlob(serverId, emptyDigest())
+        store.setDesired(serverId, releaseView(serverId, target), target)
+        assertTrue(store.openAttempt(serverId, target.generationId, NONCE, FINGERPRINT))
+        store.commitHealthy(serverId, target.generationId, NONCE)
         return target
     }
 
-    private fun targetFor(manifest: MobileWebUiManifest): MobileWebUiTarget {
+    private fun targetFor(
+        manifest: MobileWebUiManifest,
+        serverId: String = SERVER_ID,
+    ): MobileWebUiTarget {
         val bytes = mobileWebUiManifestBytes(manifest)
         val digest = mobileWebUiManifestDigest(manifest)
         return MobileWebUiTarget(
-            targetKey = deriveMobileWebUiTargetKey(SERVER_ID, manifest.generationId, digest),
+            targetKey = deriveMobileWebUiTargetKey(serverId, manifest.generationId, digest),
             generationId = manifest.generationId,
             manifestDigest = digest,
             manifestSizeBytes = bytes.size.toLong(),
@@ -219,18 +865,56 @@ class MobileWebUiStoreInstrumentedTest {
         return provisional.copy(generationId = mobileWebUiGenerationIdentityDigest(provisional))
     }
 
+    private fun manifestWithDuplicateFile(content: ByteArray): MobileWebUiManifest {
+        val digest = contentDigest(content)
+        val file = MobileWebUiManifestFile("mobile.html", digest, content.size.toLong(), "text/html")
+        val duplicate = MobileWebUiManifestFile("other.html", digest, content.size.toLong(), "text/html")
+        val provisional = validManifest().copy(
+            files = listOf(file, duplicate),
+            unpackedSizeBytes = content.size.toLong() * 2,
+            fileCount = 2,
+            generationId = "0".repeat(64),
+        )
+        return provisional.copy(generationId = mobileWebUiGenerationIdentityDigest(provisional))
+    }
+
     private fun contentDigest(content: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(content).joinToString("") { "%02x".format(it) }
 
     private fun releaseView(target: MobileWebUiTarget?): MobileWebUiReleaseView =
+        releaseView(SERVER_ID, target)
+
+    private fun releaseView(
+        serverId: String,
+        target: MobileWebUiTarget?,
+    ): MobileWebUiReleaseView = releaseView(serverId, target, null)
+
+    private fun releaseView(
+        serverId: String,
+        stable: MobileWebUiTarget?,
+        preview: MobileWebUiTarget?,
+    ): MobileWebUiReleaseView =
         MobileWebUiReleaseView(
-            serverId = SERVER_ID,
+            serverId = serverId,
             releaseEpoch = "00000000-0000-4000-8000-000000000001",
             sequence = 1,
-            selectionDigest = mobileWebUiSelectionDigest(SERVER_ID, target?.targetKey, null),
-            stable = target,
-            preview = null,
+            selectionDigest = mobileWebUiSelectionDigest(
+                serverId,
+                stable?.targetKey,
+                preview?.targetKey,
+            ),
+            stable = stable,
+            preview = preview,
         )
+
+    private fun releaseReply(commandId: String, view: MobileWebUiReleaseView): WireEnvelope = WireEnvelope(
+        v = WIRE_PROTOCOL_VERSION,
+        kind = WireKind.REPLY,
+        type = "$MOBILE_WEB_UI_RELEASE_GET.ok",
+        id = commandId,
+        connectionEpoch = 1,
+        payload = MOBILE_WEB_UI_JSON.encodeToJsonElement(view).jsonObject,
+    )
 
     private fun validManifest(): MobileWebUiManifest {
         val provisional = MobileWebUiManifest(

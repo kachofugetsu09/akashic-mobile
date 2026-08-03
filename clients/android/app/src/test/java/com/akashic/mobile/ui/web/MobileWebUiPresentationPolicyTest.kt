@@ -66,4 +66,18 @@ class MobileWebUiPresentationPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun newPresentationEpochDoesNotConstructCandidateLease() {
+        assertFalse(mobileWebUiCandidateLeaseAllowed(true, sessionEpoch = 2, presentationEpoch = 3))
+        assertFalse(mobileWebUiCandidateLeaseAllowed(false, sessionEpoch = 2, presentationEpoch = 2))
+        assertTrue(mobileWebUiCandidateLeaseAllowed(true, sessionEpoch = 2, presentationEpoch = 2))
+    }
+
+    @Test
+    fun explicitApplyIsConsumedOnlyAfterDurableAttemptExists() {
+        assertFalse(mobileWebUiApplyCanBeConsumed(explicitApply = false, durableAttemptCreated = true))
+        assertFalse(mobileWebUiApplyCanBeConsumed(explicitApply = true, durableAttemptCreated = false))
+        assertTrue(mobileWebUiApplyCanBeConsumed(explicitApply = true, durableAttemptCreated = true))
+    }
 }

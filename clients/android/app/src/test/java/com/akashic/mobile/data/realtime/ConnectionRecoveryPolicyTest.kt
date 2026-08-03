@@ -236,6 +236,37 @@ class ConnectionRecoveryPolicyTest {
     }
 
     @Test
+    fun `queued revoke accepts pre-return owner but rejects stale re-pair task`() {
+        assertTrue(
+            shouldApplyQueuedDeviceRevocation(
+                currentEpoch = 8,
+                queuedEpoch = 8,
+                currentGeneration = 0,
+                queuedGeneration = 21,
+                ownerGenerationCurrent = true,
+            )
+        )
+        assertFalse(
+            shouldApplyQueuedDeviceRevocation(
+                currentEpoch = 9,
+                queuedEpoch = 8,
+                currentGeneration = 22,
+                queuedGeneration = 21,
+                ownerGenerationCurrent = false,
+            )
+        )
+        assertFalse(
+            shouldApplyQueuedDeviceRevocation(
+                currentEpoch = 8,
+                queuedEpoch = 8,
+                currentGeneration = 22,
+                queuedGeneration = 21,
+                ownerGenerationCurrent = false,
+            )
+        )
+    }
+
+    @Test
     fun `rejected loser open cannot consume recovered outage`() {
         val latch = NetworkRecoveryLatch()
         latch.onGenerationStarted(23, unmetered)
