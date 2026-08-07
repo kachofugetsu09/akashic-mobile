@@ -9,5 +9,6 @@
 | 0005 | accepted | 共享 WebUI 源码由核心仓库统一维护 |
 | 0006 | accepted | 超长历史正文使用已认证的同源 HTTPS Range 恢复 |
 | 0007 | accepted | 服务端选择的 WebUI 保留 embedded baseline |
+| 0008 | accepted | Core main 对账 WebUI Stable |
 
 新决策使用四位递增编号。修正旧决定时保留原记录，并在原记录和新记录中互相链接。

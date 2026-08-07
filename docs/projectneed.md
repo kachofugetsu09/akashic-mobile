@@ -171,3 +171,9 @@ WebUI 发起的发送与插件查询，在发起 WebView 生命周期仍有效�
 颜色、排版、抽屉、island、组件组合和只调用既有 bridge capability 的交互可以由服务端发布新 WebUI，不要求发布 APK。新增原生系统能力、改变 bridge/snapshot 兼容范围、WebView 生命周期、Room、网络或安全逻辑时仍必须发布 Android binary，并用 manifest `minimum_native_build` 阻止旧版本加载。
 
 GitHub APK 检查、下载、摘要验证、系统安装确认和 `REQUEST_INSTALL_PACKAGES` 继续由现有独立 owner 管理。WebUI OTA 不得自动安装 APK、改变该入口或提前替换为 Google Play 发行策略。
+
+### MOB-UI-005 会话模型选择只消费 Core 权威目录
+
+移动端从当前已认证 Core 连接按会话读取模型 generation、默认 runtime、可选 runtime、能力和已提交选择，不维护模型名称、Provider 或思考强度的第二份静态目录。模型胶囊只展示该投影；选择在本地校验后随下一条用户消息进入同一可靠 outbox 命令，由 Core 的会话 owner 提交。
+
+旧客户端未携带模型字段时必须保留现有会话选择；新客户端显式发送空 runtime 表示恢复跟随全局默认。目录刷新、切换会话、断线和迟到 reply 不得把一个会话的选择写给另一个会话，也不得伪造发送成功。

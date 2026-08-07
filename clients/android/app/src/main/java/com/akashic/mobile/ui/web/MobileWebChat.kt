@@ -318,6 +318,9 @@ private data class MobileWebUiOwner(
 @Composable
 internal fun MobileWebChat(
     state: ConversationUiState,
+    themeId: String,
+    onThemeChange: (String) -> Unit,
+    onModelChange: (String, String) -> Unit,
     sharedTextDraft: MobileSharedTextDraft?,
     onCommitSharedText: (String, String, String, String?) -> Unit,
     onSharedTextRejected: (String, String) -> Unit,
@@ -386,6 +389,7 @@ internal fun MobileWebChat(
     modifier: Modifier = Modifier,
 ) {
     val latestState by rememberUpdatedState(state)
+    val latestThemeId by rememberUpdatedState(themeId)
     val latestSharedTextDraft by rememberUpdatedState(sharedTextDraft)
     val latestPluginUiCatalog by rememberUpdatedState(pluginUiCatalog)
     val mediaRegistry = remember { MobileMediaRegistry() }
@@ -485,6 +489,8 @@ internal fun MobileWebChat(
 
     val callbacks by rememberUpdatedState(
         MobileWebCallbacks(
+            onThemeChange = onThemeChange,
+            onModelChange = onModelChange,
             onCommitSharedText = onCommitSharedText,
             onSharedTextRejected = onSharedTextRejected,
             onSelectSession = onSelectSession,
@@ -970,6 +976,10 @@ internal fun MobileWebChat(
                                     webLoadError = null
                                     webReady = true
                                     healthGate.markHealthy()
+                                    currentWebView.postMobileMessage(
+                                        "mobile.theme",
+                                        JSONObject.quote(latestThemeId),
+                                    )
                                 }
                             }
                         },
@@ -1319,6 +1329,12 @@ internal fun MobileWebChat(
         val draft = latestSharedTextDraft
         if (webReady && current != null && draft != null) current.pushSharedTextDraft(draft)
     }
+    LaunchedEffect(themeId, webReady, webView) {
+        val current = webView
+        if (webReady && current != null) {
+            current.postMobileMessage("mobile.theme", JSONObject.quote(themeId))
+        }
+    }
     BackHandler(enabled = webHistoryActive) {
         val current = requireNotNull(webView) { "Web history owner is unavailable" }
         check(webViewOwners.currentView() === current) { "Web history owner was released" }
@@ -1335,6 +1351,8 @@ internal fun MobileWebChat(
 }
 
 private data class MobileWebCallbacks(
+    val onThemeChange: (String) -> Unit,
+    val onModelChange: (String, String) -> Unit,
     val onCommitSharedText: (String, String, String, String?) -> Unit,
     val onSharedTextRejected: (String, String) -> Unit,
     val onSelectSession: (String) -> Unit,
@@ -1409,6 +1427,12 @@ private class MobileWebBridge(
     fun requestSnapshot() = runIfLeaseCurrent(requestSnapshot)
 
     fun reportHealthy() = runIfLeaseCurrent(reportHealthy)
+
+    fun setTheme(themeId: String) = dispatch { it.onThemeChange(themeId) }
+
+    fun setModelSelection(runtimeId: String, reasoningEffort: String) = dispatch {
+        it.onModelChange(runtimeId, reasoningEffort)
+    }
 
     fun commitSharedText(
         draftId: String,
@@ -1647,6 +1671,11 @@ private enum class MobileWebTransportArgType {
 private val MOBILE_WEB_TRANSPORT_METHODS = mapOf(
     "requestSnapshot" to emptyList(),
     "reportHealthy" to emptyList(),
+    "setTheme" to listOf(MobileWebTransportArgType.STRING),
+    "setModelSelection" to listOf(
+        MobileWebTransportArgType.STRING,
+        MobileWebTransportArgType.STRING,
+    ),
     "commitSharedText" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
     "rejectSharedText" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
     "selectSession" to listOf(MobileWebTransportArgType.STRING),
@@ -1803,6 +1832,8 @@ private fun dispatchMobileWebTransport(
     when (envelope.method) {
         "requestSnapshot" -> bridge.requestSnapshot()
         "reportHealthy" -> bridge.reportHealthy()
+        "setTheme" -> bridge.setTheme(string(0))
+        "setModelSelection" -> bridge.setModelSelection(string(0), string(1))
         "commitSharedText" -> bridge.commitSharedText(string(0), string(1), string(2), string(3))
         "rejectSharedText" -> bridge.rejectSharedText(string(0), string(1))
         "selectSession" -> bridge.selectSession(string(0))

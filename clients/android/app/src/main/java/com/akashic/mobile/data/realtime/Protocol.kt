@@ -194,6 +194,33 @@ data class MessageSendPayload(
     val clientCreatedAt: String,
     @SerialName("reply_to")
     val replyTo: MessageReplyReference? = null,
+    @SerialName("model_runtime_id")
+    val modelRuntimeId: String? = null,
+    @SerialName("model_reasoning_effort")
+    val modelReasoningEffort: String? = null,
+)
+
+@Serializable
+data class ModelCatalogPayload(
+    @SerialName("generation_id") val generationId: Int,
+    @SerialName("default_runtime") val defaultRuntime: String,
+    @SerialName("selected_runtime_id") val selectedRuntimeId: String,
+    @SerialName("selected_reasoning_effort") val selectedReasoningEffort: String,
+    val runtimes: List<ModelRuntimeSummary>,
+)
+
+@Serializable
+data class ModelRuntimeSummary(
+    val id: String,
+    val provider: String,
+    val model: String,
+    @SerialName("sourceId") val sourceId: String,
+    @SerialName("sourceName") val sourceName: String,
+    @SerialName("reasoningEffort") val reasoningEffort: String,
+    @SerialName("supportedReasoningEfforts") val supportedReasoningEfforts: List<String>,
+    val roles: List<String>,
+    @SerialName("contextWindow") val contextWindow: Int,
+    @SerialName("inputModalities") val inputModalities: List<String>,
 )
 
 @Serializable

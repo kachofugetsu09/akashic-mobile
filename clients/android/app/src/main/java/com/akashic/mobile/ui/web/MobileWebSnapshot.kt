@@ -9,6 +9,8 @@ import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
 import com.akashic.mobile.ui.conversation.MessageUi
+import com.akashic.mobile.ui.conversation.ModelCatalogUi
+import com.akashic.mobile.ui.conversation.ModelRuntimeUi
 import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.ProcessBlockKind
@@ -35,6 +37,7 @@ data class MobileWebSnapshot(
     val projectionGeneration: Long,
     val messages: List<MobileWebMessage>,
     val composer: MobileWebComposer,
+    val modelCatalog: MobileWebModelCatalog,
     val runtimeInspection: MobileWebRuntimeInspection,
 )
 
@@ -70,7 +73,33 @@ data class MobileWebStatePatch(
     val navigationTarget: MobileWebNavigationTarget?,
     val projectionGeneration: Long,
     val composer: MobileWebComposer,
+    val modelCatalog: MobileWebModelCatalog,
     val runtimeInspection: MobileWebRuntimeInspection,
+)
+
+@Serializable
+data class MobileWebModelCatalog(
+    val generationId: Int?,
+    val defaultRuntime: String,
+    val selectedRuntimeId: String,
+    val selectedReasoningEffort: String,
+    val runtimes: List<MobileWebModelRuntime>,
+    val loading: Boolean,
+    val errorMessage: String?,
+)
+
+@Serializable
+data class MobileWebModelRuntime(
+    val id: String,
+    val provider: String,
+    val model: String,
+    val sourceId: String,
+    val sourceName: String,
+    val reasoningEffort: String,
+    val supportedReasoningEfforts: List<String>,
+    val roles: List<String>,
+    val contextWindow: Int,
+    val inputModalities: List<String>,
 )
 
 @Serializable
@@ -283,7 +312,7 @@ data class MobileWebTransferStatus(
 
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 7,
+    protocolVersion = 8,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -313,6 +342,7 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
         canStop = canStop,
         canSend = canSend,
     ),
+    modelCatalog = modelCatalog.toMobileWebModelCatalog(),
     runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
 )
 
@@ -355,9 +385,33 @@ fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): Mo
             canStop = canStop,
             canSend = canSend,
         ),
+        modelCatalog = modelCatalog.toMobileWebModelCatalog(),
         runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
     )
 }
+
+private fun ModelCatalogUi.toMobileWebModelCatalog() = MobileWebModelCatalog(
+    generationId = generationId,
+    defaultRuntime = defaultRuntime,
+    selectedRuntimeId = selectedRuntimeId,
+    selectedReasoningEffort = selectedReasoningEffort,
+    runtimes = runtimes.map(ModelRuntimeUi::toMobileWebModelRuntime),
+    loading = loading,
+    errorMessage = errorMessage,
+)
+
+private fun ModelRuntimeUi.toMobileWebModelRuntime() = MobileWebModelRuntime(
+    id = id,
+    provider = provider,
+    model = model,
+    sourceId = sourceId,
+    sourceName = sourceName,
+    reasoningEffort = reasoningEffort,
+    supportedReasoningEfforts = supportedReasoningEfforts,
+    roles = roles,
+    contextWindow = contextWindow,
+    inputModalities = inputModalities,
+)
 
 private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
     MobileWebRuntimeInspection(

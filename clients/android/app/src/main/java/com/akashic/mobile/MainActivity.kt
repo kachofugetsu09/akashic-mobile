@@ -87,7 +87,8 @@ class MainActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT),
         )
         setContent {
-            AkashicTheme {
+            val appSettings by viewModel.appSettings.collectAsStateWithLifecycle()
+            AkashicTheme(themeId = appSettings.theme) {
                 val notificationPermission = rememberLauncherForActivityResult(
                     ActivityResultContracts.RequestPermission(),
                 ) { granted ->
@@ -237,6 +238,9 @@ class MainActivity : ComponentActivity() {
                     } else if (session.hasProfile) {
                         MobileWebChat(
                             state = conversation,
+                            themeId = appSettings.theme,
+                            onThemeChange = viewModel::setTheme,
+                            onModelChange = viewModel::selectModel,
                             sharedTextDraft = incomingShare?.text?.let { text ->
                                 val share = requireNotNull(incomingShare)
                                 share.targetSessionId?.let { sessionId ->

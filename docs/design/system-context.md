@@ -57,7 +57,11 @@
 
 ## 服务端 WebUI 发布
 
-Core 显式提交 Stable/Preview 后，Android 用当前已认证连接执行 `Resolve`，需要时用同 endpoint 的短期 ticket 执行 `Ensure`，并只在新的 UI session 或用户明确立即应用时执行 `Present`。保存源码、构建成功、watcher 和服务重启都不改变 `ReleaseView`。
+Core 显式提交 Stable/Preview 后，Android 用当前已认证连接执行 `Resolve`，需要时用同 endpoint 的短期 ticket 执行 `Ensure`，并只在新的 UI session 或用户明确立即应用时执行 `Present`。Core 从与 `origin/main` 一致的新 `main` 启动时还会把从未成功发布过的该 commit 对账为 Stable；同 commit 重启 no-op，失败阻止 Gateway ready，Preview 保持原值。保存源码、普通构建、watcher、feature 和 detached 启动不改变 `ReleaseView`。
+
+## 会话模型目录与选择
+
+`RealtimeSession` 在连接 ready 和会话切换时通过 `model.catalog.get` 读取 Core 当前模型 generation 与该会话选择。`ModelCatalogCoordinator` 拒绝目录外 runtime/思考强度，并用目标 session 丢弃迟到 reply；WebUI snapshot 只投影这份目录。用户选择随下一条 `message.send` 进入既有 outbox，空 runtime 明确恢复默认，旧客户端缺少字段时 Core 保留原选择。
 
 ```text
 ┌──────────────┐  WSS ReleaseView  ┌─────────┐
