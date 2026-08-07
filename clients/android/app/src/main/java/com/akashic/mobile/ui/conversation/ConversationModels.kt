@@ -24,7 +24,31 @@ data class ConversationUiState(
     val isStopping: Boolean,
     val canStop: Boolean,
     val canSend: Boolean,
+    val modelCatalog: ModelCatalogUi = ModelCatalogUi(),
     val runtimeInspection: RuntimeInspectionUi = RuntimeInspectionUi(),
+)
+
+data class ModelCatalogUi(
+    val generationId: Int? = null,
+    val defaultRuntime: String = "",
+    val selectedRuntimeId: String = "",
+    val selectedReasoningEffort: String = "",
+    val runtimes: List<ModelRuntimeUi> = emptyList(),
+    val loading: Boolean = false,
+    val errorMessage: String? = null,
+)
+
+data class ModelRuntimeUi(
+    val id: String,
+    val provider: String,
+    val model: String,
+    val sourceId: String,
+    val sourceName: String,
+    val reasoningEffort: String,
+    val supportedReasoningEfforts: List<String>,
+    val roles: List<String>,
+    val contextWindow: Int,
+    val inputModalities: List<String>,
 )
 
 data class RuntimeInspectionUi(

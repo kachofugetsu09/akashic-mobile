@@ -22,7 +22,7 @@ class AppPreferences(private val context: Context) {
         AppSettings(
             currentServerId = values[CURRENT_SERVER_ID],
             currentSessionId = values[CURRENT_SESSION_ID],
-            theme = values[THEME] ?: "system",
+            theme = decodeTheme(values[THEME]),
             keepRealtimeInBackground = values[KEEP_REALTIME_IN_BACKGROUND] ?: false,
         )
     }
@@ -40,7 +40,7 @@ class AppPreferences(private val context: Context) {
     }
 
     suspend fun setTheme(theme: String) {
-        require(theme in setOf("system", "light", "dark")) { "Unsupported theme: $theme" }
+        require(theme in SUPPORTED_THEME_IDS) { "Unsupported theme: $theme" }
         context.settingsDataStore.edit { values -> values[THEME] = theme }
     }
 
@@ -49,9 +49,16 @@ class AppPreferences(private val context: Context) {
     }
 
     private companion object {
+        val SUPPORTED_THEME_IDS = setOf("light", "dark", "warm-paper")
         val CURRENT_SERVER_ID = stringPreferencesKey("current_server_id")
         val CURRENT_SESSION_ID = stringPreferencesKey("current_session_id")
         val THEME = stringPreferencesKey("theme")
         val KEEP_REALTIME_IN_BACKGROUND = booleanPreferencesKey("keep_realtime_in_background")
+
+        fun decodeTheme(value: String?): String {
+            if (value == null || value == "system") return "light"
+            require(value in SUPPORTED_THEME_IDS) { "Unsupported persisted theme: $value" }
+            return value
+        }
     }
 }

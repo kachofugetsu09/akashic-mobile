@@ -152,6 +152,34 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `round trips explicit model selection while old payload omits it`() {
+        val selected = MessageSendPayload(
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            sessionId = "mobile:one",
+            text = "继续",
+            mediaRefs = emptyList(),
+            clientCreatedAt = "2026-08-08T00:00:00Z",
+            modelRuntimeId = "model-a",
+            modelReasoningEffort = "high",
+        )
+
+        val encoded = ProtocolCodec.json().encodeToJsonElement(
+            MessageSendPayload.serializer(),
+            selected,
+        ).jsonObject
+        val decoded = ProtocolCodec.decodePayload<MessageSendPayload>(encoded)
+        val legacy = ProtocolCodec.json().encodeToJsonElement(
+            MessageSendPayload.serializer(),
+            selected.copy(modelRuntimeId = null, modelReasoningEffort = null),
+        ).jsonObject
+
+        assertEquals("model-a", decoded.modelRuntimeId)
+        assertEquals("high", decoded.modelReasoningEffort)
+        assertEquals(false, legacy.containsKey("model_runtime_id"))
+        assertEquals(false, legacy.containsKey("model_reasoning_effort"))
+    }
+
+    @Test
     fun `round trips proactive delivery reply identity`() {
         val payload = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",

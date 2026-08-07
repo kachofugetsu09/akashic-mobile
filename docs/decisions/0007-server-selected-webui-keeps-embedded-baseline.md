@@ -4,6 +4,7 @@
 - 日期：2026-08-03
 - 关联：`MOB-OWN-002`、`MOB-DATA-005`、`MOB-PAIR-003`、`MOB-PLUGIN-004`、`MOB-XREPO-004`、`MOB-REPO-001`、`MOB-UI-002`～`MOB-UI-004`
 - amends：[0005](0005-shared-webui-source-lives-in-core-repository.md)
+- amended by：[0008](0008-core-main-reconciles-webui-stable.md)
 - Core 决策：`akasic-agent/docs/decisions/0022-mobile-webui-uses-server-selected-generations.md`
 
 ## 问题

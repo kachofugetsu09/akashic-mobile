@@ -16,7 +16,7 @@
 | 任何产品行为或数据语义变更 | `projectneed.md`、相关 `decisions/` |
 | 接手未完成工作 | `NOW.md` |
 | Room、文件、密钥、缓存或删除逻辑 | `design/persistence-state-map.md` |
-| 配对、Gateway、插件 UI、共享 WebUI 或跨仓库协议 | `design/system-context.md`、`decisions/0002-*`、`decisions/0003-*`、`decisions/0004-*`、`decisions/0005-*`、`decisions/0006-*`、`decisions/0007-*` |
+| 配对、Gateway、插件 UI、共享 WebUI 或跨仓库协议 | `design/system-context.md`、`decisions/0002-*`、`decisions/0003-*`、`decisions/0004-*`、`decisions/0005-*`、`decisions/0006-*`、`decisions/0007-*`、`decisions/0008-*` |
 | 记忆文档、MCP、插件、技能或定时任务查看入口 | `design/runtime-inspection.md`、`design/system-context.md` |
 | PR Review | `templates/review-contract.md`、目标 PR 的相邻 base/head 和累计 head |
 | 实现任务 | `templates/agent-task-contract.md` 与改动路径的真实代码、schema、测试 |

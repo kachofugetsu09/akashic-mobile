@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
+import com.akashic.mobile.data.local.AppSettings
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.data.local.PreparedComposerDraftResult
 import com.akashic.mobile.data.local.PersistedIncomingShare
@@ -16,6 +17,7 @@ import com.akashic.mobile.data.local.MessageAttachmentWithMedia
 import com.akashic.mobile.data.local.decodeStoredToolBlock
 import com.akashic.mobile.data.realtime.TransferNetworkKind
 import com.akashic.mobile.data.realtime.MobileSessionState
+import com.akashic.mobile.data.realtime.ModelCatalogState
 import com.akashic.mobile.data.realtime.NotificationTargetOpenResult
 import com.akashic.mobile.data.realtime.RuntimeInspectionDetailKind
 import com.akashic.mobile.data.realtime.RuntimeInspectionState
@@ -29,6 +31,8 @@ import com.akashic.mobile.ui.conversation.ComposerDraftUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.MessageUi
+import com.akashic.mobile.ui.conversation.ModelCatalogUi
+import com.akashic.mobile.ui.conversation.ModelRuntimeUi
 import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
@@ -113,6 +117,29 @@ private fun RuntimeInspectionState.toUi() = RuntimeInspectionUi(
     errorMessage = errorMessage,
 )
 
+private fun ModelCatalogState.toUi() = ModelCatalogUi(
+    generationId = generationId,
+    defaultRuntime = defaultRuntime,
+    selectedRuntimeId = selectedRuntimeId,
+    selectedReasoningEffort = selectedReasoningEffort,
+    runtimes = runtimes.map {
+        ModelRuntimeUi(
+            id = it.id,
+            provider = it.provider,
+            model = it.model,
+            sourceId = it.sourceId,
+            sourceName = it.sourceName,
+            reasoningEffort = it.reasoningEffort,
+            supportedReasoningEfforts = it.supportedReasoningEfforts,
+            roles = it.roles,
+            contextWindow = it.contextWindow,
+            inputModalities = it.inputModalities,
+        )
+    },
+    loading = loading,
+    errorMessage = errorMessage,
+)
+
 data class IncomingShareUi(
     val id: String,
     val text: String?,
@@ -174,9 +201,15 @@ class MainViewModel(
 ) : AndroidViewModel(application) {
     private val container = (application as App).container
     val sessionState = container.realtimeSession.state
+    val appSettings = container.preferences.settings.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        AppSettings(null, null, "light", false),
+    )
     val pluginUiCatalog = container.realtimeSession.pluginUi.catalog
     val pluginUiResults = container.realtimeSession.pluginUi.results
     val runtimeInspection = container.realtimeSession.runtimeInspection.state
+    val modelCatalog = container.realtimeSession.modelCatalog.state
     val pluginUiAssetStore = container.pluginUiAssetStore
     val mobileWebUiStore = container.mobileWebUiStore
     val mobileWebUiServing = container.mobileWebUiStore.serving
@@ -259,6 +292,10 @@ class MainViewModel(
         }
     }
 
+    fun setTheme(themeId: String) {
+        viewModelScope.launch { container.preferences.setTheme(themeId) }
+    }
+
     private val conversationProjection = sessionState.flatMapLatest { state ->
         val serverId = state.serverId
         val sessionId = state.currentSessionId
@@ -286,7 +323,8 @@ class MainViewModel(
         conversationProjection,
         navigationTarget,
         runtimeInspection,
-    ) { projection, target, runtime ->
+        modelCatalog,
+    ) { projection, target, runtime, models ->
         val session = projection.session
         val graph = projection.graph
         val conversations = projection.conversations
@@ -400,6 +438,7 @@ class MainViewModel(
                 session.currentSessionId != null &&
                 !selectedRemoteMissing &&
                 composerAttachments.all { it.state == ComposerAttachmentState.READY },
+            modelCatalog = models.toUi(),
             runtimeInspection = runtime.toUi(),
         )
     }.stateIn(
@@ -448,6 +487,9 @@ class MainViewModel(
     )
 
     fun sendCommand(value: String) = container.realtimeSession.sendCommand(value)
+
+    fun selectModel(runtimeId: String, reasoningEffort: String) =
+        container.realtimeSession.selectModel(runtimeId, reasoningEffort)
 
     fun refreshRuntimeInspection() = container.realtimeSession.refreshRuntimeInspection()
 

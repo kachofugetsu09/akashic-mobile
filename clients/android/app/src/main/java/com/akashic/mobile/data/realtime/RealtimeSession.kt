@@ -382,6 +382,7 @@ class RealtimeSession(
     val runtimeInspection = RuntimeInspectionCoordinator(
         ::sendRuntimeInspectionCommand,
     )
+    val modelCatalog = ModelCatalogCoordinator(::sendModelCatalogCommand)
     private val started = AtomicBoolean(false)
     private var meteredLargeTransferApproved = false
     private var profile: ServerProfileEntity? = null
@@ -843,6 +844,7 @@ class RealtimeSession(
         enqueueMessage(
             text,
             includeDraftAttachments = true,
+            includeModelSelection = true,
             replyToMessageId = replyToMessageId,
             targetSessionId = targetSessionId,
             expectedAttachmentIds = expectedAttachmentIds,
@@ -856,6 +858,7 @@ class RealtimeSession(
         enqueueMessage(
             text,
             includeDraftAttachments = false,
+            includeModelSelection = false,
             replyToMessageId = null,
             targetSessionId = sessionId,
         )
@@ -866,6 +869,7 @@ class RealtimeSession(
         enqueueMessage(
             command,
             includeDraftAttachments = false,
+            includeModelSelection = true,
             replyToMessageId = null,
             targetSessionId = null,
         )
@@ -877,6 +881,10 @@ class RealtimeSession(
                 runtimeInspection.refresh()
             }
         }
+    }
+
+    fun selectModel(runtimeId: String, reasoningEffort: String) {
+        modelCatalog.select(runtimeId, reasoningEffort)
     }
 
     fun openRuntimeDocument(documentId: String) {
@@ -1094,6 +1102,7 @@ class RealtimeSession(
     private fun enqueueMessage(
         text: String,
         includeDraftAttachments: Boolean,
+        includeModelSelection: Boolean,
         replyToMessageId: String?,
         targetSessionId: String?,
         expectedAttachmentIds: List<String> = emptyList(),
@@ -1174,6 +1183,11 @@ class RealtimeSession(
                 val now = System.currentTimeMillis()
                 val commandId = Ulid.next(now)
                 val clientMessageId = commandId
+                val modelSelection = if (includeModelSelection) {
+                    modelCatalog.selectionFor(sessionId)
+                } else {
+                    null
+                }
                 val payload = MessageSendPayload(
                     clientMessageId = clientMessageId,
                     sessionId = sessionId,
@@ -1183,6 +1197,8 @@ class RealtimeSession(
                     replyTo = replyTarget?.let { target ->
                         messageReplyReference(target.messageId, target.clientMessageId)
                     },
+                    modelRuntimeId = modelSelection?.runtimeId,
+                    modelReasoningEffort = modelSelection?.reasoningEffort,
                 )
                 val cachedAttachments = try {
                     attachments.map { transfer ->
@@ -1430,6 +1446,9 @@ class RealtimeSession(
         // 2. 同步持久选择与进程内投影
         preferences.selectSession(sessionId)
         mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+        if (mutableState.value.connection.phase == ConnectionPhase.READY) {
+            modelCatalog.onSessionSelected(sessionId)
+        }
         publishTurnState()
     }
 
@@ -1860,6 +1879,7 @@ class RealtimeSession(
                 if (messageDownloads.onReply(envelope)) return
                 if (pluginUi.onReply(envelope)) return
                 if (mobileWebUi.onReply(envelope)) return
+                if (modelCatalog.onReply(envelope)) return
                 if (runtimeInspection.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
                 if (envelope.type == "command.list.ok") {
@@ -2068,6 +2088,29 @@ class RealtimeSession(
         return commandId
     }
 
+    private fun sendModelCatalogCommand(type: String, sessionId: String): String? {
+        val epoch = activeEpoch ?: return null
+        val candidate = activeCandidate ?: return null
+        val commandId = Ulid.next()
+        val sent = socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = type,
+                id = commandId,
+                connectionEpoch = epoch,
+                sessionId = sessionId,
+                payload = buildJsonObject {},
+            ),
+        )
+        if (!sent) {
+            scheduleReconnect("模型目录命令未进入 WebSocket 队列: $type")
+            return null
+        }
+        return commandId
+    }
+
     private fun hasPendingSyncCommand(type: String): Boolean =
         pendingSyncCommands.values.any { it.generation == syncGeneration && it.type == type }
 
@@ -2245,6 +2288,7 @@ class RealtimeSession(
         pendingCommandListId = null
         pluginUi.onDisconnected("服务端要求重新同步")
         runtimeInspection.onDisconnected()
+        modelCatalog.onDisconnected()
         requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         mutableState.value = mutableState.value.copy(
@@ -2272,6 +2316,10 @@ class RealtimeSession(
         requestCommandList()
         pluginUi.onConnectionReady(currentProfile.serverId)
         runtimeInspection.onConnectionReady(currentProfile.serverId)
+        modelCatalog.onConnectionReady(
+            currentProfile.serverId,
+            requireNotNull(mutableState.value.currentSessionId),
+        )
         uploads.onConnectionReady(currentProfile.serverId)
         downloads.onConnectionReady(currentProfile.serverId)
         messageDownloads.onConnectionReady(currentProfile.serverId)
@@ -2583,6 +2631,7 @@ class RealtimeSession(
         pendingCommandListId = null
         pluginUi.onDisconnected("连接已中断")
         runtimeInspection.onDisconnected()
+        modelCatalog.onDisconnected()
         requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         resetRebuildGeneration = null
@@ -2645,6 +2694,7 @@ class RealtimeSession(
         pendingCommandListId = null
         pluginUi.onDisconnected("设备配对已撤销")
         runtimeInspection.onDisconnected()
+        modelCatalog.onDisconnected()
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(
                 phase = ConnectionPhase.FAILED,
@@ -2705,6 +2755,7 @@ class RealtimeSession(
         pendingCommandListId = null
         pluginUi.onDisconnected("协议不兼容")
         runtimeInspection.onDisconnected()
+        modelCatalog.onDisconnected()
         requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         resetRebuildGeneration = null
@@ -2783,6 +2834,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pluginUi.onDisconnected("连接已重置")
         runtimeInspection.onDisconnected()
+        modelCatalog.onDisconnected()
         mobileWebUi.onDisconnected()
     }
 
