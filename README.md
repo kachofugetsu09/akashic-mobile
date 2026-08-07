@@ -35,7 +35,7 @@ cd clients/android
                       └─ 未就绪不替换；APK baseline 永久可用
 ```
 
-颜色、排版、抽屉、island、组件组合和只调用既有 bridge capability 的交互，由 Core 显式发布 Stable/Preview generation，手机按内容摘要增量补齐，不需要重新发 APK。保存源码、构建成功、文件 watcher 或重启 Core 都不会自动发布；这条显式提交边界让 Preview、提升和回滚可审计。新增原生能力、改变 bridge/snapshot 兼容范围、Room、WebView 生命周期、网络或安全逻辑时，仍必须发布 Android binary。Preview 不理想时由 Core 清除 Preview 或回滚指针；客户端下一次成功 Resolve 收敛，不维护任意本地版本选择器。
+颜色、排版、抽屉、island、组件组合和只调用既有 bridge capability 的交互，由 Core 发布 Stable/Preview generation，手机按内容摘要增量补齐，不需要重新发 APK。保存源码、构建成功、文件 watcher、feature 分支或未同步的 main 都不会自动发布；只有 Gateway 从与 `origin/main` 完全一致的新 main commit 首次启动时，Core 才复用同一个可审计发布者自动对账 Stable，失败会阻止 ready，且不会改变 Preview。新增原生能力、改变 bridge/snapshot 兼容范围、Room、WebView 生命周期、网络或安全逻辑时，仍必须发布 Android binary。Preview 不理想时由 Core 清除 Preview 或回滚指针；客户端下一次成功 Resolve 收敛，不维护任意本地版本选择器。
 
 | 变化 | 唯一 owner | 是否发布 APK |
 |---|---|---|
