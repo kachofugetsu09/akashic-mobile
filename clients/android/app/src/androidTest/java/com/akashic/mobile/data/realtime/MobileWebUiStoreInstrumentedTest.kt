@@ -83,6 +83,37 @@ class MobileWebUiStoreInstrumentedTest {
     }
 
     @Test
+    fun nativeUpgradeRejectsIncompatibleCommittedServingBeforeWebViewRestore() = runBlocking {
+        val previousManifest = validManifest().copy(
+            bridgeProtocolMin = 1,
+            bridgeProtocolMax = 1,
+            snapshotProtocolMin = 7,
+            snapshotProtocolMax = 7,
+            minimumNativeBuild = MOBILE_WEB_UI_NATIVE_BUILD - 1,
+            generationId = "0".repeat(64),
+        ).let { it.copy(generationId = mobileWebUiGenerationIdentityDigest(it)) }
+        val previousTarget = targetFor(previousManifest)
+        store.commitManifest(SERVER_ID, previousTarget, mobileWebUiManifestBytes(previousManifest))
+        store.ensureEmptyBlob(SERVER_ID, emptyDigest())
+        store.setDesired(SERVER_ID, releaseView(previousTarget), previousTarget)
+        assertTrue(store.openAttempt(SERVER_ID, previousTarget.generationId, NONCE, "android-47-1-7"))
+        store.commitHealthy(SERVER_ID, previousTarget.generationId, NONCE)
+
+        val upgraded = MobileWebUiStore(root, database.mobileWebUi(), nativeBuild = MOBILE_WEB_UI_NATIVE_BUILD)
+        assertFalse(upgraded.restoreCommittedServing(SERVER_ID))
+        assertNull(upgraded.serving.value)
+        assertNull(database.mobileWebUi().getState(SERVER_ID)?.servingGenerationId)
+        assertEquals(
+            "native_compatibility",
+            database.mobileWebUi().getReject(
+                SERVER_ID,
+                previousTarget.targetKey,
+                "android-$MOBILE_WEB_UI_NATIVE_BUILD-$MOBILE_WEB_UI_BRIDGE_PROTOCOL-$MOBILE_WEB_UI_SNAPSHOT_PROTOCOL",
+            )?.reason,
+        )
+    }
+
+    @Test
     fun pinnedCorruptManifestPreventsLocalAndGlobalBlobDeletion() = runBlocking {
         val target = prepareHealthyGeneration(store)
         val generation = requireNotNull(database.mobileWebUi().getGeneration(SERVER_ID, target.generationId))

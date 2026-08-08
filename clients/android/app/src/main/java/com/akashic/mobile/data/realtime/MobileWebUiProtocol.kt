@@ -177,7 +177,7 @@ internal const val MOBILE_WEB_UI_BLOB_PATH = "/mobile/webui/v1/blob"
 internal const val MOBILE_WEB_UI_MANIFEST_SCHEMA = 2
 internal const val MOBILE_WEB_UI_BRIDGE_PROTOCOL = 2
 internal const val MOBILE_WEB_UI_SNAPSHOT_PROTOCOL = 8
-internal const val MOBILE_WEB_UI_NATIVE_BUILD = 47
+internal const val MOBILE_WEB_UI_NATIVE_BUILD = 48
 internal const val MOBILE_WEB_UI_MAX_MANIFEST_BYTES = 1L * 1024 * 1024
 internal const val MOBILE_WEB_UI_MAX_FILES = 2_048
 internal const val MOBILE_WEB_UI_MAX_FILE_BYTES = 8L * 1024 * 1024
@@ -421,6 +421,16 @@ internal fun validateMobileWebUiManifest(manifest: MobileWebUiManifest, target: 
     }
     require(manifest.platforms == target.platforms) { "WebUI platforms 与 descriptor 不匹配" }
 }
+
+/** 判断已验证 manifest 能否由当前原生 WebView 容器安全运行。 */
+internal fun mobileWebUiManifestSupportsNative(
+    manifest: MobileWebUiManifest,
+    nativeBuild: Int,
+): Boolean =
+    nativeBuild >= manifest.minimumNativeBuild &&
+        MOBILE_WEB_UI_BRIDGE_PROTOCOL in manifest.bridgeProtocolMin..manifest.bridgeProtocolMax &&
+        MOBILE_WEB_UI_SNAPSHOT_PROTOCOL in manifest.snapshotProtocolMin..manifest.snapshotProtocolMax &&
+        "android" in manifest.platforms
 
 internal fun validateMobileWebUiFile(file: MobileWebUiManifestFile) {
     require(normalizeMobileWebUiPath(file.path) == file.path) { "WebUI 文件路径必须是 NFC 规范化路径" }

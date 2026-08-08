@@ -158,7 +158,7 @@ APK embedded baseline 只能打包由干净 `akashic-agent` commit 构建的共�
 
 已配对客户端只从当前服务端身份读取已认证 `ReleaseView`，在同一认证边界下载 manifest 和按文件摘要寻址的资源，再从本地可信 origin 创建 WebView。客户端只维护 `desired`、`ready(desired)`、`serving` 和 `fallback` 四个事实，并以 `Resolve`、`Ensure`、`Present` 三个幂等动作协调；不得建立把检查、下载、等待页面状态和激活串成一条全局状态机。
 
-Preview 优先于 Stable；一次成功 Resolve 中两者不兼容或不存在时，desired 明确为 embedded baseline。旧 serving 只可维持尚未结束的 UI session，或在 Resolve 因临时网络/认证失败时继续显示，不能反向成为成功 Resolve 的 desired。新 target 取代旧 Ensure，迟到结果用本地 owner token 丢弃；`Present` 不等待网络，只在新 UI session 或用户明确立即应用且原生 `canReplaceUi` 成立时切换。candidate 完成 exact-origin/nonce/generation/协议握手、完整 snapshot、root render 和 visual acknowledgment 前不得取得发送、文件、系统或插件副作用能力。
+Preview 优先于 Stable；一次成功 Resolve 中两者不兼容或不存在时，desired 明确为 embedded baseline。旧 serving 只可维持尚未结束的 UI session，或在 Resolve 因临时网络/认证失败时继续显示，不能反向成为成功 Resolve 的 desired。进程冷启动恢复 serving/fallback 时必须重新按当前 native build、bridge、snapshot 与 platform 指纹核对本地已验证 manifest；不兼容 generation 在创建 WebView 前拒绝并回到兼容 fallback 或 embedded baseline，不能因它曾健康提交就跨原生协议升级继续展示。新 target 取代旧 Ensure，迟到结果用本地 owner token 丢弃；`Present` 不等待网络，只在新 UI session 或用户明确立即应用且原生 `canReplaceUi` 成立时切换。candidate 完成 exact-origin/nonce/generation/协议握手、完整 snapshot、root render 和 visual acknowledgment 前不得取得发送、文件、系统或插件副作用能力。
 
 `Resolve/Ensure` 只能产生 `Ready`、`RetryAfter`、`WaitFor(trigger)` 或 `RejectTarget`。同 Target 进入 `WaitFor(space)` 后，前台、重连和普通 hint 可重新 Resolve 当前选择，但不得重复 prepare/manifest/blob；只有 Target 变化、显式清理、用户明确重试、reset 或 revoke 才解除等待。同 Target 的永久 reject 只能由 Target/兼容指纹变化，或用户对当前 `ReleaseView` 按 Preview→Stable 选出的确切 rejected Target 显式重试解除，不轮询。旧 ReleaseView 遗留的 reject 不得让设置页显示幽灵重试入口，也不得因用户重试新 Target 而被顺带清除。
 

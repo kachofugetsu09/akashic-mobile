@@ -2,8 +2,10 @@ package com.akashic.mobile.data.realtime
 
 import java.security.MessageDigest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -301,6 +303,21 @@ class MobileWebUiProtocolTest {
             ),
             target,
         )
+    }
+
+    @Test
+    fun `native compatibility rejects a verified manifest from the previous protocol generation`() {
+        val current = validManifest()
+        val previous = current.copy(
+            bridgeProtocolMin = 1,
+            bridgeProtocolMax = 1,
+            snapshotProtocolMin = 7,
+            snapshotProtocolMax = 7,
+            minimumNativeBuild = MOBILE_WEB_UI_NATIVE_BUILD - 1,
+        )
+
+        assertTrue(mobileWebUiManifestSupportsNative(current, MOBILE_WEB_UI_NATIVE_BUILD))
+        assertFalse(mobileWebUiManifestSupportsNative(previous, MOBILE_WEB_UI_NATIVE_BUILD))
     }
 
     private fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")
