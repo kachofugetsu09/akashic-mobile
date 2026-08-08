@@ -582,6 +582,7 @@ object ProtocolCodec {
             "attachment.finish",
             "attachment.download",
             "command.list",
+            "model.catalog.get",
             "runtime.document.list",
             "runtime.document.get",
             "runtime.capability.list",
