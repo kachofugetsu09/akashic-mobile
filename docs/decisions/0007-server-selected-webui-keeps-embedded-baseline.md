@@ -20,7 +20,7 @@
 5. candidate bridge 在 exact-origin、main-frame、nonce、generation、snapshot 和首帧健康提交前只允许只读握手。旧 WebView callback、iframe、错误 origin、外部 navigation 和 renderer 重复退出不得提交 serving 或执行副作用。
 6. 清理未使用 UI 资源与重置单个服务端 UI 缓存是两个名称明确的动作。它们只减少派生 WebUI 文件和 metadata；embedded baseline、其他服务端和业务状态不在删除范围。
 7. 纯 UI 与既有 capability 变化走 WebUI 发布；新增原生 capability 或不兼容协议仍走 APK。GitHub APK updater、安装确认和权限保持原状。
-8. 一次成功 Resolve 只按 compatible Preview、compatible Stable、embedded baseline 选择 desired；两根指针均空或均不兼容时 desired=baseline。旧 serving 只维持当前 UI session 或临时解析失败期间的可用性，不反向成为服务端选择。
+8. 一次成功 Resolve 只按 compatible Preview、compatible Stable、embedded baseline 选择 desired；两根指针均空或均不兼容时 desired=baseline。旧 serving 只维持当前 UI session 或临时解析失败期间的可用性，不反向成为服务端选择。进程冷启动恢复 serving/fallback 时重新核对当前 native build、bridge、snapshot 与 platform 指纹；不兼容 generation 在创建 WebView 前拒绝并回到兼容 fallback 或 embedded baseline。
 9. 首个 OTA APK 保留既有 schema 1 ZIP 作为 baseline，远端只接受 Core schema 2 manifest；baseline 不导入 OTA cache。保留数据强制降级旧 APK 不属于支持恢复路径，Room 不得 destructive migrate。
 10. `Resolve/Ensure` 只有 `Ready`、`RetryAfter`、`WaitFor(trigger)` 和 `RejectTarget` 四种结果。同 Target 的空间等待和永久 reject 不因前台、重连或重复 hint 自动下载；必须等 Target/兼容指纹变化或名称明确的用户动作。手动重试只清除当前 `ReleaseView` 按 Preview→Stable 选出的确切 rejected Target，不匹配旧发布遗留 reject。重置记录该 Target 的 `manual_reset`，立即回到 baseline，不自动重下同一 Target。
 11. candidate 由 application/process-scope attempt lease 持有，与已提交 serving 和 asset handler 当前 presentation 分权。Activity 重建不能提升 candidate；server switch 必须同步建立新 UI session；candidate 健康前 bridge 副作用和系统外链均关闭。健康窗口中 desired Target 变化时立即废止旧 attempt 并恢复已提交 serving/baseline。

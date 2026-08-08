@@ -995,7 +995,7 @@ class MobileWebUiStore(
                 null
             }
         }
-        if (manifest != null) {
+        if (manifest != null && mobileWebUiManifestSupportsNative(manifest, nativeBuild)) {
             attemptState.value = null
             setCommittedServing(Serving(serverId, generationId), manifest)
             dao.touchGeneration(serverId, generationId, System.currentTimeMillis())
@@ -1009,13 +1009,26 @@ class MobileWebUiStore(
             } catch (_: IllegalArgumentException) {
                 null
             }
+        }?.takeIf { mobileWebUiManifestSupportsNative(it, nativeBuild) }
+        val rejection = if (manifest != null) {
+            MobileWebUiRejectEntity(
+                serverId = serverId,
+                targetKey = requireNotNull(generation).targetKey,
+                compatibilityFingerprint = compatibilityFingerprint(),
+                reason = "native_compatibility",
+                firstRejectedAt = System.currentTimeMillis(),
+                retryAfter = null,
+            )
+        } else {
+            null
         }
-        dao.upsertState(
+        dao.rollbackAndRejectDurableState(
             state.copy(
                 servingGenerationId = fallbackManifest?.let { fallbackId },
                 fallbackGenerationId = fallbackManifest?.let { fallbackId },
                 updatedAt = System.currentTimeMillis(),
             ),
+            rejection,
         )
         attemptState.value = null
         setCommittedServing(fallbackManifest?.let { Serving(serverId, requireNotNull(fallback).generationId) }, fallbackManifest)
