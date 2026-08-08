@@ -83,6 +83,21 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `round trips model catalog command`() {
+        val envelope = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "model.catalog.get",
+            id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            connectionEpoch = 7,
+            sessionId = "mobile:one",
+            payload = buildJsonObject { put("session_id", "mobile:one") },
+        )
+
+        assertEquals(envelope, ProtocolCodec.decode(ProtocolCodec.encode(envelope)))
+    }
+
+    @Test
     fun `decodes command catalog reply`() {
         val frame = """
             {
