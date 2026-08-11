@@ -40,4 +40,4 @@ python3 runtime-gate/run_core_contract.py \
 
 历史层 `mobile-pr5-v1` 完整继承 PR4 的会话与附件场景，只追加持久被动消息队列、不可投递通知保留、跨进程停止和恢复中的 turn identity。会话目录缺失仍使用 PR2 确立的中立投影清理语义，不在客户端新增远端删除 tombstone。
 
-当前层 profile 为 `mobile-runtime-inspection-v1`；`runtime-gate/scenarios.json` 当前登记 38 条 provider/consumer 语义场景，场景目录摘要由 `runtime-contract.lock.json.scenario_catalog_sha256` 固定。当前层的能力、provider runtime、协议快照和场景证据以这两份锁定文件为准。
+当前层 profile 为 `mobile-runtime-inspection-v1`；`runtime-gate/scenarios.json` 当前登记 44 条 provider/consumer 语义场景，场景目录摘要由 `runtime-contract.lock.json.scenario_catalog_sha256` 固定。当前层的能力、provider runtime、协议快照和场景证据以这两份锁定文件为准。

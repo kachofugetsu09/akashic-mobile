@@ -13,6 +13,7 @@ internal class TurnStopCoordinator(
     private val send: (TurnStopRequest) -> Boolean,
     private val onPersist: suspend (TurnStopRequest) -> Unit,
     private val onRemovePersisted: suspend (String) -> Unit,
+    private val onAuthoritativeTerminal: suspend (TurnStopRequest) -> Unit,
     private val onTransportUnavailable: (String) -> Unit,
     private val onError: (String) -> Unit,
     private val onStateChanged: () -> Unit,
@@ -85,6 +86,14 @@ internal class TurnStopCoordinator(
         }
         val pending = pendingStops.values.firstOrNull { it.request.commandId == commandId } ?: return false
         validateReply(envelope, pending.request)
+        if (isNonCompletedTerminalReply(envelope)) {
+            onAuthoritativeTerminal(pending.request)
+            removePersisted(pending)
+            pendingStops.remove(pending.request.sessionId)
+            activeTurns.remove(pending.request.sessionId)
+            onStateChanged()
+            return true
+        }
         removePersisted(pending)
         if (envelope.type == "turn.stop.error") {
             pendingStops.remove(pending.request.sessionId)
@@ -145,6 +154,12 @@ internal class TurnStopCoordinator(
 
     private fun replyMessage(payload: JsonObject): String =
         payload["message"]?.jsonPrimitive?.content ?: "停止生成失败"
+
+    private fun isNonCompletedTerminalReply(envelope: WireEnvelope): Boolean =
+        envelope.type == "turn.stop.ok" &&
+            envelope.payload["status"]?.jsonPrimitive?.content == "already_terminal" &&
+            envelope.payload["terminal_status"]?.jsonPrimitive?.content in
+            setOf("interrupted", "cancelled", "failed")
 
     private fun validateReply(envelope: WireEnvelope, request: TurnStopRequest) {
         require(envelope.sessionId == request.sessionId) { "停止生成 reply session 不匹配" }

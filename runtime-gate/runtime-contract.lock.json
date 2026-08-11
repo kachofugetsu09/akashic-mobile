@@ -2,14 +2,14 @@
   "version": 1,
   "profile": "mobile-runtime-inspection-v1",
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
-  "capability_commit": "167bb051cc65e250de004f956d2ca6e56b1f3325",
-  "capability_tree": "6cd21707d7bd4513914a6a7b79c0bad4bfd84656",
+  "capability_commit": "b7f62dd85fdcccdf46a7a7ecd45d96aa9955be5a",
+  "capability_tree": "147b0b755624613d9ac1e5ade0d29a3cf4a917f2",
   "capability_schema_sha256": "62b43700943a5ca20c214c2a85d9d3ead6ff1e41858a530394bacf1b36d0fa6a",
-  "provider_runtime_revision": "167bb051cc65e250de004f956d2ca6e56b1f3325",
-  "provider_runtime_tree": "6cd21707d7bd4513914a6a7b79c0bad4bfd84656",
+  "provider_runtime_revision": "b7f62dd85fdcccdf46a7a7ecd45d96aa9955be5a",
+  "provider_runtime_tree": "147b0b755624613d9ac1e5ade0d29a3cf4a917f2",
   "provider_runtime_schema_sha256": "62b43700943a5ca20c214c2a85d9d3ead6ff1e41858a530394bacf1b36d0fa6a",
   "relationship": "tested_backward_compatible",
   "source_schema_path": "schema/mobile-realtime-v1.json",
   "scenario_catalog": "runtime-gate/scenarios.json",
-  "scenario_catalog_sha256": "f4a9d9bc67779bf62d452fe1697b797d9a5193862222d62b39d7b818ea5df88e"
+  "scenario_catalog_sha256": "f3dc28e0bffb515b71dc558e2173a3ce22cfb05d7b6383a7ad33627230c8d6ba"
 }

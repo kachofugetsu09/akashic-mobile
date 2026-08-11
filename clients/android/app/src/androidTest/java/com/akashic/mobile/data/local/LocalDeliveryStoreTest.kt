@@ -1988,6 +1988,47 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun canonicalHistoryReplacesCompletedTurnWhoseFinalEventWasLost() = runBlocking {
+        store.applyEvent("server", "device", event(1, "turn.started", buildJsonObject {}), 2)
+        store.applyEvent(
+            "server",
+            "device",
+            event(2, "react.thinking.delta", buildJsonObject { put("delta", "正在分析") }),
+            3,
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(3, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:assistant:canonical")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "最终回答")
+                        put("extra", buildJsonObject { put("control_turn_id", "turn") })
+                        put("ts", "2026-07-14T16:00:05Z")
+                    })
+                })
+            }),
+            4,
+        )
+
+        assertEquals(null, database.messages().get("assistant:turn"))
+        val canonical = database.messages().get("mobile:test:assistant:canonical")
+        assertNotNull(canonical)
+        assertEquals("complete", canonical!!.deliveryState)
+        assertEquals("最终回答", canonical.text)
+        assertTrue(database.messages().getBlocks(canonical.messageId).all { it.status == "completed" })
+        assertTrue(database.messages().activeAssistantTurns("server").isEmpty())
+    }
+
+    @Test
     fun lateReadingSaveResolvesTwoStageCanonicalAlias() = runBlocking {
         val completedAt = Instant.parse("2026-07-14T16:00:05Z").toEpochMilli()
         store.applyEvent("server", "device", event(1, "turn.started", buildJsonObject {}), completedAt - 100)
