@@ -24,6 +24,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -40,6 +41,7 @@ class MobileWebSnapshotTest {
             durationSeconds = 1,
             createdAtMillis = 1_000,
             updatedAtMillis = 1_100,
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
         val before = EmptyConversationState.copy(
             selectedSessionId = "mobile:test",
@@ -66,6 +68,7 @@ class MobileWebSnapshotTest {
         assertEquals(7L, patch?.projectionGeneration)
         assertEquals(0, patch?.messageIndex)
         assertEquals("分析", patch?.contentAppend)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", patch?.clientMessageId)
         assertEquals(null, patch?.message)
     }
 
@@ -87,6 +90,7 @@ class MobileWebSnapshotTest {
             status = AssistantTurnStatus.STREAMING,
             durationSeconds = null,
             createdAtMillis = 1_000,
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
         val before = EmptyConversationState.copy(
             selectedSessionId = "mobile:test",
@@ -116,6 +120,34 @@ class MobileWebSnapshotTest {
         assertEquals(false, terminal?.message?.streaming)
         assertEquals(false, terminal?.state?.composer?.isStreaming)
         assertEquals("assistant:turn-1", terminal?.messageId)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", terminal?.clientMessageId)
+    }
+
+    @Test
+    fun rejectsStreamPatchWithInvalidClientMessageId() {
+        val beforeMessage = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+            clientMessageId = "not-a-frame-id",
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(beforeMessage),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = listOf(beforeMessage.copy(answer = "正在分析", updatedAtMillis = 1_200)),
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            after.toMobileWebStreamPatch(before)
+        }
     }
 
     @Test

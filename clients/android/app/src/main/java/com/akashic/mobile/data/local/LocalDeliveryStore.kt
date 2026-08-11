@@ -986,9 +986,22 @@ class LocalDeliveryStore(
     private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
         val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
         val turnId = requireNotNull(envelope.turnId) { "Turn event has no turn_id" }
+        // 1. 仅 turn.started 拥有并绑定 client_message_id；后续事件缺字段时保留既有绑定
+        val isTurnStarted = envelope.type == "turn.started"
+        val payloadClientMessageId = payloadText(envelope, "client_message_id")
+        payloadClientMessageId?.let(::requireFrameId)
+        val clientMessageId = if (isTurnStarted) payloadClientMessageId else null
         val messageId = "assistant:$turnId"
         val existing = database.messages().get(messageId)
-        if (existing != null) return existing
+        if (existing != null) {
+            // 2. turn.started 重放或后续事件意外携带非空 cmid 时校验一致
+            if (isTurnStarted || payloadClientMessageId != null) {
+                require(existing.clientMessageId == payloadClientMessageId) {
+                    "Turn client_message_id 在重放中变化: $turnId"
+                }
+            }
+            return existing
+        }
         val active = database.messages().activeAssistantTurn(sessionId)
         if (active != null) {
             throw IllegalArgumentException(
@@ -997,7 +1010,7 @@ class LocalDeliveryStore(
         }
         val message = MessageEntity(
             messageId = messageId,
-            clientMessageId = null,
+            clientMessageId = clientMessageId,
             sessionId = sessionId,
             role = "assistant",
             text = "",

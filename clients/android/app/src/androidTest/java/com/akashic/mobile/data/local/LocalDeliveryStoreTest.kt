@@ -9,6 +9,7 @@ import com.akashic.mobile.data.realtime.WireKind
 import com.akashic.mobile.data.realtime.AttachmentDownloadCoordinator
 import com.akashic.mobile.data.realtime.MessageSendPayload
 import com.akashic.mobile.data.realtime.ProtocolCodec
+import com.akashic.mobile.data.realtime.historyStartPage
 import java.time.Instant
 import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
@@ -64,6 +65,235 @@ class LocalDeliveryStoreTest {
 
     @After
     fun tearDown() = database.close()
+
+    @Test
+    fun turnStartedBindsClientMessageIdToTurnTriple() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }),
+            2,
+        )
+
+        val message = database.messages().get("assistant:turn")
+        assertNotNull(message)
+        assertEquals("mobile:test", message!!.sessionId)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message.clientMessageId)
+
+        // 同一三元组重放幂等
+        store.applyEvent(
+            "server",
+            "device",
+            event(2, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }),
+            3,
+        )
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", database.messages().get("assistant:turn")!!.clientMessageId)
+    }
+
+    @Test
+    fun turnStartedRejectsInvalidClientMessageId() = runBlocking {
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent(
+                    "server",
+                    "device",
+                    event(1, "turn.started", buildJsonObject { put("client_message_id", "not-a-frame-id") }),
+                    2,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun turnStartedRejectsClientMessageIdChangeOnReplay() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }),
+            2,
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent(
+                    "server",
+                    "device",
+                    event(2, "turn.started", buildJsonObject { put("client_message_id", "01BRZ3NDEKTSV4RRFFQ69G5FAV") }),
+                    3,
+                )
+            }
+        }
+    }
+
+    /** 完整 turn 流水线：turn.started 绑定 cmid 后，后续 delta/final 不带 cmid 也必须保留绑定。 */
+    @Test
+    fun turnStartedThenThinkingAnswerFinalKeepsClientMessageId() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") },
+                turnId = "flow-turn",
+            ),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "react.thinking.delta",
+                buildJsonObject { put("block_id", "think-1"); put("ordinal", 0); put("delta", "分析") },
+                turnId = "flow-turn",
+            ),
+            3,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(3, "answer.delta", buildJsonObject { put("delta", "回答") }, turnId = "flow-turn"),
+            4,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                4,
+                "message.final",
+                buildJsonObject {
+                    put("message_id", "mobile:test:flow:final")
+                    put("content", "最终回答")
+                },
+                turnId = "flow-turn",
+            ),
+            5,
+        )
+
+        val message = database.messages().get("mobile:test:flow:final")
+        assertNotNull(message)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message!!.clientMessageId)
+        assertEquals("complete", message.deliveryState)
+        assertEquals("最终回答", message.text)
+        assertEquals("分析", database.messages().getBlock("think-1")!!.content)
+    }
+
+    /** 后续事件意外携带非空 cmid 时校验与既有绑定一致，不一致 fail-loud。 */
+    @Test
+    fun turnDeltaWithDifferentClientMessageIdRejected() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }, turnId = "flow-turn"),
+            2,
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent(
+                    "server",
+                    "device",
+                    event(
+                        2,
+                        "answer.delta",
+                        buildJsonObject { put("delta", "错误绑定") },
+                        turnId = "flow-turn",
+                    ).copy(payload = buildJsonObject {
+                        put("delta", "错误绑定")
+                        put("client_message_id", "01BRZ3NDEKTSV4RRFFQ69G5FAV")
+                    }),
+                    3,
+                )
+            }
+        }
+    }
+
+    /** 后续事件携带与既有绑定一致的 cmid 时正常通过。 */
+    @Test
+    fun turnDeltaWithMatchingClientMessageIdAccepted() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }, turnId = "flow-turn"),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "answer.delta",
+                buildJsonObject { put("delta", "一致绑定") },
+                turnId = "flow-turn",
+            ).copy(payload = buildJsonObject {
+                put("delta", "一致绑定")
+                put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+            }),
+            3,
+        )
+        assertEquals("一致绑定", database.messages().get("assistant:flow-turn")!!.text)
+    }
+
+    /** final 丢失时 seq 行计数与远端不相等，历史请求不会跳过，heal 路径可达。 */
+    @Test
+    fun finalLostHistoryNotSkippedBecauseSeqRowsCountOnly() = runBlocking {
+        // 1. 先有 6 条 canonical 历史（seq 0..5）
+        for (seq in 0..5) {
+            database.messages().upsert(
+                MessageEntity(
+                    messageId = "canonical-$seq",
+                    clientMessageId = null,
+                    sessionId = "mobile:test",
+                    role = "assistant",
+                    text = "历史 $seq",
+                    deliveryState = "complete",
+                    createdAt = seq.toLong(),
+                    updatedAt = seq.toLong(),
+                    serverSeq = seq.toLong(),
+                ),
+            )
+        }
+        // 2. 新 turn 流式但 final 丢失：本地多了两条不带 serverSeq 的行
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }),
+            7,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(2, "react.thinking.delta", buildJsonObject { put("delta", "正在分析") }),
+            8,
+        )
+        // 3. 投影进度只数带 seq 的行；远端已提交 user+assistant（8 条）时计数必然不等
+        val progress = database.messages().historyProjectionProgress("mobile:test")
+        assertEquals(6, progress.messageCount)
+        assertEquals(5L, progress.maxServerSeq)
+        assertNotNull(
+            historyStartPage(
+                remoteMessageCount = 8,
+                local = progress,
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+    }
+
+    /** 相等跳过只在服务端没有任何新提交时发生，此时不存在可丢失的 final。 */
+    @Test
+    fun equalCountHistorySkipRequiresNoServerSideCommit() = runBlocking {
+        val progress = database.messages().historyProjectionProgress("mobile:test")
+        assertEquals(0, progress.messageCount)
+        assertEquals(
+            null,
+            historyStartPage(
+                remoteMessageCount = 0,
+                local = progress,
+                forceReload = false,
+                pageSize = 10,
+            ),
+        )
+    }
 
     @Test
     fun reachingConversationTailClearsPersistedReadingAnchor() = runBlocking {

@@ -41,6 +41,7 @@ import com.akashic.mobile.ui.conversation.ProcessBlockKind
 import com.akashic.mobile.ui.conversation.ProcessBlockState
 import com.akashic.mobile.ui.conversation.ProcessBlockUi
 import com.akashic.mobile.ui.conversation.ReadingPositionUi
+import com.akashic.mobile.ui.conversation.TurnProjectionObserver
 import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.PendingMessageUi
 import com.akashic.mobile.ui.conversation.SessionUi
@@ -228,6 +229,8 @@ class MainViewModel(
     private val incomingShareQueue = MutableStateFlow<List<QueuedIncomingShare>>(emptyList())
     private var projectedSessionId: String? = null
     private val messageProjectionCache = mutableMapOf<String, CachedMessageProjection>()
+    val turnTrace = container.turnTrace
+    private val turnProjectionObserver = TurnProjectionObserver()
     val incomingShare = incomingShareQueue.map { queue ->
         queue.firstOrNull()?.let { share ->
             IncomingShareUi(
@@ -332,6 +335,27 @@ class MainViewModel(
         val attachments = composerLocal.attachments
         val draft = composerLocal.draft
         val messages = projectMessages(session.currentSessionId, graph)
+        val sessionId = session.currentSessionId
+        val observation = turnProjectionObserver.observe(messages, sessionId, session.activeTurnId)
+        // 1. 只观测活动或刚关闭 turn 的 UI 投影；空 thinking 块不是可见首字
+        if (sessionId != null && observation.targetTurnId != null && observation.observed != null) {
+            turnTrace.onUiProjected(
+                sessionId = sessionId,
+                turnId = observation.targetTurnId,
+                clientMessageId = observation.observed.clientMessageId,
+                hasThinking = observation.hasThinking,
+                hasAnswer = observation.hasAnswer,
+                streaming = observation.streaming,
+            )
+        }
+        // 2. coordinator 清理后 canStop 回 false、权威终态投影后 composer 可发送的观测
+        if (sessionId != null && observation.canStopFalse) {
+            val closedTurnId = requireNotNull(observation.targetTurnId)
+            turnTrace.onCanStopFalse(sessionId, closedTurnId)
+            if (observation.composerReady) {
+                turnTrace.onComposerReady(sessionId, closedTurnId)
+            }
+        }
         val connection = connectionPresentation(session.connection, session.errorMessage)
         val composerAttachments = attachments.map { attachment ->
             val waitingForConnection = session.connection.phase != ConnectionPhase.READY &&
@@ -380,6 +404,10 @@ class MainViewModel(
         val selectedRemoteMissing = mobileConversations
             .firstOrNull { it.sessionId == session.currentSessionId }
             ?.isRemoteMissingIn(session.remoteSessionIds) == true
+
+        // 3. 所选会话的流式状态（per-session，与观测同源）
+        val isStreaming = messages.any { it is MessageUi.AssistantTurn && it.isStreaming }
+
         ConversationUiState(
             connectionLabel = connection.label,
             connectionStatus = connection.status,
@@ -425,7 +453,7 @@ class MainViewModel(
             attachments = composerAttachments,
             transferStatus = transferStatus,
             commands = session.commands.map { CommandUi(it.command, it.description) },
-            isStreaming = messages.any { it is MessageUi.AssistantTurn && it.isStreaming },
+            isStreaming = isStreaming,
             isResyncing = session.connection.phase == ConnectionPhase.SYNCING,
             canResync = session.connection.phase == ConnectionPhase.READY &&
                 session.activeTurnId == null &&
@@ -918,6 +946,7 @@ class MainViewModel(
                 reply = message.toReplyUi(),
                 attachments = graph.attachmentLinks.toMessageAttachmentUi(),
                 updatedAtMillis = message.updatedAt,
+                clientMessageId = message.clientMessageId,
             )
         }
         return MessageUi.AssistantTurn(
@@ -957,6 +986,7 @@ class MainViewModel(
             reply = message.toReplyUi(),
             attachments = graph.attachmentLinks.toMessageAttachmentUi(),
             updatedAtMillis = message.updatedAt,
+            clientMessageId = message.clientMessageId,
         )
     }
 

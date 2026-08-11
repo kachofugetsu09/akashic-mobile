@@ -49,6 +49,7 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewClientCompat
 import com.akashic.mobile.BuildConfig
+import com.akashic.mobile.data.realtime.TurnTraceTracker
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.data.realtime.MobileWebUiStore
@@ -94,6 +95,7 @@ private const val MOBILE_WEB_EMBEDDED_GENERATION = "embedded"
 private const val MOBILE_WEB_EMBEDDED_NONCE = "baseline"
 private const val MOBILE_WEB_COMMITTED_NONCE = "committed"
 private const val MOBILE_WEB_LOG_TAG = "AkashicMobileWeb"
+private const val MOBILE_WEB_TRACE_PREFIX = "[akashic-trace]"
 private const val MOBILE_WEB_RENDER_DEADLINE_MILLIS = 10_000L
 private const val MOBILE_WEB_RENDERER_RETRY_WINDOW_MILLIS = 5 * 60 * 1_000L
 private const val MOBILE_WEB_MAX_SAFE_INTEGER = 9_007_199_254_740_991L
@@ -115,6 +117,10 @@ data class MobileSharedTextDraft(
 )
 
 internal data class MobileWebUiAttempt(val serverId: String, val generationId: String, val nonce: String)
+
+/** 仅 [akashic-trace] 前缀的 console 行走 info 级；其余保持原错误级行为。 */
+internal fun isMobileWebTraceConsoleLine(message: String): Boolean =
+    message.startsWith(MOBILE_WEB_TRACE_PREFIX)
 private data class MobileWebUiRendererFailure(
     val serverId: String,
     val generationId: String,
@@ -387,6 +393,7 @@ internal fun MobileWebChat(
     onStop: () -> Unit,
     onBackAtRoot: () -> Unit,
     modifier: Modifier = Modifier,
+    turnTrace: TurnTraceTracker? = null,
 ) {
     val latestState by rememberUpdatedState(state)
     val latestThemeId by rememberUpdatedState(themeId)
@@ -1228,10 +1235,16 @@ internal fun MobileWebChat(
                         )
                         webChromeClient = object : WebChromeClient() {
                             override fun onConsoleMessage(message: ConsoleMessage): Boolean {
-                                Log.e(
-                                    MOBILE_WEB_LOG_TAG,
-                                    "console ${message.messageLevel()} ${message.sourceId()}:${message.lineNumber()} ${message.message()}",
-                                )
+                                val text = message.message()
+                                if (isMobileWebTraceConsoleLine(text)) {
+                                    // 1. 只有 [akashic-trace] 前缀结构行走 info；不解析内容，也不扩大桥权限
+                                    Log.i(MOBILE_WEB_LOG_TAG, text)
+                                } else {
+                                    Log.e(
+                                        MOBILE_WEB_LOG_TAG,
+                                        "console ${message.messageLevel()} ${message.sourceId()}:${message.lineNumber()} $text",
+                                    )
+                                }
                                 return true
                             }
                         }
@@ -1240,6 +1253,7 @@ internal fun MobileWebChat(
                             this,
                             mediaRegistry,
                             onFirstSnapshot = { healthGate.markSnapshot() },
+                            turnTrace = turnTrace,
                         )
                         snapshotPump = newSnapshotPump
                         pluginUiBridge = newPluginUiBridge
@@ -2247,10 +2261,13 @@ private fun WebView.pushSharedTextDraft(draft: MobileSharedTextDraft) {
     )
 }
 
+private const val ASSISTANT_TURN_PREFIX = "assistant:"
+
 private class MobileSnapshotPump(
     private val webView: WebView,
     private val mediaRegistry: MobileMediaRegistry,
     private val onFirstSnapshot: () -> Unit,
+    private val turnTrace: TurnTraceTracker? = null,
 ) {
     private val json = Json { explicitNulls = false }
     private val states = Channel<ConversationUiState>(Channel.CONFLATED)
@@ -2283,7 +2300,10 @@ private class MobileSnapshotPump(
                 }
                 withContext(Dispatchers.Main.immediate) {
                     when {
-                        streamPatch != null -> webView.pushStreamPatch(payload)
+                        streamPatch != null -> {
+                            webView.pushStreamPatch(payload)
+                            traceStreamPatch(streamPatch)
+                        }
                         statePatch != null -> webView.pushStatePatch(payload)
                         else -> {
                             webView.pushSnapshot(payload)
@@ -2298,6 +2318,21 @@ private class MobileSnapshotPump(
 
     fun submit(state: ConversationUiState) {
         states.trySend(state).getOrThrow()
+    }
+
+    /** 记录已跨桥投递 patch 的 stage；只描述投递，不虚报 visible/paint。 */
+    private fun traceStreamPatch(patch: MobileWebStreamPatch) {
+        val trace = turnTrace ?: return
+        val turnId = patch.messageId.removePrefix(ASSISTANT_TURN_PREFIX)
+        if (turnId == patch.messageId) return
+        trace.onWebViewPatch(
+            sessionId = patch.selectedSessionId,
+            turnId = turnId,
+            clientMessageId = patch.clientMessageId,
+            thinkingDelta = patch.thinkingAppend != null,
+            answerDelta = patch.contentAppend != null,
+            terminal = patch.message?.streaming == false,
+        )
     }
 
     fun request(state: ConversationUiState) {

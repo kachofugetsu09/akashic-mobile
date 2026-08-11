@@ -54,6 +54,7 @@ data class MobileWebStreamPatch(
     val thinkingAppend: MobileWebThinkingAppend? = null,
     val message: MobileWebMessage? = null,
     val state: MobileWebStatePatch? = null,
+    val clientMessageId: String? = null,
 )
 
 @Serializable
@@ -482,6 +483,12 @@ fun ConversationUiState.toMobileWebStreamPatch(
     // 3. 执行中只允许会话摘要变化；终态随消息一起提交完整控制状态
     val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
     val after = messages[changedIndex] as MessageUi.AssistantTurn
+
+    // 4. 诊断身份字段必须通过协议校验，否则 fail-loud
+    after.clientMessageId?.let { clientMessageId ->
+        require(FRAME_ID_PATTERN.matches(clientMessageId)) { "Stream patch client message id 无效" }
+    }
+
     val terminalState = if (after.isStreaming) {
         if (previous.copy(sessions = sessions, messages = messages) != this) return null
         null
@@ -489,7 +496,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
         copy(messages = previous.messages).toMobileWebStatePatch(previous) ?: return null
     }
 
-    // 4. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
+    // 5. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
     val append = after.streamAppendFrom(before)
     return if (after.isStreaming && append != null) {
         MobileWebStreamPatch(
@@ -502,6 +509,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
             durationSeconds = after.durationSeconds,
             contentAppend = append.content,
             thinkingAppend = append.thinking,
+            clientMessageId = after.clientMessageId,
         )
     } else {
         MobileWebStreamPatch(
@@ -514,6 +522,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
             durationSeconds = after.durationSeconds,
             message = after.toMobileWebMessage(),
             state = terminalState,
+            clientMessageId = after.clientMessageId,
         )
     }
 }
@@ -709,3 +718,8 @@ private fun ConnectionStatusUi.toMobileWebStatus(): MobileWebConnectionStatus = 
     ConnectionStatusUi.RECONNECTING -> MobileWebConnectionStatus.RECONNECTING
     ConnectionStatusUi.DISCONNECTED -> MobileWebConnectionStatus.DISCONNECTED
 }
+
+private val FRAME_ID_PATTERN = Regex(
+    "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
+        "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
+)
