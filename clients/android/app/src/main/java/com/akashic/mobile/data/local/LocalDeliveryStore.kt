@@ -80,6 +80,25 @@ class LocalDeliveryStore(
     private val projectionStateMutex = Mutex()
     private val canonicalMessageAliases = linkedMapOf<String, String>()
 
+    /** 用服务端 stop 终态收敛精确匹配的本地 streaming 投影。 */
+    suspend fun reconcileInterruptedTurn(sessionId: String, turnId: String, updatedAt: Long) {
+        database.withTransaction {
+            // 1. stop reply 只能关闭它引用的同一条本地活动 turn
+            val active = requireNotNull(database.messages().activeAssistantTurn(sessionId)) {
+                "权威 stop 终态缺少本地 streaming turn: $sessionId/$turnId"
+            }
+            require(active.messageId == "assistant:$turnId") {
+                "权威 stop 终态与本地活动 turn 不匹配: ${active.messageId}/$turnId"
+            }
+
+            // 2. 消息与运行中子项在同一 Room 事务内共同进入终态
+            database.messages().upsert(
+                active.copy(deliveryState = "interrupted", updatedAt = updatedAt),
+            )
+            database.messages().completeRunningBlocks(active.messageId, updatedAt)
+        }
+    }
+
     /** 恢复当前电脑拥有的会话选择，拒绝把另一台电脑的会话带入当前投影。 */
     suspend fun restoreSelectedSession(serverId: String, selectedSessionId: String?): String? {
         // 1. 优先保留仍属于当前电脑的显式选择
@@ -674,6 +693,11 @@ class LocalDeliveryStore(
             val duration = remote.extra["turn_duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
             require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
             remote.clientMessageId?.let(::requireFrameId)
+            val controlTurnId = remote.extra["control_turn_id"]?.jsonPrimitive?.contentOrNull
+            controlTurnId?.let { turnId ->
+                require(remote.role == "assistant") { "History control turn belongs to a non-assistant message" }
+                require(turnId.isNotBlank() && turnId.length <= 512) { "History control turn id is invalid" }
+            }
             val messageId = remote.id
             val existingCanonical = database.messages().get(messageId)
             val restoredContent = remote.contentRef?.let { reference ->
@@ -710,7 +734,18 @@ class LocalDeliveryStore(
                     "Proactive delivery id belongs to a non-proactive history message"
                 }
             }
-            val sourceId = if (existingCanonical != null) {
+            val activeTurnSourceId = controlTurnId
+                ?.let { turnId -> "assistant:$turnId" }
+                ?.takeIf { sourceId ->
+                    database.messages().get(sourceId)?.let { source ->
+                        source.sessionId == sessionId &&
+                            source.role == "assistant" &&
+                            source.deliveryState == "streaming"
+                    } == true
+                }
+            val sourceId = if (activeTurnSourceId != null) {
+                activeTurnSourceId
+            } else if (existingCanonical != null) {
                 require(
                     existingCanonical.sessionId == canonical.sessionId &&
                         existingCanonical.role == canonical.role

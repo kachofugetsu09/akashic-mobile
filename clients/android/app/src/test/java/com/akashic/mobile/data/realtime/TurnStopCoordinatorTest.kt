@@ -42,6 +42,7 @@ class TurnStopCoordinatorTest {
             },
             onPersist = { order += "persist" },
             onRemovePersisted = {},
+            onAuthoritativeTerminal = {},
             onTransportUnavailable = {},
             onError = {},
             onStateChanged = {},
@@ -153,6 +154,74 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
+    fun turnNotActiveReplyKeepsUnconfirmedActiveProjection() = runBlocking {
+        val reconciled = mutableListOf<TurnStopRequest>()
+        val errors = mutableListOf<String>()
+        val persisted = mutableListOf<TurnStopRequest>()
+        val coordinator = coordinator(
+            onPersist = persisted::add,
+            onRemovePersisted = { commandId -> persisted.removeAll { it.commandId == commandId } },
+            onAuthoritativeTerminal = reconciled::add,
+            onError = errors::add,
+        )
+        coordinator.onTurnStarted("mobile:one", "turn-1")
+        val request = coordinator.requestStop("mobile:one")
+
+        assertTrue(coordinator.onReply(errorReply(request, code = "turn_not_active")))
+
+        assertTrue(reconciled.isEmpty())
+        assertEquals("turn-1", coordinator.activeTurnId("mobile:one"))
+        assertTrue(persisted.isEmpty())
+        assertEquals(listOf("当前会话没有正在生成的内容"), errors)
+    }
+
+    @Test
+    fun alreadyTerminalNonCompletedOkHealsStaleActiveProjection() = runBlocking {
+        val reconciled = mutableListOf<TurnStopRequest>()
+        val coordinator = coordinator(onAuthoritativeTerminal = reconciled::add)
+        coordinator.onTurnStarted("mobile:one", "turn-1")
+        val request = coordinator.requestStop("mobile:one")
+
+        assertTrue(
+            coordinator.onReply(
+                okReply(
+                    request,
+                    status = "already_terminal",
+                    terminalStatus = "cancelled",
+                ),
+            ),
+        )
+
+        assertEquals(listOf(request), reconciled)
+        assertEquals(null, coordinator.activeTurnId("mobile:one"))
+    }
+
+    @Test
+    fun alreadyCompletedOkWaitsForCanonicalFinalProjection() = runBlocking {
+        val reconciled = mutableListOf<TurnStopRequest>()
+        val coordinator = coordinator(onAuthoritativeTerminal = reconciled::add)
+        coordinator.onTurnStarted("mobile:one", "turn-1")
+        val request = coordinator.requestStop("mobile:one")
+
+        assertTrue(
+            coordinator.onReply(
+                okReply(
+                    request,
+                    status = "already_terminal",
+                    terminalStatus = "completed",
+                ),
+            ),
+        )
+
+        assertTrue(reconciled.isEmpty())
+        assertEquals("turn-1", coordinator.activeTurnId("mobile:one"))
+
+        coordinator.onTurnTerminal("mobile:one", "turn-1")
+
+        assertEquals(null, coordinator.activeTurnId("mobile:one"))
+    }
+
+    @Test
     fun terminalThenReplyAllowsStoppingNextTurn() = runBlocking {
         val sent = mutableListOf<TurnStopRequest>()
         val coordinator = coordinator(sent = sent)
@@ -211,36 +280,48 @@ class TurnStopCoordinatorTest {
         assertTrue(errors.isEmpty())
     }
 
-    private fun okReply(request: TurnStopRequest) = WireEnvelope(
+    private fun okReply(
+        request: TurnStopRequest,
+        status: String = "interrupted",
+        terminalStatus: String? = null,
+    ) = WireEnvelope(
         v = 1,
         kind = WireKind.REPLY,
         type = "turn.stop.ok",
         id = request.commandId,
         sessionId = request.sessionId,
         turnId = request.turnId,
-        payload = buildJsonObject { put("status", "interrupted") },
+        payload = buildJsonObject {
+            put("status", status)
+            terminalStatus?.let { put("terminal_status", it) }
+        },
     )
 
-    private fun errorReply(request: TurnStopRequest) = WireEnvelope(
+    private fun errorReply(request: TurnStopRequest, code: String? = null) = WireEnvelope(
         v = 1,
         kind = WireKind.REPLY,
         type = "turn.stop.error",
         id = request.commandId,
         sessionId = request.sessionId,
         turnId = request.turnId,
-        payload = buildJsonObject { put("message", "当前会话没有正在生成的内容") },
+        payload = buildJsonObject {
+            code?.let { put("code", it) }
+            put("message", "当前会话没有正在生成的内容")
+        },
     )
 
     private fun coordinator(
         sent: MutableList<TurnStopRequest> = mutableListOf(),
         onPersist: suspend (TurnStopRequest) -> Unit = {},
         onRemovePersisted: suspend (String) -> Unit = {},
+        onAuthoritativeTerminal: suspend (TurnStopRequest) -> Unit = {},
         onError: (String) -> Unit = {},
         onStateChanged: () -> Unit = {},
     ) = TurnStopCoordinator(
         send = { request -> sent.add(request) },
         onPersist = onPersist,
         onRemovePersisted = onRemovePersisted,
+        onAuthoritativeTerminal = onAuthoritativeTerminal,
         onTransportUnavailable = {},
         onError = onError,
         onStateChanged = onStateChanged,

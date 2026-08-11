@@ -58,6 +58,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
@@ -364,6 +365,13 @@ class RealtimeSession(
         send = ::sendTurnStopCommand,
         onPersist = ::persistTurnStop,
         onRemovePersisted = ::removePersistedTurnStop,
+        onAuthoritativeTerminal = { request ->
+            deliveryStore.reconcileInterruptedTurn(
+                sessionId = request.sessionId,
+                turnId = request.turnId,
+                updatedAt = System.currentTimeMillis(),
+            )
+        },
         onTransportUnavailable = ::scheduleReconnect,
         onError = { message ->
             mutableState.value = mutableState.value.copy(errorMessage = message)
@@ -1837,6 +1845,7 @@ class RealtimeSession(
                     }
                     "history.page" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
+                        reconcileHistoryTurnTerminals(envelope)
                         requestNextHistoryPage(envelope)
                         downloads.resumeIfIdle(currentProfile.serverId)
                         messageDownloads.resumeIfIdle(currentProfile.serverId)
@@ -2404,6 +2413,20 @@ class RealtimeSession(
             TurnStopRequest(stop.commandId, stop.sessionId, stop.turnId)
         }
         stops.restore(activeTurns, pendingStops)
+    }
+
+    /** 用 canonical history 收束漏收 final 的本地活动 turn。 */
+    private suspend fun reconcileHistoryTurnTerminals(envelope: WireEnvelope) {
+        val sessionId = requireNotNull(envelope.sessionId)
+        val activeTurnId = stops.activeTurnId(sessionId) ?: return
+        val history = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
+        if (history.items.any { item ->
+                item.role == "assistant" &&
+                    item.extra["control_turn_id"]?.jsonPrimitive?.contentOrNull == activeTurnId
+            }
+        ) {
+            stops.onTurnTerminal(sessionId, activeTurnId)
+        }
     }
 
     private suspend fun flushOutbox() {

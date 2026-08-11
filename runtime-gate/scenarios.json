@@ -165,6 +165,42 @@
       "consumer_test": "resumeUsesTurnIdsWhileUiKeepsSessionIds"
     },
     {
+      "id": "resume-active-turn-reconciles-before-sync",
+      "provider_test": "tests/mobile_realtime/test_gateway.py::test_authenticated_gateway_requires_resume_and_acks_durable_sync",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "resumeUsesTurnIdsWhileUiKeepsSessionIds"
+    },
+    {
+      "id": "recovered-terminal-turn-closes-stale-projection",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_resume_reconciles_recovered_terminal_turn_for_mobile_device",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "alreadyTerminalNonCompletedOkHealsStaleActiveProjection"
+    },
+    {
+      "id": "terminal-turn-stop-is-idempotent",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_stop_is_idempotent_after_authoritative_terminal_turn",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "alreadyTerminalNonCompletedOkHealsStaleActiveProjection"
+    },
+    {
+      "id": "unknown-stop-keeps-unconfirmed-active-projection",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_turn_stop_rejects_missing_or_stale_turn_identity",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "turnNotActiveReplyKeepsUnconfirmedActiveProjection"
+    },
+    {
+      "id": "shutdown-stops-channel-before-gateway-storage",
+      "provider_test": "tests/test_runtime_smoke.py::test_shutdown_stops_mobile_channel_before_closing_gateway_storage",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
+      "consumer_test": "processRestartRestoresAndReplaysPersistedStopIdentity"
+    },
+    {
+      "id": "completed-turn-history-replaces-lost-final",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "canonicalHistoryReplacesCompletedTurnWhoseFinalEventWasLost"
+    },
+    {
       "id": "command-catalog-shape-and-filtering",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_command_list_uses_active_channel_catalog_without_stop",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
