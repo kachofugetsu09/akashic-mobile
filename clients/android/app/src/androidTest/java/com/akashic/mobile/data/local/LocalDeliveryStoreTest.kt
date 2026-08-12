@@ -91,6 +91,43 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun historyKeepsTextWhenAttachmentSourceIsUnavailable() = runBlocking {
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "mobile:test:degraded-attachment")
+                        put("session_key", "mobile:test")
+                        put("seq", 1)
+                        put("role", "assistant")
+                        put("content", "附件缺失不影响正文")
+                        put("extra", buildJsonObject {})
+                        put("attachments", buildJsonArray {})
+                        put("attachment_error", buildJsonObject {
+                            put("code", "media_unavailable")
+                            put("message", "附件源暂时不可用")
+                        })
+                        put("ts", "2026-08-12T05:00:00Z")
+                    })
+                })
+            }),
+            1,
+        )
+
+        val message = requireNotNull(database.messages().get("mobile:test:degraded-attachment"))
+        assertEquals("附件缺失不影响正文", message.text)
+        assertEquals(
+            emptyList<MediaAttachmentEntity>(),
+            database.mediaAttachments().forMessage(message.messageId),
+        )
+    }
+
+    @Test
     fun tallMessageReadingAnchorPreservesLargeNegativeOffset() = runBlocking {
         database.messages().upsert(
             MessageEntity("tall-message", null, "mobile:test", "assistant", "长回复", "complete", 1, 1),
