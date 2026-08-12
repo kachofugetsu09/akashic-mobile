@@ -24,6 +24,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -40,6 +41,7 @@ class MobileWebSnapshotTest {
             durationSeconds = 1,
             createdAtMillis = 1_000,
             updatedAtMillis = 1_100,
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
         val before = EmptyConversationState.copy(
             selectedSessionId = "mobile:test",
@@ -66,6 +68,7 @@ class MobileWebSnapshotTest {
         assertEquals(7L, patch?.projectionGeneration)
         assertEquals(0, patch?.messageIndex)
         assertEquals("分析", patch?.contentAppend)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", patch?.clientMessageId)
         assertEquals(null, patch?.message)
     }
 
@@ -87,6 +90,7 @@ class MobileWebSnapshotTest {
             status = AssistantTurnStatus.STREAMING,
             durationSeconds = null,
             createdAtMillis = 1_000,
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
         val before = EmptyConversationState.copy(
             selectedSessionId = "mobile:test",
@@ -116,6 +120,34 @@ class MobileWebSnapshotTest {
         assertEquals(false, terminal?.message?.streaming)
         assertEquals(false, terminal?.state?.composer?.isStreaming)
         assertEquals("assistant:turn-1", terminal?.messageId)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", terminal?.clientMessageId)
+    }
+
+    @Test
+    fun rejectsStreamPatchWithInvalidClientMessageId() {
+        val beforeMessage = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+            clientMessageId = "not-a-frame-id",
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(beforeMessage),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = listOf(beforeMessage.copy(answer = "正在分析", updatedAtMillis = 1_200)),
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            after.toMobileWebStreamPatch(before)
+        }
     }
 
     @Test
@@ -267,6 +299,89 @@ class MobileWebSnapshotTest {
         assertTrue(snapshotJson.length > 100_000)
         assertTrue(patchJson.length * 100 < snapshotJson.length)
         assertTrue(!patchJson.contains("历史消息-399"))
+    }
+
+    @Test
+    fun fullSnapshotStillIdentifiesCanonicalTerminalTransition() {
+        val clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val user = MessageUi.User(
+            id = "user:$clientMessageId",
+            sessionId = "mobile:test",
+            text = "问题",
+            deliveryLabel = "已发送",
+            replyable = true,
+            createdAtMillis = 900,
+            reply = null,
+            clientMessageId = clientMessageId,
+        )
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "回答",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+            clientMessageId = clientMessageId,
+            controlTurnId = "turn-1",
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = listOf(user, streaming),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = listOf(
+                user.copy(id = "message:user:canonical", deliveryLabel = "已完成"),
+                streaming.copy(
+                    id = "message:assistant:canonical",
+                    status = AssistantTurnStatus.COMPLETE,
+                ),
+            ),
+            isStreaming = false,
+        )
+
+        assertEquals(null, after.toMobileWebStreamPatch(before))
+        assertEquals(
+            MobileWebTerminalTransition("mobile:test", "turn-1", clientMessageId),
+            after.terminalTransitionFrom(before),
+        )
+    }
+
+    @Test
+    fun controlTurnIdIdentifiesLegacyTerminalWithoutClientIdentity() {
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:turn-legacy",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "回答",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(streaming),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = listOf(
+                streaming.copy(
+                    id = "message:canonical",
+                    status = AssistantTurnStatus.COMPLETE,
+                    controlTurnId = "turn-legacy",
+                ),
+            ),
+            isStreaming = false,
+        )
+
+        assertEquals(
+            MobileWebTerminalTransition("mobile:test", "turn-legacy", null),
+            after.terminalTransitionFrom(before),
+        )
     }
 
     @Test

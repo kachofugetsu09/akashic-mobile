@@ -169,3 +169,26 @@ internal class TurnStopCoordinator(
         }
     }
 }
+
+/** 从 turn.stop reply 读取权威已终态状态；不是 already_terminal 时返回 null。 */
+internal fun authoritativeTerminalStatus(envelope: WireEnvelope): String? {
+    if (envelope.kind != WireKind.REPLY || envelope.type != "turn.stop.ok") return null
+    if (envelope.payload["status"]?.jsonPrimitive?.content != "already_terminal") return null
+    val status = envelope.payload["terminal_status"]?.jsonPrimitive?.content
+    return status?.takeIf { it in setOf("interrupted", "cancelled", "failed") }
+}
+
+/**
+ * 从 turn.interrupted 事件读取服务端声明的终态 status，只接受 interrupted/cancelled/failed/idle。
+ * completed 走 message.final/authoritativeTerminalStatus 路径，不在此函数接受；
+ * 缺失、空白或任何其他值即 fail-loud，不统一回写 interrupted。
+ */
+internal fun interruptedTerminalStatus(payload: JsonObject): String {
+    val status = requireNotNull(
+        payload["status"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() },
+    ) { "turn.interrupted 缺少终态 status" }
+    require(status in setOf("interrupted", "cancelled", "failed", "idle")) {
+        "turn.interrupted 终态 status 无效: $status"
+    }
+    return status
+}

@@ -5,6 +5,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -278,6 +279,49 @@ class TurnStopCoordinatorTest {
 
         assertEquals("turn-2", coordinator.requestStop("mobile:one").turnId)
         assertTrue(errors.isEmpty())
+    }
+
+    @Test
+    fun interruptedTerminalStatusPreservesRealPayloadValues() {
+        assertEquals(
+            "interrupted",
+            interruptedTerminalStatus(buildJsonObject { put("status", "interrupted") }),
+        )
+        assertEquals("cancelled", interruptedTerminalStatus(buildJsonObject { put("status", "cancelled") }))
+        assertEquals("failed", interruptedTerminalStatus(buildJsonObject { put("status", "failed") }))
+        assertEquals("idle", interruptedTerminalStatus(buildJsonObject { put("status", "idle") }))
+    }
+
+    @Test
+    fun interruptedTerminalStatusMissingOrBlankFailsLoud() {
+        assertThrows(IllegalArgumentException::class.java) {
+            interruptedTerminalStatus(buildJsonObject {})
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            interruptedTerminalStatus(buildJsonObject { put("status", " ") })
+        }
+    }
+
+    @Test
+    fun interruptedTerminalStatusRejectsStatusOutsideWhitelist() {
+        assertThrows(IllegalArgumentException::class.java) {
+            interruptedTerminalStatus(buildJsonObject { put("status", "completed") })
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            interruptedTerminalStatus(buildJsonObject { put("status", "running") })
+        }
+    }
+
+    @Test
+    fun authoritativeTerminalStatusKeepsCompletedOnItsOwnPath() {
+        val request = TurnStopRequest("stop-completed", "mobile:one", "turn-1")
+        // completed 不进 interruptedTerminalStatus 白名单，仍由 already_terminal 权威路径核对
+        assertEquals(
+            null,
+            authoritativeTerminalStatus(
+                okReply(request, status = "already_terminal", terminalStatus = "completed"),
+            ),
+        )
     }
 
     private fun okReply(

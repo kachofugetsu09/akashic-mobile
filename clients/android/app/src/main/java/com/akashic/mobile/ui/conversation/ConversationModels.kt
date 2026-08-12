@@ -196,6 +196,7 @@ sealed interface MessageUi {
         override val reply: MessageReplyUi?,
         override val attachments: List<MessageAttachmentUi> = emptyList(),
         override val updatedAtMillis: Long = createdAtMillis,
+        val clientMessageId: String? = null,
     ) : MessageUi
 
     data class AssistantTurn(
@@ -210,6 +211,8 @@ sealed interface MessageUi {
         override val reply: MessageReplyUi? = null,
         override val attachments: List<MessageAttachmentUi> = emptyList(),
         override val updatedAtMillis: Long = createdAtMillis,
+        val clientMessageId: String? = null,
+        val controlTurnId: String? = null,
     ) : MessageUi {
         val isStreaming: Boolean
             get() = status == AssistantTurnStatus.STREAMING

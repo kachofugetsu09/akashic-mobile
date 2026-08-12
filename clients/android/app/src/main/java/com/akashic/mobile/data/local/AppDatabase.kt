@@ -28,7 +28,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MobileWebUiBlobEntity::class,
         MobileWebUiRejectEntity::class,
     ],
-    version = 13,
+    version = 15,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -76,6 +76,8 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_10_11,
             MIGRATION_11_12,
             MIGRATION_12_13,
+            MIGRATION_13_14,
+            MIGRATION_14_15,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -487,6 +489,28 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_mobile_webui_rejects_retryAfter` " +
                         "ON `mobile_webui_rejects` (`retryAfter`)"
+                )
+            }
+        }
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `turnClientMessageId` TEXT")
+                db.execSQL(
+                    "UPDATE `messages` SET `turnClientMessageId` = `clientMessageId`, " +
+                        "`clientMessageId` = NULL WHERE `role` = 'assistant' " +
+                        "AND `clientMessageId` IS NOT NULL",
+                )
+            }
+        }
+
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `controlTurnId` TEXT")
+                db.execSQL(
+                    "UPDATE `messages` SET `controlTurnId` = substr(`messageId`, 11) " +
+                        "WHERE `role` = 'assistant' AND `deliveryState` = 'streaming' " +
+                        "AND `messageId` LIKE 'assistant:%'",
                 )
             }
         }

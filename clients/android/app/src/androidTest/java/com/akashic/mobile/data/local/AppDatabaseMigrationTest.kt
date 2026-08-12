@@ -33,6 +33,8 @@ class AppDatabaseMigrationTest {
             DATABASE_10_11,
             DATABASE_11_12,
             DATABASE_12_13,
+            DATABASE_13_14,
+            DATABASE_14_15,
         )
             .forEach(context::deleteDatabase)
     }
@@ -537,12 +539,117 @@ class AppDatabaseMigrationTest {
             database.query("PRAGMA index_list('mobile_webui_generations')").use { cursor ->
                 var count = 0
                 while (cursor.moveToNext()) count += 1
-                assertEquals(3, count)
+                assertEquals(4, count)
             }
             database.query("PRAGMA index_list('mobile_webui_blobs')").use { cursor ->
                 var count = 0
                 while (cursor.moveToNext()) count += 1
-                assertEquals(2, count)
+                assertEquals(3, count)
+            }
+        }
+    }
+
+    @Test
+    fun migrate13To14AddsSeparateTurnClientMessageIdentity() {
+        helper.createDatabase(DATABASE_13_14, 13).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:legacy', 'server', '迁移会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages VALUES('legacy-message', '01ARZ3NDEKTSV4RRFFQ69G5FAV', " +
+                    "'mobile:legacy', 'assistant', " +
+                    "'流式正文', 'streaming', 3, 4, NULL, NULL, NULL, NULL)",
+            )
+            execSQL(
+                "INSERT INTO messages VALUES('legacy-user', '01ARZ3NDEKTSV4RRFFQ69G5FAW', " +
+                    "'mobile:legacy', 'user', '问题', 'sent', 2, 2, NULL, NULL, NULL, NULL)",
+            )
+            execSQL(
+                "INSERT INTO messages VALUES('legacy-complete', '01ARZ3NDEKTSV4RRFFQ69G5FAX', " +
+                    "'mobile:legacy', 'assistant', '旧回答', 'complete', 1, 1, NULL, NULL, NULL, NULL)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_13_14,
+            14,
+            true,
+            AppDatabase.MIGRATION_13_14,
+        ).use { database ->
+            database.query(
+                "SELECT text, deliveryState, clientMessageId, turnClientMessageId " +
+                    "FROM messages WHERE messageId = 'legacy-message'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 legacy streaming message" }
+                assertEquals("流式正文", cursor.getString(0))
+                assertEquals("streaming", cursor.getString(1))
+                assertEquals(true, cursor.isNull(2))
+                assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", cursor.getString(3))
+            }
+            database.query(
+                "SELECT clientMessageId, turnClientMessageId FROM messages " +
+                    "WHERE messageId = 'legacy-user'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 legacy user message" }
+                assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAW", cursor.getString(0))
+                assertEquals(true, cursor.isNull(1))
+            }
+            database.query(
+                "SELECT clientMessageId, turnClientMessageId FROM messages " +
+                    "WHERE messageId = 'legacy-complete'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 legacy complete assistant" }
+                assertEquals(true, cursor.isNull(0))
+                assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAX", cursor.getString(1))
+            }
+        }
+    }
+
+    @Test
+    fun migrate14To15AddsAuthoritativeControlTurnIdentity() {
+        helper.createDatabase(DATABASE_14_15, 14).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:legacy', 'server', '迁移会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages(" +
+                    "messageId, clientMessageId, sessionId, role, text, deliveryState, createdAt, updatedAt, " +
+                    "replyToMessageId, replyRole, replyPreview, turnClientMessageId" +
+                    ") VALUES('assistant:legacy-turn', NULL, 'mobile:legacy', 'assistant', '流式正文', " +
+                    "'streaming', 3, 4, NULL, NULL, NULL, '01ARZ3NDEKTSV4RRFFQ69G5FAV')",
+            )
+            execSQL(
+                "INSERT INTO messages(" +
+                    "messageId, clientMessageId, sessionId, role, text, deliveryState, createdAt, updatedAt, " +
+                    "replyToMessageId, replyRole, replyPreview, turnClientMessageId" +
+                    ") VALUES('canonical-complete', NULL, 'mobile:legacy', 'assistant', '旧回答', " +
+                    "'complete', 2, 2, NULL, NULL, NULL, '01ARZ3NDEKTSV4RRFFQ69G5FAX')",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_14_15,
+            15,
+            true,
+            AppDatabase.MIGRATION_14_15,
+        ).use { database ->
+            database.query(
+                "SELECT turnClientMessageId, controlTurnId FROM messages " +
+                    "WHERE messageId = 'assistant:legacy-turn'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 v14 streaming message" }
+                assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", cursor.getString(0))
+                assertEquals("legacy-turn", cursor.getString(1))
+            }
+            database.query(
+                "SELECT controlTurnId FROM messages WHERE messageId = 'canonical-complete'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失 v14 complete assistant" }
+                assertEquals(true, cursor.isNull(0))
             }
         }
     }
@@ -560,5 +667,7 @@ class AppDatabaseMigrationTest {
         const val DATABASE_10_11 = "migration-10-11"
         const val DATABASE_11_12 = "migration-11-12"
         const val DATABASE_12_13 = "migration-12-13"
+        const val DATABASE_13_14 = "migration-13-14"
+        const val DATABASE_14_15 = "migration-14-15"
     }
 }

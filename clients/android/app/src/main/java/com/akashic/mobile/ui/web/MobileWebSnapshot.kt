@@ -54,6 +54,7 @@ data class MobileWebStreamPatch(
     val thinkingAppend: MobileWebThinkingAppend? = null,
     val message: MobileWebMessage? = null,
     val state: MobileWebStatePatch? = null,
+    val clientMessageId: String? = null,
 )
 
 @Serializable
@@ -482,6 +483,12 @@ fun ConversationUiState.toMobileWebStreamPatch(
     // 3. 执行中只允许会话摘要变化；终态随消息一起提交完整控制状态
     val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
     val after = messages[changedIndex] as MessageUi.AssistantTurn
+
+    // 4. 诊断身份字段必须通过协议校验，否则 fail-loud
+    after.clientMessageId?.let { clientMessageId ->
+        require(FRAME_ID_PATTERN.matches(clientMessageId)) { "Stream patch client message id 无效" }
+    }
+
     val terminalState = if (after.isStreaming) {
         if (previous.copy(sessions = sessions, messages = messages) != this) return null
         null
@@ -489,7 +496,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
         copy(messages = previous.messages).toMobileWebStatePatch(previous) ?: return null
     }
 
-    // 4. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
+    // 5. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
     val append = after.streamAppendFrom(before)
     return if (after.isStreaming && append != null) {
         MobileWebStreamPatch(
@@ -502,6 +509,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
             durationSeconds = after.durationSeconds,
             contentAppend = append.content,
             thinkingAppend = append.thinking,
+            clientMessageId = after.clientMessageId,
         )
     } else {
         MobileWebStreamPatch(
@@ -514,8 +522,50 @@ fun ConversationUiState.toMobileWebStreamPatch(
             durationSeconds = after.durationSeconds,
             message = after.toMobileWebMessage(),
             state = terminalState,
+            clientMessageId = after.clientMessageId,
         )
     }
+}
+
+internal data class MobileWebTerminalTransition(
+    val sessionId: String,
+    val turnId: String,
+    val clientMessageId: String?,
+)
+
+/** 完整 snapshot 同时迁移 user/assistant identity 时，保留终态跨桥观测。 */
+internal fun ConversationUiState.terminalTransitionFrom(
+    previous: ConversationUiState,
+): MobileWebTerminalTransition? {
+    // 1. 从同一会话的旧投影定位仍在流式的权威 turn
+    if (selectedSessionId == null || selectedSessionId != previous.selectedSessionId) return null
+    val before = previous.messages.asReversed().filterIsInstance<MessageUi.AssistantTurn>()
+        .firstOrNull {
+            it.isStreaming &&
+                (it.controlTurnId != null || it.id.startsWith(ASSISTANT_TURN_PREFIX))
+        }
+        ?: return null
+    val beforeTurnId = before.controlTurnId ?: before.id.removePrefix(ASSISTANT_TURN_PREFIX)
+
+    // 2. canonical ID 可变；权威 turn id 优先，客户端发件身份兼容旧投影
+    val after = messages.asReversed().filterIsInstance<MessageUi.AssistantTurn>()
+        .firstOrNull {
+            !it.isStreaming && it.sessionId == before.sessionId && (
+                if (it.controlTurnId != null) {
+                    it.controlTurnId == beforeTurnId
+                } else if (before.clientMessageId != null) {
+                    it.clientMessageId == before.clientMessageId
+                } else {
+                    it.id == before.id
+                }
+                )
+        }
+        ?: return null
+    return MobileWebTerminalTransition(
+        sessionId = before.sessionId,
+        turnId = beforeTurnId,
+        clientMessageId = after.clientMessageId ?: before.clientMessageId,
+    )
 }
 
 private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
@@ -709,3 +759,8 @@ private fun ConnectionStatusUi.toMobileWebStatus(): MobileWebConnectionStatus = 
     ConnectionStatusUi.RECONNECTING -> MobileWebConnectionStatus.RECONNECTING
     ConnectionStatusUi.DISCONNECTED -> MobileWebConnectionStatus.DISCONNECTED
 }
+
+private val FRAME_ID_PATTERN = Regex(
+    "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
+        "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
+)

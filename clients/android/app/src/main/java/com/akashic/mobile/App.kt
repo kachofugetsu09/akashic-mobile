@@ -17,6 +17,7 @@ import com.akashic.mobile.data.local.IncomingShareStore
 import com.akashic.mobile.data.realtime.DeviceKeyStore
 import com.akashic.mobile.data.realtime.RealtimeSession
 import com.akashic.mobile.data.realtime.MobileWebUiStore
+import com.akashic.mobile.data.realtime.TurnTraceTracker
 import com.akashic.mobile.data.realtime.TransferNetworkMonitor
 import com.akashic.mobile.data.realtime.pluginui.PluginUiAssetStore
 import com.akashic.mobile.data.realtime.pluginui.PluginUiCatalogStore
@@ -82,6 +83,7 @@ class AppContainer(application: Application) {
         database.messageContentTransfers(),
     )
     val deliveryStore = LocalDeliveryStore(database, mediaCacheStore, messageContentStore)
+    val turnTrace = TurnTraceTracker()
     val preferences = AppPreferences(application)
     val attachmentDraftStore = AttachmentDraftStore(
         contentResolver = application.contentResolver,
@@ -127,5 +129,6 @@ class AppContainer(application: Application) {
         onRuntimeError = { context, error ->
             CrashDiagnostics.recordRuntimeError(application, "RealtimeSession", context, error)
         },
+        turnTrace = turnTrace,
     )
 }

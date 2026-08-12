@@ -7,6 +7,17 @@ import org.junit.Test
 
 class MobileWebChatSendTest {
     @Test
+    fun onlyAkashicTracePrefixedConsoleLinesLiftToInfo() {
+        assertTrue(isMobileWebTraceConsoleLine("[akashic-trace] turn.started"))
+        assertTrue(isMobileWebTraceConsoleLine("[akashic-trace] {\"stage\":\"send_requested\"}"))
+        // 1. 只按前缀判定，不解析后续内容
+        assertTrue(isMobileWebTraceConsoleLine("[akashic-trace]任意结构正文"))
+        assertFalse(isMobileWebTraceConsoleLine("Uncaught ReferenceError: x is not defined"))
+        assertFalse(isMobileWebTraceConsoleLine(" [akashic-trace] 前缀前有空格"))
+        assertFalse(isMobileWebTraceConsoleLine(""))
+    }
+
+    @Test
     fun leaseGenerationSeparatesEmbeddedBaselineFromRemoteServing() {
         assertTrue(mobileWebUiLeaseGenerationCurrent(false, "embedded", null))
         assertFalse(mobileWebUiLeaseGenerationCurrent(false, "embedded", "embedded"))

@@ -289,6 +289,7 @@ class RealtimeSession(
     private val scope: CoroutineScope,
     allowInsecureTransport: Boolean,
     private val onRuntimeError: (String, Throwable) -> Unit,
+    private val turnTrace: TurnTraceTracker,
 ) : RealtimeSocketListener {
     private data class PendingSyncCommand(
         val generation: Long,
@@ -1116,177 +1117,181 @@ class RealtimeSession(
         expectedAttachmentIds: List<String> = emptyList(),
         onPersisted: (Boolean) -> Unit = {},
         sentDraftRevision: Long? = null,
-) {
+    ) {
+        // 0. 发送入口即捕获 origin，cmid 生成后绑定；深层校验失败不产生观测
+        val sendOrigin = turnTrace.captureSendOrigin()
         scope.launch {
             withSendResult(onPersisted) { reportResult ->
                 attachmentOperations.perform {
                     mutex.withLock {
-                // 1. 确定当前手机会话
-                val currentProfile = profile ?: run {
-                    mutableState.value = mutableState.value.copy(errorMessage = "请先连接电脑")
-                    reportResult(false)
-                    return@withLock
-                }
-                val body = text.trim()
-                val sessionId = targetSessionId ?: ensureCurrentSession(currentProfile)
-                require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
-                require(sentDraftRevision == null || sentDraftRevision in 1..9_007_199_254_740_991) {
-                    "会话草稿 revision 无效"
-                }
-                if (targetSessionId != null) {
-                    val conversation = requireNotNull(database.conversations().get(sessionId)) {
-                        "Unknown notification session: $sessionId"
-                    }
-                    require(conversation.serverId == currentProfile.serverId) {
-                        "Notification session belongs to another server"
-                    }
-                }
-                if (isRemoteMissingSession(currentProfile.serverId, sessionId)) {
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = "这段会话已不在电脑上，请新建会话后继续",
-                    )
-                    reportResult(false)
-                    return@withLock
-                }
-                val attachments = if (includeDraftAttachments) {
-                    database.attachmentTransfers().drafts(currentProfile.serverId, sessionId)
-                } else {
-                    emptyList()
-                }
-                if (includeDraftAttachments && !attachmentDraftMatchesExpected(
-                        attachments.map { it.attachmentId },
-                        expectedAttachmentIds,
-                    )
-                ) {
-                    mutableState.value = mutableState.value.copy(errorMessage = "附件草稿已变化，请确认后重试")
-                    reportResult(false)
-                    return@withLock
-                }
-                if (body.isEmpty() && attachments.isEmpty()) {
-                    mutableState.value = mutableState.value.copy(errorMessage = "消息和附件不能同时为空")
-                    reportResult(false)
-                    return@withLock
-                }
-                if (attachments.any { it.state != "ready" }) {
-                    mutableState.value = mutableState.value.copy(errorMessage = "请等待附件上传完成")
-                    reportResult(false)
-                    return@withLock
-                }
-                val replyTarget = replyToMessageId?.let { messageId ->
-                    val target = database.messages().get(messageId)
-                    if (target == null) {
-                        mutableState.value = mutableState.value.copy(errorMessage = "被引用的消息已不可用")
-                        reportResult(false)
-                        return@withLock
-                    }
-                    if (target.sessionId != sessionId || target.role !in setOf("user", "assistant")) {
-                        mutableState.value = mutableState.value.copy(errorMessage = "被引用的消息已不可用")
-                        reportResult(false)
-                        return@withLock
-                    }
-                    target
-                }
+                        // 1. 确定当前手机会话
+                        val currentProfile = profile ?: run {
+                            mutableState.value = mutableState.value.copy(errorMessage = "请先连接电脑")
+                            reportResult(false)
+                            return@withLock
+                        }
+                        val body = text.trim()
+                        val sessionId = targetSessionId ?: ensureCurrentSession(currentProfile)
+                        require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                        require(sentDraftRevision == null || sentDraftRevision in 1..9_007_199_254_740_991) {
+                            "会话草稿 revision 无效"
+                        }
+                        if (targetSessionId != null) {
+                            val conversation = requireNotNull(database.conversations().get(sessionId)) {
+                                "Unknown notification session: $sessionId"
+                            }
+                            require(conversation.serverId == currentProfile.serverId) {
+                                "Notification session belongs to another server"
+                            }
+                        }
+                        if (isRemoteMissingSession(currentProfile.serverId, sessionId)) {
+                            mutableState.value = mutableState.value.copy(
+                                errorMessage = "这段会话已不在电脑上，请新建会话后继续",
+                            )
+                            reportResult(false)
+                            return@withLock
+                        }
+                        val attachments = if (includeDraftAttachments) {
+                            database.attachmentTransfers().drafts(currentProfile.serverId, sessionId)
+                        } else {
+                            emptyList()
+                        }
+                        if (includeDraftAttachments && !attachmentDraftMatchesExpected(
+                                attachments.map { it.attachmentId },
+                                expectedAttachmentIds,
+                            )
+                        ) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "附件草稿已变化，请确认后重试")
+                            reportResult(false)
+                            return@withLock
+                        }
+                        if (body.isEmpty() && attachments.isEmpty()) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "消息和附件不能同时为空")
+                            reportResult(false)
+                            return@withLock
+                        }
+                        if (attachments.any { it.state != "ready" }) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "请等待附件上传完成")
+                            reportResult(false)
+                            return@withLock
+                        }
+                        val replyTarget = replyToMessageId?.let { messageId ->
+                            val target = database.messages().get(messageId)
+                            if (target == null) {
+                                mutableState.value = mutableState.value.copy(errorMessage = "被引用的消息已不可用")
+                                reportResult(false)
+                                return@withLock
+                            }
+                            if (target.sessionId != sessionId || target.role !in setOf("user", "assistant")) {
+                                mutableState.value = mutableState.value.copy(errorMessage = "被引用的消息已不可用")
+                                reportResult(false)
+                                return@withLock
+                            }
+                            target
+                        }
 
-                // 2. 持久化消息和可重放命令
-                val now = System.currentTimeMillis()
-                val commandId = Ulid.next(now)
-                val clientMessageId = commandId
-                val modelSelection = if (includeModelSelection) {
-                    modelCatalog.selectionFor(sessionId)
-                } else {
-                    null
-                }
-                val payload = MessageSendPayload(
-                    clientMessageId = clientMessageId,
-                    sessionId = sessionId,
-                    text = body,
-                    mediaRefs = attachments.map { it.attachmentId },
-                    clientCreatedAt = Instant.ofEpochMilli(now).toString(),
-                    replyTo = replyTarget?.let { target ->
-                        messageReplyReference(target.messageId, target.clientMessageId)
-                    },
-                    modelRuntimeId = modelSelection?.runtimeId,
-                    modelReasoningEffort = modelSelection?.reasoningEffort,
-                )
-                val cachedAttachments = try {
-                    attachments.map { transfer ->
-                        mediaCache.importOutbound(
-                            transfer,
-                            attachmentDrafts.fileFor(transfer.attachmentId),
-                            now,
+                        // 2. 持久化消息和可重放命令
+                        val now = System.currentTimeMillis()
+                        val commandId = Ulid.next(now)
+                        val clientMessageId = commandId
+                        turnTrace.recordSend(sessionId, clientMessageId, sendOrigin)
+                        val modelSelection = if (includeModelSelection) {
+                            modelCatalog.selectionFor(sessionId)
+                        } else {
+                            null
+                        }
+                        val payload = MessageSendPayload(
+                            clientMessageId = clientMessageId,
+                            sessionId = sessionId,
+                            text = body,
+                            mediaRefs = attachments.map { it.attachmentId },
+                            clientCreatedAt = Instant.ofEpochMilli(now).toString(),
+                            replyTo = replyTarget?.let { target ->
+                                messageReplyReference(target.messageId, target.clientMessageId)
+                            },
+                            modelRuntimeId = modelSelection?.runtimeId,
+                            modelReasoningEffort = modelSelection?.reasoningEffort,
                         )
-                    }
-                } catch (error: IOException) {
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = "保存已发送附件失败：${error.message}",
-                    )
-                    reportResult(false)
-                    return@withLock
-                } catch (error: SecurityException) {
-                    mutableState.value = mutableState.value.copy(errorMessage = "附件缓存路径不安全")
-                    reportResult(false)
-                    return@withLock
-                } catch (error: IllegalArgumentException) {
-                    mutableState.value = mutableState.value.copy(errorMessage = error.message)
-                    reportResult(false)
-                    return@withLock
-                } catch (error: IllegalStateException) {
-                    mutableState.value = mutableState.value.copy(errorMessage = error.message)
-                    reportResult(false)
-                    return@withLock
-                } catch (error: ArithmeticException) {
-                    mutableState.value = mutableState.value.copy(errorMessage = "附件缓存配额计算溢出")
-                    reportResult(false)
-                    return@withLock
-                }
-                val envelope = WireEnvelope(
-                    v = WIRE_PROTOCOL_VERSION,
-                    kind = WireKind.COMMAND,
-                    type = "message.send",
-                    id = commandId,
-                    connectionEpoch = 1,
-                    sessionId = sessionId,
-                    payload = ProtocolCodec.json().encodeToJsonElement(MessageSendPayload.serializer(), payload).jsonObject,
-                )
-                deliveryStore.enqueueMessage(
-                    conversation = conversationForMessage(
-                        currentProfile,
-                        sessionId,
-                        body.ifBlank { attachments.joinToString("、") { it.filename } },
-                        now,
-                    ),
-                    message = MessageEntity(
-                        messageId = "user:$clientMessageId",
-                        clientMessageId = clientMessageId,
-                        sessionId = sessionId,
-                        role = "user",
-                        text = body.ifBlank {
-                            attachments.joinToString("、", prefix = "附件：") { it.filename }
-                        },
-                        deliveryState = "pending",
-                        createdAt = now,
-                        updatedAt = now,
-                        replyToMessageId = replyTarget?.messageId,
-                        replyRole = replyTarget?.role,
-                        replyPreview = replyTarget?.let { target ->
-                            target.text.trim().replace(Regex("\\s+"), " ").take(512)
-                                .ifBlank { "[无文字消息]" }
-                        },
-                    ),
-                    command = OutboxCommandEntity(
-                        commandId = commandId,
-                        serverId = currentProfile.serverId,
-                        envelopeJson = ProtocolCodec.encode(envelope),
-                        state = "pending",
-                        attemptCount = 0,
-                        createdAt = now,
-                        lastAttemptAt = null,
-                    ),
-                    attachments = cachedAttachments,
-                    sentDraftRevision = sentDraftRevision,
-                )
-                reportResult(true)
-                if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
+                        val cachedAttachments = try {
+                            attachments.map { transfer ->
+                                mediaCache.importOutbound(
+                                    transfer,
+                                    attachmentDrafts.fileFor(transfer.attachmentId),
+                                    now,
+                                )
+                            }
+                        } catch (error: IOException) {
+                            mutableState.value = mutableState.value.copy(
+                                errorMessage = "保存已发送附件失败：${error.message}",
+                            )
+                            reportResult(false)
+                            return@withLock
+                        } catch (error: SecurityException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "附件缓存路径不安全")
+                            reportResult(false)
+                            return@withLock
+                        } catch (error: IllegalArgumentException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                            reportResult(false)
+                            return@withLock
+                        } catch (error: IllegalStateException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = error.message)
+                            reportResult(false)
+                            return@withLock
+                        } catch (error: ArithmeticException) {
+                            mutableState.value = mutableState.value.copy(errorMessage = "附件缓存配额计算溢出")
+                            reportResult(false)
+                            return@withLock
+                        }
+                        val envelope = WireEnvelope(
+                            v = WIRE_PROTOCOL_VERSION,
+                            kind = WireKind.COMMAND,
+                            type = "message.send",
+                            id = commandId,
+                            connectionEpoch = 1,
+                            sessionId = sessionId,
+                            payload = ProtocolCodec.json().encodeToJsonElement(MessageSendPayload.serializer(), payload).jsonObject,
+                        )
+                        deliveryStore.enqueueMessage(
+                            conversation = conversationForMessage(
+                                currentProfile,
+                                sessionId,
+                                body.ifBlank { attachments.joinToString("、") { it.filename } },
+                                now,
+                            ),
+                            message = MessageEntity(
+                                messageId = "user:$clientMessageId",
+                                clientMessageId = clientMessageId,
+                                sessionId = sessionId,
+                                role = "user",
+                                text = body.ifBlank {
+                                    attachments.joinToString("、", prefix = "附件：") { it.filename }
+                                },
+                                deliveryState = "pending",
+                                createdAt = now,
+                                updatedAt = now,
+                                replyToMessageId = replyTarget?.messageId,
+                                replyRole = replyTarget?.role,
+                                replyPreview = replyTarget?.let { target ->
+                                    target.text.trim().replace(Regex("\\s+"), " ").take(512)
+                                        .ifBlank { "[无文字消息]" }
+                                },
+                            ),
+                            command = OutboxCommandEntity(
+                                commandId = commandId,
+                                serverId = currentProfile.serverId,
+                                envelopeJson = ProtocolCodec.encode(envelope),
+                                state = "pending",
+                                attemptCount = 0,
+                                createdAt = now,
+                                lastAttemptAt = null,
+                            ),
+                            attachments = cachedAttachments,
+                            sentDraftRevision = sentDraftRevision,
+                        )
+                        turnTrace.onLocalOutboxCommitted(sessionId, clientMessageId)
+                        reportResult(true)
+                        if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
                     }
                 }
             }
@@ -1799,6 +1804,7 @@ class RealtimeSession(
         when (envelope.kind) {
             WireKind.EVENT -> {
                 val currentProfile = requireNotNull(profile)
+                recordEnvelopeTrace(envelope)
                 val eventSeq = deliveryStore.applyEvent(
                     serverId = currentProfile.serverId,
                     deviceId = currentProfile.deviceId,
@@ -1806,6 +1812,7 @@ class RealtimeSession(
                     updatedAt = System.currentTimeMillis(),
                     preservedSessionId = mutableState.value.currentSessionId,
                 )
+                recordRoomCommitTrace(envelope)
                 recordAck(eventSeq)
                 when (envelope.type) {
                     "turn.started" -> {
@@ -1815,13 +1822,23 @@ class RealtimeSession(
                             requireNotNull(envelope.turnId),
                         )
                     }
-                    "turn.interrupted" -> stops.onTurnTerminal(
-                        requireNotNull(envelope.sessionId),
-                        requireNotNull(envelope.turnId),
-                    )
+                    "turn.interrupted" -> {
+                        stops.onTurnTerminal(
+                            requireNotNull(envelope.sessionId),
+                            requireNotNull(envelope.turnId),
+                        )
+                        turnTrace.onTurnCleared(
+                            requireNotNull(envelope.sessionId),
+                            requireNotNull(envelope.turnId),
+                        )
+                    }
                     "message.final" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
                         stops.onTurnTerminal(
+                            requireNotNull(envelope.sessionId),
+                            requireNotNull(envelope.turnId),
+                        )
+                        turnTrace.onTurnCleared(
                             requireNotNull(envelope.sessionId),
                             requireNotNull(envelope.turnId),
                         )
@@ -1845,7 +1862,13 @@ class RealtimeSession(
                     }
                     "history.page" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
-                        reconcileHistoryTurnTerminals(envelope)
+                        val healedTurnId = reconcileHistoryTurnTerminals(envelope)
+                        if (healedTurnId != null) {
+                            val sessionId = requireNotNull(envelope.sessionId)
+                            turnTrace.onTerminalReceived(sessionId, healedTurnId, "completed")
+                            turnTrace.onRoomCommitted(sessionId, healedTurnId, TurnTraceStage.TERMINAL_COMMITTED)
+                            turnTrace.onTurnCleared(sessionId, healedTurnId)
+                        }
                         requestNextHistoryPage(envelope)
                         downloads.resumeIfIdle(currentProfile.serverId)
                         messageDownloads.resumeIfIdle(currentProfile.serverId)
@@ -1865,7 +1888,17 @@ class RealtimeSession(
                 }
             }
             WireKind.REPLY -> {
-                if (stops.onReply(envelope)) return
+                val authoritativeTerminalStatus = authoritativeTerminalStatus(envelope)
+                if (stops.onReply(envelope)) {
+                    authoritativeTerminalStatus?.let { terminalStatus ->
+                        val sessionId = requireNotNull(envelope.sessionId)
+                        val turnId = requireNotNull(envelope.turnId)
+                        turnTrace.onTerminalReceived(sessionId, turnId, terminalStatus)
+                        turnTrace.onRoomCommitted(sessionId, turnId, TurnTraceStage.TERMINAL_COMMITTED)
+                        turnTrace.onTurnCleared(sessionId, turnId)
+                    }
+                    return
+                }
                 if (envelope.type.startsWith("attachment.download.")) {
                     try {
                         check(downloads.onReply(envelope)) { "收到未知附件下载 reply" }
@@ -1934,7 +1967,10 @@ class RealtimeSession(
                 when (envelope.type) {
                     "message.send.ok" -> {
                         require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的 ACK: $id" }
+                        // 1. ACK 到达先记 received，Room 事务提交后记 committed；两次记录间不新增任何发送
+                        turnTrace.onServerAckReceived(id)
                         val sentFiles = deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
+                        turnTrace.onServerAckCommitted(id)
                         activeOutboxCommandId = null
                         attachmentDrafts.deleteSentFiles(sentFiles)
                         flushOutbox()
@@ -1943,6 +1979,7 @@ class RealtimeSession(
                         require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的错误: $id" }
                         val code = envelope.payload["code"]?.jsonPrimitive?.content
                             ?: error("message.send.error 缺少 code")
+                        turnTrace.onSendError(id, code)
                         if (code == "session_not_found") {
                             val sessionId = requireNotNull(envelope.sessionId) {
                                 "session_not_found 缺少 session_id"
@@ -2166,6 +2203,49 @@ class RealtimeSession(
         val remoteSessionIds = mutableState.value.remoteSessionIds ?: return
         if (sessionId in remoteSessionIds) return
         mutableState.value = mutableState.value.copy(remoteSessionIds = remoteSessionIds + sessionId)
+    }
+
+    /** 记录事件信封的物理接收阶段；turn.started 在 applyEvent 前完成 send->turn 绑定。 */
+    private fun recordEnvelopeTrace(envelope: WireEnvelope) {
+        val sessionId = envelope.sessionId ?: return
+        val turnId = envelope.turnId ?: return
+        when (envelope.type) {
+            "turn.started" -> turnTrace.onTurnStartedReceived(
+                sessionId,
+                turnId,
+                envelope.payload["client_message_id"]?.jsonPrimitive?.contentOrNull,
+            )
+            "react.thinking.delta" -> turnTrace.onThinkingReceived(sessionId, turnId)
+            "answer.delta" -> turnTrace.onAnswerReceived(sessionId, turnId)
+            "message.final" -> turnTrace.onTerminalReceived(sessionId, turnId, "completed")
+            "turn.interrupted" -> turnTrace.onTerminalReceived(
+                sessionId,
+                turnId,
+                interruptedTerminalStatus(envelope.payload),
+            )
+            else -> Unit
+        }
+    }
+
+    /** 记录事件在 LocalDeliveryStore Room 事务提交后的阶段。 */
+    private fun recordRoomCommitTrace(envelope: WireEnvelope) {
+        val sessionId = envelope.sessionId ?: return
+        val turnId = envelope.turnId ?: return
+        when (envelope.type) {
+            "turn.started" -> turnTrace.onRoomCommitted(
+                sessionId, turnId, TurnTraceStage.TURN_STARTED_COMMITTED,
+            )
+            "react.thinking.delta" -> turnTrace.onRoomCommitted(
+                sessionId, turnId, TurnTraceStage.FIRST_THINKING_COMMITTED,
+            )
+            "answer.delta" -> turnTrace.onRoomCommitted(
+                sessionId, turnId, TurnTraceStage.FIRST_ANSWER_COMMITTED,
+            )
+            "message.final", "turn.interrupted" -> turnTrace.onRoomCommitted(
+                sessionId, turnId, TurnTraceStage.TERMINAL_COMMITTED,
+            )
+            else -> Unit
+        }
     }
 
     private fun requestNextHistoryPage(envelope: WireEnvelope) {
@@ -2415,10 +2495,10 @@ class RealtimeSession(
         stops.restore(activeTurns, pendingStops)
     }
 
-    /** 用 canonical history 收束漏收 final 的本地活动 turn。 */
-    private suspend fun reconcileHistoryTurnTerminals(envelope: WireEnvelope) {
+    /** 用 canonical history 收束漏收 final 的本地活动 turn；返回被收敛的 turnId。 */
+    private suspend fun reconcileHistoryTurnTerminals(envelope: WireEnvelope): String? {
         val sessionId = requireNotNull(envelope.sessionId)
-        val activeTurnId = stops.activeTurnId(sessionId) ?: return
+        val activeTurnId = stops.activeTurnId(sessionId) ?: return null
         val history = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
         if (history.items.any { item ->
                 item.role == "assistant" &&
@@ -2426,7 +2506,9 @@ class RealtimeSession(
             }
         ) {
             stops.onTurnTerminal(sessionId, activeTurnId)
+            return activeTurnId
         }
+        return null
     }
 
     private suspend fun flushOutbox() {
@@ -2455,6 +2537,12 @@ class RealtimeSession(
             if (!socket.send(candidate, wire)) {
                 activeOutboxCommandId = null
                 deliveryStore.retryOutbox(command.commandId)
+            } else {
+                // 1. 只有写入 WebSocket 成功才算 dispatched；outbox 仅承载 message.send，session_id 必非空
+                turnTrace.onSocketDispatched(
+                    requireNotNull(stored.sessionId) { "Outbox 命令缺少 session_id" },
+                    command.commandId,
+                )
             }
             return
         }
@@ -2498,6 +2586,7 @@ class RealtimeSession(
         if (deviceRevoked) return
         reconnectJob?.cancel()
         resetGenerationState()
+        turnTrace.reset()
         val generation = socket.connectRace(
             qr.lanEndpoints.lanEndpoints(qr.tlsSpkiPins),
             qr.tunnelEndpoints.tunnelEndpoints(),
