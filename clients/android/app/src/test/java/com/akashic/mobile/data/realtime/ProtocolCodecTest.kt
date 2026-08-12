@@ -1,5 +1,6 @@
 package com.akashic.mobile.data.realtime
 
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
@@ -12,6 +13,47 @@ import org.junit.Test
 import okio.ByteString.Companion.toByteString
 
 class ProtocolCodecTest {
+    @Test
+    fun `decodes history attachment degradation without relaxing unknown keys`() {
+        val payload = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "items": [{
+                "id": "mobile:test:1",
+                "session_key": "mobile:test",
+                "seq": 1,
+                "role": "assistant",
+                "content": "正文仍然可用",
+                "extra": {},
+                "ts": "2026-08-12T05:00:00Z",
+                "attachments": [],
+                "attachment_error": {
+                  "code": "media_unavailable",
+                  "message": "附件源暂时不可用"
+                }
+              }],
+              "total": 1,
+              "page": 1,
+              "page_size": 50
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        val decoded = ProtocolCodec.decodePayload<HistoryPagePayload>(payload).items.single()
+
+        assertEquals("正文仍然可用", decoded.content)
+        assertEquals(emptyList<AttachmentDescriptor>(), decoded.attachments)
+        assertEquals("media_unavailable", decoded.attachmentError?.code)
+        assertEquals("附件源暂时不可用", decoded.attachmentError?.message)
+
+        val unknownPayload = ProtocolCodec.json().parseToJsonElement(
+            payload.toString().replace("attachment_error", "unexpected_attachment_error"),
+        ).jsonObject
+        assertThrows(SerializationException::class.java) {
+            ProtocolCodec.decodePayload<HistoryPagePayload>(unknownPayload)
+        }
+    }
+
     @Test
     fun `decodes shared v1 golden frames`() {
         val resource = requireNotNull(javaClass.getResource("/frames-v1.json"))

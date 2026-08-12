@@ -519,6 +519,12 @@ data class MessageContentRef(
 )
 
 @Serializable
+data class AttachmentAvailabilityError(
+    val code: String,
+    val message: String,
+)
+
+@Serializable
 data class RemoteHistoryMessage(
     val id: String,
     @SerialName("session_key") val sessionKey: String,
@@ -534,6 +540,7 @@ data class RemoteHistoryMessage(
     @SerialName("reply_role") val replyRole: String? = null,
     @SerialName("reply_preview") val replyPreview: String? = null,
     val attachments: List<AttachmentDescriptor> = emptyList(),
+    @SerialName("attachment_error") val attachmentError: AttachmentAvailabilityError? = null,
 )
 
 @Serializable
