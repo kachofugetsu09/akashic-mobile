@@ -107,6 +107,67 @@ class TurnProjectionObserverTest {
     }
 
     @Test
+    fun canonicalMessageIdKeepsTerminalProjectionBoundToActiveTurn() {
+        val observer = TurnProjectionObserver()
+        val clientMessageId = "client-a"
+        // 1. 流式临时消息建立 turn 与客户端发件身份的关联
+        active(
+            observer,
+            "mobile:test",
+            "turn-a",
+            streaming = true,
+            messages = listOf(
+                assistant(
+                    "assistant:turn-a",
+                    streaming = true,
+                    clientMessageId = clientMessageId,
+                ),
+            ),
+        )
+
+        // 2. terminal 投影已迁移到 canonical 消息 ID，active 尚未清空
+        val canonical = assistant(
+            "message:canonical",
+            streaming = false,
+            clientMessageId = clientMessageId,
+        )
+        val stillActive = observer.observe(listOf(canonical), "mobile:test", "turn-a")
+        assertEquals("message:canonical", stillActive.observed?.id)
+        assertFalse(stillActive.canStopFalse)
+
+        // 3. coordinator 清空 active 后仍定位同一 canonical 投影并触发一次闭包
+        val closed = observer.observe(listOf(canonical), "mobile:test", null)
+        assertEquals("turn-a", closed.targetTurnId)
+        assertEquals("message:canonical", closed.observed?.id)
+        assertTrue(closed.canStopFalse)
+        assertTrue(closed.composerReady)
+
+        val repeat = observer.observe(listOf(canonical), "mobile:test", null)
+        assertFalse(repeat.canStopFalse)
+        assertFalse(repeat.composerReady)
+    }
+
+    @Test
+    fun controlTurnIdClosesLegacyProjectionWithoutClientIdentity() {
+        val observer = TurnProjectionObserver()
+        val streaming = assistant(
+            "assistant:turn-legacy",
+            streaming = true,
+        ).copy(controlTurnId = "turn-legacy")
+        observer.observe(listOf(streaming), "mobile:test", "turn-legacy")
+
+        val canonical = streaming.copy(
+            id = "message:canonical",
+            status = AssistantTurnStatus.COMPLETE,
+        )
+        val closed = observer.observe(listOf(canonical), "mobile:test", null)
+
+        assertEquals("message:canonical", closed.observed?.id)
+        assertTrue(closed.canStopFalse)
+        assertTrue(closed.composerReady)
+    }
+
+    @Test
     fun replacedActiveTurnDoesNotPolluteClosureWithOldStreaming() {
         val observer = TurnProjectionObserver()
         // 1. 旧 turn 曾流式

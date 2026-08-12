@@ -131,6 +131,8 @@ data class MessageEntity(
     val replyToMessageId: String? = null,
     val replyRole: String? = null,
     val replyPreview: String? = null,
+    val turnClientMessageId: String? = null,
+    val controlTurnId: String? = null,
 )
 
 @Entity(

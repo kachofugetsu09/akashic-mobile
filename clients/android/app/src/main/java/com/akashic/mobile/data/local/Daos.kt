@@ -392,6 +392,18 @@ interface MessageDao {
     suspend fun clearClientMessageId(messageId: String): Int
 
     @Query(
+        "UPDATE messages SET turnClientMessageId = :clientMessageId " +
+            "WHERE messageId = :messageId AND turnClientMessageId IS NULL",
+    )
+    suspend fun bindTurnClientMessageId(messageId: String, clientMessageId: String): Int
+
+    @Query(
+        "UPDATE messages SET controlTurnId = :turnId " +
+            "WHERE messageId = :messageId AND controlTurnId IS NULL",
+    )
+    suspend fun bindControlTurnId(messageId: String, turnId: String): Int
+
+    @Query(
         """
         DELETE FROM messages
         WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)

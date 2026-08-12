@@ -715,7 +715,7 @@ class LocalDeliveryStore(
             }
             val canonical = MessageEntity(
                 messageId = messageId,
-                clientMessageId = remote.clientMessageId,
+                clientMessageId = remote.clientMessageId.takeIf { remote.role == "user" },
                 sessionId = sessionId,
                 role = remote.role,
                 text = remote.content ?: restoredContent ?: remote.contentRef!!.preview,
@@ -726,6 +726,8 @@ class LocalDeliveryStore(
                 replyToMessageId = remote.replyToMessageId,
                 replyRole = remote.replyRole,
                 replyPreview = remote.replyPreview,
+                turnClientMessageId = remote.clientMessageId.takeIf { remote.role == "assistant" },
+                controlTurnId = controlTurnId,
             )
             val proactive = remote.extra["proactive"]?.jsonPrimitive?.booleanOrNull == true
             val deliveryId = remote.extra["delivery_id"]?.jsonPrimitive?.contentOrNull
@@ -752,7 +754,7 @@ class LocalDeliveryStore(
                 ) { "Canonical message identity belongs to another message" }
                 null
             } else {
-                remote.clientMessageId?.let {
+                remote.clientMessageId?.takeIf { remote.role == "user" }?.let {
                     database.messages().getByClientMessageId(it)?.messageId
                 }
                     ?: deliveryId?.let(::proactiveMessageId)
@@ -762,7 +764,42 @@ class LocalDeliveryStore(
                         null
                     }
             }
-            mergeCanonicalMessage(sourceId, canonical)
+            val canonicalWithTurnIdentity = if (
+                remote.role == "assistant" &&
+                (canonical.turnClientMessageId == null || canonical.controlTurnId == null)
+            ) {
+                val activeTurn = activeTurnSourceId?.let { database.messages().get(it) }
+                canonical.copy(
+                    turnClientMessageId = canonical.turnClientMessageId
+                        ?: activeTurn?.turnClientMessageId
+                        ?: existingCanonical?.turnClientMessageId,
+                    controlTurnId = canonical.controlTurnId
+                        ?: activeTurn?.controlTurnId
+                        ?: existingCanonical?.controlTurnId,
+                )
+            } else {
+                canonical
+            }
+            if (activeTurnSourceId != null) {
+                val source = requireNotNull(database.messages().get(activeTurnSourceId))
+                if (source.turnClientMessageId == null && canonicalWithTurnIdentity.turnClientMessageId != null) {
+                    check(
+                        database.messages().bindTurnClientMessageId(
+                            activeTurnSourceId,
+                            canonicalWithTurnIdentity.turnClientMessageId,
+                        ) == 1,
+                    ) { "History turn client id 补写失败: $controlTurnId" }
+                }
+                if (source.controlTurnId == null && canonicalWithTurnIdentity.controlTurnId != null) {
+                    check(
+                        database.messages().bindControlTurnId(
+                            activeTurnSourceId,
+                            canonicalWithTurnIdentity.controlTurnId,
+                        ) == 1,
+                    ) { "History control turn id 补写失败: $controlTurnId" }
+                }
+            }
+            mergeCanonicalMessage(sourceId, canonicalWithTurnIdentity)
             reconcileMessageContentTransfer(
                 serverId = serverId,
                 sessionId = sessionId,
@@ -986,21 +1023,39 @@ class LocalDeliveryStore(
     private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
         val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
         val turnId = requireNotNull(envelope.turnId) { "Turn event has no turn_id" }
-        // 1. 仅 turn.started 拥有并绑定 client_message_id；后续事件缺字段时保留既有绑定
-        val isTurnStarted = envelope.type == "turn.started"
+        // 1. 显式 client_message_id 绑定 turn 关联列；用户 outbox 身份继续独占 clientMessageId
         val payloadClientMessageId = payloadText(envelope, "client_message_id")
         payloadClientMessageId?.let(::requireFrameId)
-        val clientMessageId = if (isTurnStarted) payloadClientMessageId else null
         val messageId = "assistant:$turnId"
         val existing = database.messages().get(messageId)
         if (existing != null) {
-            // 2. turn.started 重放或后续事件意外携带非空 cmid 时校验一致
-            if (isTurnStarted || payloadClientMessageId != null) {
-                require(existing.clientMessageId == payloadClientMessageId) {
+            // 2. 旧版 streaming 投影没有 turn 关联列；权威事件可补写一次，非空变化 fail-loud
+            if (existing.controlTurnId == null) {
+                check(database.messages().bindControlTurnId(messageId, turnId) == 1) {
+                    "Control turn id 补写失败: $turnId"
+                }
+            } else {
+                require(existing.controlTurnId == turnId) {
+                    "Control turn id 在重放中变化: $turnId"
+                }
+            }
+            if (payloadClientMessageId != null && existing.turnClientMessageId == null) {
+                check(database.messages().bindTurnClientMessageId(messageId, payloadClientMessageId) == 1) {
+                    "Turn client_message_id 补写失败: $turnId"
+                }
+            }
+            if (payloadClientMessageId != null) {
+                require(
+                    existing.turnClientMessageId == null ||
+                        existing.turnClientMessageId == payloadClientMessageId,
+                ) {
                     "Turn client_message_id 在重放中变化: $turnId"
                 }
             }
-            return existing
+            return existing.copy(
+                turnClientMessageId = payloadClientMessageId ?: existing.turnClientMessageId,
+                controlTurnId = turnId,
+            )
         }
         val active = database.messages().activeAssistantTurn(sessionId)
         if (active != null) {
@@ -1010,13 +1065,15 @@ class LocalDeliveryStore(
         }
         val message = MessageEntity(
             messageId = messageId,
-            clientMessageId = clientMessageId,
+            clientMessageId = null,
             sessionId = sessionId,
             role = "assistant",
             text = "",
             deliveryState = "streaming",
             createdAt = updatedAt,
             updatedAt = updatedAt,
+            turnClientMessageId = payloadClientMessageId,
+            controlTurnId = turnId,
         )
         database.messages().upsert(message)
         return message
@@ -1224,6 +1281,16 @@ class LocalDeliveryStore(
             require(
                 existingCanonical.sessionId == canonical.sessionId && existingCanonical.role == canonical.role
             ) { "Canonical message identity belongs to another message" }
+            if (canonical.turnClientMessageId != null && existingCanonical.turnClientMessageId != null) {
+                require(existingCanonical.turnClientMessageId == canonical.turnClientMessageId) {
+                    "Canonical turn client id mismatch"
+                }
+            }
+            if (canonical.controlTurnId != null && existingCanonical.controlTurnId != null) {
+                require(existingCanonical.controlTurnId == canonical.controlTurnId) {
+                    "Canonical control turn id mismatch"
+                }
+            }
         }
         val source = sourceId?.let { messages.get(it) }
         if (sourceId == null || sourceId == canonical.messageId || source == null) {
@@ -1235,6 +1302,16 @@ class LocalDeliveryStore(
         }
         if (canonical.clientMessageId != null) {
             require(source.clientMessageId == canonical.clientMessageId) { "Optimistic client id mismatch" }
+        }
+        if (canonical.turnClientMessageId != null) {
+            require(source.turnClientMessageId == canonical.turnClientMessageId) {
+                "Streaming turn client id mismatch"
+            }
+        }
+        if (canonical.controlTurnId != null) {
+            require(source.controlTurnId == canonical.controlTurnId) {
+                "Streaming control turn id mismatch"
+            }
         }
 
         // 1. 清理已同步 canonical 子项，并释放 optimistic client id 唯一约束

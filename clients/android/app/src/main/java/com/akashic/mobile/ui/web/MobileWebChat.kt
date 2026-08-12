@@ -2261,7 +2261,7 @@ private fun WebView.pushSharedTextDraft(draft: MobileSharedTextDraft) {
     )
 }
 
-private const val ASSISTANT_TURN_PREFIX = "assistant:"
+internal const val ASSISTANT_TURN_PREFIX = "assistant:"
 
 private class MobileSnapshotPump(
     private val webView: WebView,
@@ -2290,6 +2290,9 @@ private class MobileSnapshotPump(
                 val statePatch = deliveredState
                     ?.takeUnless { forceSnapshot || streamPatch != null }
                     ?.let(latest::toMobileWebStatePatch)
+                val terminalTransition = deliveredState
+                    ?.takeIf { streamPatch == null }
+                    ?.let(latest::terminalTransitionFrom)
                 val payload = when {
                     streamPatch != null -> json.encodeToString(streamPatch)
                     statePatch != null -> json.encodeToString(statePatch)
@@ -2310,6 +2313,7 @@ private class MobileSnapshotPump(
                             if (deliveredState == null) onFirstSnapshot()
                         }
                     }
+                    terminalTransition?.let(::traceTerminalTransition)
                 }
                 deliveredState = latest
             }
@@ -2332,6 +2336,17 @@ private class MobileSnapshotPump(
             thinkingDelta = patch.thinkingAppend != null,
             answerDelta = patch.contentAppend != null,
             terminal = patch.message?.streaming == false,
+        )
+    }
+
+    private fun traceTerminalTransition(transition: MobileWebTerminalTransition) {
+        turnTrace?.onWebViewPatch(
+            sessionId = transition.sessionId,
+            turnId = transition.turnId,
+            clientMessageId = transition.clientMessageId,
+            thinkingDelta = false,
+            answerDelta = false,
+            terminal = true,
         )
     }
 

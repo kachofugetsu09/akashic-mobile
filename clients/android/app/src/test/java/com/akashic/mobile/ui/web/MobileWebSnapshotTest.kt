@@ -302,6 +302,89 @@ class MobileWebSnapshotTest {
     }
 
     @Test
+    fun fullSnapshotStillIdentifiesCanonicalTerminalTransition() {
+        val clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val user = MessageUi.User(
+            id = "user:$clientMessageId",
+            sessionId = "mobile:test",
+            text = "问题",
+            deliveryLabel = "已发送",
+            replyable = true,
+            createdAtMillis = 900,
+            reply = null,
+            clientMessageId = clientMessageId,
+        )
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "回答",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+            clientMessageId = clientMessageId,
+            controlTurnId = "turn-1",
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 9,
+            messages = listOf(user, streaming),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = listOf(
+                user.copy(id = "message:user:canonical", deliveryLabel = "已完成"),
+                streaming.copy(
+                    id = "message:assistant:canonical",
+                    status = AssistantTurnStatus.COMPLETE,
+                ),
+            ),
+            isStreaming = false,
+        )
+
+        assertEquals(null, after.toMobileWebStreamPatch(before))
+        assertEquals(
+            MobileWebTerminalTransition("mobile:test", "turn-1", clientMessageId),
+            after.terminalTransitionFrom(before),
+        )
+    }
+
+    @Test
+    fun controlTurnIdIdentifiesLegacyTerminalWithoutClientIdentity() {
+        val streaming = MessageUi.AssistantTurn(
+            id = "assistant:turn-legacy",
+            sessionId = "mobile:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "回答",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+        )
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            messages = listOf(streaming),
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = listOf(
+                streaming.copy(
+                    id = "message:canonical",
+                    status = AssistantTurnStatus.COMPLETE,
+                    controlTurnId = "turn-legacy",
+                ),
+            ),
+            isStreaming = false,
+        )
+
+        assertEquals(
+            MobileWebTerminalTransition("mobile:test", "turn-legacy", null),
+            after.terminalTransitionFrom(before),
+        )
+    }
+
+    @Test
     fun controlStatePatchDoesNotSerializeUnchangedConversationHistory() {
         val history = List(400) { index ->
             MessageUi.User(

@@ -36,7 +36,7 @@
 |---|---|---|
 | `App.kt` / `AppContainer` | 组装数据库、文件 store、密钥和 realtime | 移动端 |
 | `RealtimeSession` | 配对、连接、同步、投递、附件、插件 UI 与 WebUI Resolve/Ensure 的 WebSocket/HTTPS 协调 | 移动端消费协议；核心拥有远端事实与 WebUI 选择 |
-| `AppDatabase` | Room v13 schema 与迁移；v13 只增加 WebUI 派生 metadata 表 | 移动端 |
+| `AppDatabase` | Room v15 schema 与迁移；v13 增加 WebUI 派生 metadata，v14/v15 分离 user/outbox、assistant client 和 control turn 身份 | 移动端 |
 | `MobileConnectionService` | 后台连接和持久通知消费 | 移动端 |
 | `protocol/mobile-realtime-v1.json` | 客户端历史协议快照 | 核心 schema 是真源 |
 | `runtime-gate/` | 固定核心组合并验证跨仓库语义 | 移动端维护消费者契约；核心提供 provider 测试 |

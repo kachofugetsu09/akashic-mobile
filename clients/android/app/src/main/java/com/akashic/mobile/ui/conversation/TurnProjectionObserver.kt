@@ -19,6 +19,7 @@ internal data class TurnObservationResult(
  */
 internal class TurnProjectionObserver {
     private val pendingClosedTurnBySession = mutableMapOf<String, String>()
+    private val pendingClosedClientMessageBySession = mutableMapOf<String, String>()
     // 每会话记录"见过 streaming"的 turn；active 换新 turn 后旧 turn 的边沿不污染闭包
     private val sawStreamingTurnBySession = mutableMapOf<String, String>()
 
@@ -32,13 +33,21 @@ internal class TurnProjectionObserver {
         var closedTurnId: String? = null
         if (sessionId != null) {
             if (activeTurnId != null) {
-                pendingClosedTurnBySession[sessionId] = activeTurnId
+                val previousTurnId = pendingClosedTurnBySession.put(sessionId, activeTurnId)
+                if (previousTurnId != activeTurnId) {
+                    pendingClosedClientMessageBySession.remove(sessionId)
+                }
             } else {
                 closedTurnId = pendingClosedTurnBySession[sessionId]
             }
         }
         val targetTurnId = activeTurnId ?: closedTurnId
         val observed = targetTurnId?.let { assistantTurnFromTail(messages, it) }
+            ?: sessionId?.let { pendingClosedClientMessageBySession[it] }
+                ?.let { assistantTurnByClientMessageFromTail(messages, it) }
+        if (sessionId != null && activeTurnId != null && observed?.clientMessageId != null) {
+            pendingClosedClientMessageBySession[sessionId] = observed.clientMessageId
+        }
         val streaming = observed?.isStreaming ?: false
         // 2. streaming 边沿按 turn 记录：active 仍非空时投影终态也不删除 sawStreaming，
         //    换新 turn 后旧 turn 的 streaming 不再对闭包生效
@@ -50,6 +59,7 @@ internal class TurnProjectionObserver {
         val composerReady = terminalProjected && previousStreaming
         if (terminalProjected) {
             sessionId?.let(pendingClosedTurnBySession::remove)
+            sessionId?.let(pendingClosedClientMessageBySession::remove)
             if (sessionId != null) sawStreamingTurnBySession.remove(sessionId)
         } else if (streaming && sessionId != null) {
             targetTurnId?.let { sawStreamingTurnBySession[sessionId] = it }
@@ -68,8 +78,20 @@ internal class TurnProjectionObserver {
 
 /** 从列表尾部定位指定 turn 的 assistant 投影，避免全历史扫描。 */
 internal fun assistantTurnFromTail(messages: List<MessageUi>, turnId: String): MessageUi.AssistantTurn? =
-    messages.lastOrNull { it is MessageUi.AssistantTurn && it.id == "$ASSISTANT_TURN_PREFIX$turnId" }
+    messages.lastOrNull {
+        it is MessageUi.AssistantTurn &&
+            (it.controlTurnId == turnId || it.id == "$ASSISTANT_TURN_PREFIX$turnId")
+    }
         as? MessageUi.AssistantTurn
+
+/** canonical 消息 ID 替换临时 turn ID 后，按同一客户端发件身份定位投影。 */
+internal fun assistantTurnByClientMessageFromTail(
+    messages: List<MessageUi>,
+    clientMessageId: String,
+): MessageUi.AssistantTurn? =
+    messages.lastOrNull {
+        it is MessageUi.AssistantTurn && it.clientMessageId == clientMessageId
+    } as? MessageUi.AssistantTurn
 
 /** 空 thinking 块没有可见首字。 */
 internal fun hasVisibleThinking(blocks: List<ProcessBlockUi>): Boolean =

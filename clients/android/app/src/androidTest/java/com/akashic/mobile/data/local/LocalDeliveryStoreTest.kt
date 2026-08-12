@@ -78,7 +78,9 @@ class LocalDeliveryStoreTest {
         val message = database.messages().get("assistant:turn")
         assertNotNull(message)
         assertEquals("mobile:test", message!!.sessionId)
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message.clientMessageId)
+        assertEquals(null, message.clientMessageId)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message.turnClientMessageId)
+        assertEquals("turn", message.controlTurnId)
 
         // 同一三元组重放幂等
         store.applyEvent(
@@ -87,7 +89,40 @@ class LocalDeliveryStoreTest {
             event(2, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }),
             3,
         )
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", database.messages().get("assistant:turn")!!.clientMessageId)
+        assertEquals(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            database.messages().get("assistant:turn")!!.turnClientMessageId,
+        )
+    }
+
+    @Test
+    fun turnStartedKeepsUserOutboxIdentityUniqueFromTurnCorrelation() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "user:$clientId",
+                clientMessageId = clientId,
+                sessionId = "mobile:test",
+                role = "user",
+                text = "本地问题",
+                deliveryState = "sent",
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject { put("client_message_id", clientId) }),
+            2,
+        )
+
+        assertEquals(clientId, database.messages().get("user:$clientId")!!.clientMessageId)
+        val assistant = database.messages().get("assistant:turn")!!
+        assertEquals(null, assistant.clientMessageId)
+        assertEquals(clientId, assistant.turnClientMessageId)
+        assertEquals("turn", assistant.controlTurnId)
     }
 
     @Test
@@ -102,6 +137,7 @@ class LocalDeliveryStoreTest {
                 )
             }
         }
+        Unit
     }
 
     @Test
@@ -122,6 +158,7 @@ class LocalDeliveryStoreTest {
                 )
             }
         }
+        Unit
     }
 
     /** 完整 turn 流水线：turn.started 绑定 cmid 后，后续 delta/final 不带 cmid 也必须保留绑定。 */
@@ -172,10 +209,51 @@ class LocalDeliveryStoreTest {
 
         val message = database.messages().get("mobile:test:flow:final")
         assertNotNull(message)
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message!!.clientMessageId)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message!!.turnClientMessageId)
         assertEquals("complete", message.deliveryState)
         assertEquals("最终回答", message.text)
         assertEquals("分析", database.messages().getBlock("think-1")!!.content)
+    }
+
+    @Test
+    fun terminalReplayRepairsLegacyStreamingTurnWithoutClientCorrelation() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "assistant:legacy-turn",
+                clientMessageId = null,
+                sessionId = "mobile:test",
+                role = "assistant",
+                text = "旧流式正文",
+                deliveryState = "streaming",
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "message.final",
+                buildJsonObject {
+                    put("client_message_id", clientId)
+                    put("user_message_id", "mobile:test:legacy:user")
+                    put("message_id", "mobile:test:legacy:canonical")
+                    put("content", "最终正文")
+                },
+                turnId = "legacy-turn",
+            ),
+            2,
+        )
+
+        assertEquals(null, database.messages().get("assistant:legacy-turn"))
+        val canonical = database.messages().get("mobile:test:legacy:canonical")!!
+        assertEquals(null, canonical.clientMessageId)
+        assertEquals(clientId, canonical.turnClientMessageId)
+        assertEquals("legacy-turn", canonical.controlTurnId)
+        assertEquals("complete", canonical.deliveryState)
     }
 
     /** 后续事件意外携带非空 cmid 时校验与既有绑定一致，不一致 fail-loud。 */
@@ -205,6 +283,7 @@ class LocalDeliveryStoreTest {
                 )
             }
         }
+        Unit
     }
 
     /** 后续事件携带与既有绑定一致的 cmid 时正常通过。 */
@@ -262,7 +341,15 @@ class LocalDeliveryStoreTest {
         store.applyEvent(
             "server",
             "device",
-            event(2, "react.thinking.delta", buildJsonObject { put("delta", "正在分析") }),
+            event(
+                2,
+                "react.thinking.delta",
+                buildJsonObject {
+                    put("block_id", "thinking:turn:0")
+                    put("ordinal", 0)
+                    put("delta", "正在分析")
+                },
+            ),
             8,
         )
         // 3. 投影进度只数带 seq 的行；远端已提交 user+assistant（8 条）时计数必然不等
@@ -2220,10 +2307,30 @@ class LocalDeliveryStoreTest {
     @Test
     fun canonicalHistoryReplacesCompletedTurnWhoseFinalEventWasLost() = runBlocking {
         store.applyEvent("server", "device", event(1, "turn.started", buildJsonObject {}), 2)
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "user:history-owner",
+                clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+                sessionId = "mobile:test",
+                role = "user",
+                text = "问题",
+                deliveryState = "sent",
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
         store.applyEvent(
             "server",
             "device",
-            event(2, "react.thinking.delta", buildJsonObject { put("delta", "正在分析") }),
+            event(
+                2,
+                "react.thinking.delta",
+                buildJsonObject {
+                    put("block_id", "thinking:turn:0")
+                    put("ordinal", 0)
+                    put("delta", "正在分析")
+                },
+            ),
             3,
         )
 
@@ -2240,6 +2347,7 @@ class LocalDeliveryStoreTest {
                         put("session_key", "mobile:test")
                         put("seq", 1)
                         put("role", "assistant")
+                        put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
                         put("content", "最终回答")
                         put("extra", buildJsonObject { put("control_turn_id", "turn") })
                         put("ts", "2026-07-14T16:00:05Z")
@@ -2254,6 +2362,12 @@ class LocalDeliveryStoreTest {
         assertNotNull(canonical)
         assertEquals("complete", canonical!!.deliveryState)
         assertEquals("最终回答", canonical.text)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", canonical.turnClientMessageId)
+        assertEquals("turn", canonical.controlTurnId)
+        assertEquals(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            database.messages().get("user:history-owner")?.clientMessageId,
+        )
         assertTrue(database.messages().getBlocks(canonical.messageId).all { it.status == "completed" })
         assertTrue(database.messages().activeAssistantTurns("server").isEmpty())
     }

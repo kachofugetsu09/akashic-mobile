@@ -986,7 +986,8 @@ class MainViewModel(
             reply = message.toReplyUi(),
             attachments = graph.attachmentLinks.toMessageAttachmentUi(),
             updatedAtMillis = message.updatedAt,
-            clientMessageId = message.clientMessageId,
+            clientMessageId = message.turnClientMessageId,
+            controlTurnId = message.controlTurnId,
         )
     }
 

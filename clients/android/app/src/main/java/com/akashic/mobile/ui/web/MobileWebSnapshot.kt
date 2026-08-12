@@ -527,6 +527,47 @@ fun ConversationUiState.toMobileWebStreamPatch(
     }
 }
 
+internal data class MobileWebTerminalTransition(
+    val sessionId: String,
+    val turnId: String,
+    val clientMessageId: String?,
+)
+
+/** 完整 snapshot 同时迁移 user/assistant identity 时，保留终态跨桥观测。 */
+internal fun ConversationUiState.terminalTransitionFrom(
+    previous: ConversationUiState,
+): MobileWebTerminalTransition? {
+    // 1. 从同一会话的旧投影定位仍在流式的权威 turn
+    if (selectedSessionId == null || selectedSessionId != previous.selectedSessionId) return null
+    val before = previous.messages.asReversed().filterIsInstance<MessageUi.AssistantTurn>()
+        .firstOrNull {
+            it.isStreaming &&
+                (it.controlTurnId != null || it.id.startsWith(ASSISTANT_TURN_PREFIX))
+        }
+        ?: return null
+    val beforeTurnId = before.controlTurnId ?: before.id.removePrefix(ASSISTANT_TURN_PREFIX)
+
+    // 2. canonical ID 可变；权威 turn id 优先，客户端发件身份兼容旧投影
+    val after = messages.asReversed().filterIsInstance<MessageUi.AssistantTurn>()
+        .firstOrNull {
+            !it.isStreaming && it.sessionId == before.sessionId && (
+                if (it.controlTurnId != null) {
+                    it.controlTurnId == beforeTurnId
+                } else if (before.clientMessageId != null) {
+                    it.clientMessageId == before.clientMessageId
+                } else {
+                    it.id == before.id
+                }
+                )
+        }
+        ?: return null
+    return MobileWebTerminalTransition(
+        sessionId = before.sessionId,
+        turnId = beforeTurnId,
+        clientMessageId = after.clientMessageId ?: before.clientMessageId,
+    )
+}
+
 private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
     if (this !is MessageUi.AssistantTurn || previous !is MessageUi.AssistantTurn) return false
     if (

@@ -18,7 +18,7 @@
 | 接收附件 | `filesDir/received-attachments` + Room | 可驱逐消费者缓存 | 移动端 | 是，远端仍存在时 |
 | 历史正文续传 | `filesDir/message-content` + Room | 可重建传输状态 | 移动端 | 是，来自核心 SessionDB |
 | 插件 UI 资源 | `filesDir/plugin-ui-cache/*` | 派生消费者缓存 | 核心能力、移动端缓存 owner | 是 |
-| 服务端 WebUI OTA | Room v13 专属 metadata + `filesDir/mobile-web-ui/<sha256(server_id)>/` | 身份隔离的派生 UI 缓存与激活证据 | Core 发布选择、移动端 Store/Present owner | 是；embedded baseline 独立保留 |
+| 服务端 WebUI OTA | Room v15 专属 metadata + `filesDir/mobile-web-ui/<sha256(server_id)>/` | 身份隔离的派生 UI 缓存与激活证据 | Core 发布选择、移动端 Store/Present owner | 是；embedded baseline 独立保留 |
 | 当前选择和 UI 设置 | Preferences DataStore | 可变本地设置 | 移动端 | 否；可重置但不代表事实删除 |
 | 设备私钥 | Android Keystore | 本地身份秘密 | 操作系统/移动端 | 否 |
 | 文本分享临时文件 | `cacheDir/shared-text` | 临时控制文件 | 移动端 | 无需重建 |
@@ -37,7 +37,7 @@
 ### Room 服务端投影
 
 - 增加：配对后的目录、历史和 realtime 事件 upsert 会话、消息、turn 和附件元数据。
-- 更新：delivery、stream、read position、cursor 和下载状态按各 DAO 状态机更新。`LocalDeliveryStore` 在同一事务中拥有“每个会话至多一个 streaming assistant turn”不变量；重叠 `turn.started` 在写消息和推进 cursor 前失败。
+- 更新：delivery、stream、read position、cursor 和下载状态按各 DAO 状态机更新。用户/outbox 的 `clientMessageId` 与 assistant turn 的 `turnClientMessageId`、`controlTurnId` 分列保存，前者继续拥有唯一索引；`LocalDeliveryStore` 在同一事务中拥有“每个会话至多一个 streaming assistant turn”不变量；重叠 `turn.started` 在写消息和推进 cursor 前失败。v13→v14 只把 assistant 的旧 `clientMessageId` 移到 `turnClientMessageId` 并清空原列，用户/outbox 身份不变；v14→v15 只为 `assistant:<turnId>` streaming 临时行回填 `controlTurnId`，不改正文或终态。
 - 逻辑失效：附件缓存以 `evicted` 表达文件不可用；消息投递使用明确状态，不用缺行伪装终态。v10→v11 迁移只把同一会话中较旧的重复 streaming 临时消息更新为 `interrupted`，同步结束其 running blocks，并保留最新活动投影、消息正文和全部 turn blocks。
 - 物理删除：`reloadFromServer` 只允许清理可重载投影，并通过查询保护带本地工作的消息和会话。
 - 恢复：从固定核心协议重新同步；正常重连可从本地连续 `serverSeq` 投影的首个不完整页续传，投影完整时不重放；投影不连续、数量异常或核心要求 reset 时从第一页重建。失败必须暴露，不能用空列表冒充成功。
@@ -66,9 +66,9 @@
 
 ### 服务端发布的 WebUI 派生缓存
 
-- 对象：Room v13 的 `mobile_webui_state`、`mobile_webui_generations`、`mobile_webui_blobs`、`mobile_webui_rejects`，`filesDir/mobile-web-ui/<sha256(server_id)>/` 下的 manifest、content-addressed blobs、verified generation 与 partial，以及缓存根下的 `<hash>.reset.json`、`<hash>.reset.json.tmp`、`<hash>.reset-trash` 三类 reset journal 路径。embedded baseline 仍位于 APK assets，不进入这些表或目录；`WaitFor(space)` 是 coordinator 持有的进程内协调事实，不是 Room 行。
+- 对象：Room v15 的 `mobile_webui_state`、`mobile_webui_generations`、`mobile_webui_blobs`、`mobile_webui_rejects`，`filesDir/mobile-web-ui/<sha256(server_id)>/` 下的 manifest、content-addressed blobs、verified generation 与 partial，以及缓存根下的 `<hash>.reset.json`、`<hash>.reset.json.tmp`、`<hash>.reset-trash` 三类 reset journal 路径。embedded baseline 仍位于 APK assets，不进入这些表或目录；`WaitFor(space)` 是 coordinator 持有的进程内协调事实，不是 Room 行。
 - 增加：成功的已认证 Resolve 只写 desired metadata；Ensure 先在同 server staging/partial 写入，完成 schema、路径、MIME、大小、canonical bytes 与逐项 SHA-256 校验后，才增加 verified generation/blob metadata；Present 在加载 candidate 前持久化 generation+nonce attempt。
-- 更新：每个 server 的 desired、serving、fallback、attempt、reject、访问时间和下载确认偏移由对应 Resolve/Ensure/Present/Store owner 原位推进；同 Target 的进程内 wait 由 coordinator 更新。schema v12→v13 只创建 WebUI 表/索引，既有业务表及其行不在 migration write set；baseline schema 1 与远端 manifest schema 2 由不同 parser 拥有。
+- 更新：每个 server 的 desired、serving、fallback、attempt、reject、访问时间和下载确认偏移由对应 Resolve/Ensure/Present/Store owner 原位推进；同 Target 的进程内 wait 由 coordinator 更新。schema v12→v13 只创建 WebUI 表/索引；v13→v15 的 turn identity 分列迁移不改变 WebUI 表及文件；baseline schema 1 与远端 manifest schema 2 由不同 parser 拥有。
 - 逻辑失效：新 ReleaseView 令旧 desired 失效；健康提交替换 attempt；TargetKey 或 native/WebView compatibility fingerprint 改变，或用户对当前 Target 明确手动重试，才可解除对应 reject。同 Target 的 `WaitFor(space)` 不因前台、重连或普通 hint 失效；只有 Target 变化、显式清理、用户明确重试、reset 或 revoke 清除。两个远端指针均为空时 desired=baseline，旧 serving 不因此成为新 desired。
 - 物理删除：安全 GC 只删除未被 serving、fallback、当前 ready desired、attempting 或当前下载 owner pin 的派生对象；已不属于任何 `server_profiles.serverId`、没有 WebUI metadata 且没有同 hash reset journal 的 64 位十六进制 server root，才可作为已删除 profile 的派生 orphan 先物理删除。未知目录或无法证明 owner 的文件保留并计入全局预算。所有引用减少都必须发生在物理删除成功之后，失败时保留 owner 并 fail-loud。“重置此服务端 UI 缓存”先取消并等待该 server owner，持久化 `<hash>.reset.json`，再把 live root 原子移到 `<hash>.reset-trash` 并完成物理删除，最后事务写 baseline 与 `manual_reset` reject。marker rename、live→trash、trash 删除和 marker 删除都必须同步缓存根目录项；同步失败保留 journal/Room owner 并 fail-loud。重置立即回到 embedded baseline，不自动重下同一 Target；只有用户随后对当前服务端 Target 执行“重新检查”才解除 `manual_reset`。不得触及 embedded baseline、其他 server、消息、outbox、草稿、阅读位置、附件、配对、Keystore、插件 cache 或待安装 APK。
 - 恢复：启动先关闭对应 server 的进程 presentation，再严格校验 `.reset.json` 中的 server/Target/fingerprint 并重放未完成 reset；只剩 journal 删除失败时状态为“重置已提交、清理待完成”，不能伪装成完整失败或再次删除业务状态。其余路径只删除可证明未提交的 `.tmp`/orphan，验证 Room identity、manifest 与全部 member hash；遗留 attempt 回到 verified fallback/baseline，并拒绝相同 TargetKey+compatibility fingerprint。无法证明完整的 generation 绝不成为 ready/serving，只能从当前已认证 Core 重新 Ensure。
