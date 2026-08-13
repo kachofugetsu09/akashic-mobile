@@ -120,6 +120,10 @@ HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system t
 
 WebUI `ReleaseView`、Target、manifest、短期 ticket 和 HTTPS 资源协议以 Core schema 为唯一真源。本仓库必须固定 source repository、完整 commit/tree、schema path/hash 和实际 provider runtime；不得用 Kotlin 类型、设计文档、浮动分支或本机 checkout 反向定义协议。`release.changed` 只触发新的已认证 Resolve，客户端不得把 hint、sequence、时间或 semver 当作可下载 target 或新旧排序依据。
 
+### MOB-XREPO-005 Turn 与 Attempt 身份分别校验
+
+`Turn` 是用户可理解的逻辑工作单元，`Attempt` 是其内部一次可中断、可重放的执行。Mobile 实时事件的 `turn_id` 标识 Attempt，`control_turn_id` 标识逻辑 Turn；客户端必须用 Attempt 维持流式生命周期，用逻辑 Turn 与 canonical history 合并，不得要求跨 Attempt 的两个身份相等，也不得在任一身份内部接受漂移。缺少 `control_turn_id` 的旧协议事件继续把 `turn_id` 作为逻辑身份兼容。
+
 ## 7. 仓库与安全边界
 
 ### MOB-REPO-001 移动端仓库可独立构建

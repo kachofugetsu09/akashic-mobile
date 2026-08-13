@@ -216,6 +216,119 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun continuedAttemptFinalMergesIntoCanonicalLogicalTurn() = runBlocking {
+        val logicalTurnId = "turn:logical"
+        val attemptId = "turn:attempt-3"
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject {
+                    put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                    put("control_turn_id", logicalTurnId)
+                },
+                turnId = attemptId,
+            ),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "message.final",
+                buildJsonObject {
+                    put("message_id", "mobile:test:logical:final")
+                    put("content", "最终回答")
+                    put("control_turn_id", logicalTurnId)
+                },
+                turnId = attemptId,
+            ),
+            3,
+        )
+
+        assertEquals(null, database.messages().get("assistant:$attemptId"))
+        val canonical = database.messages().get("mobile:test:logical:final")!!
+        assertEquals(logicalTurnId, canonical.controlTurnId)
+        assertEquals("最终回答", canonical.text)
+    }
+
+    @Test
+    fun historyRecoversContinuedAttemptWhenFinalWasMissed() = runBlocking {
+        val logicalTurnId = "turn:logical-history"
+        val attemptId = "turn:attempt-history-2"
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject {
+                    put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                    put("control_turn_id", logicalTurnId)
+                },
+                turnId = attemptId,
+            ),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "react.thinking.delta",
+                buildJsonObject {
+                    put("block_id", "thinking:$attemptId:0")
+                    put("ordinal", 0)
+                    put("delta", "分析")
+                },
+                turnId = attemptId,
+            ),
+            3,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                3,
+                "history.page",
+                buildJsonObject {
+                    put("total", 1)
+                    put("page", 1)
+                    put("page_size", 10)
+                    put("items", buildJsonArray {
+                        add(buildJsonObject {
+                            put("id", "mobile:test:logical:history")
+                            put("session_key", "mobile:test")
+                            put("seq", 1)
+                            put("role", "assistant")
+                            put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                            put("content", "历史最终回答")
+                            put("extra", buildJsonObject {
+                                put("control_turn_id", logicalTurnId)
+                            })
+                            put("ts", "2026-08-13T01:00:00Z")
+                        })
+                    })
+                },
+            ),
+            4,
+        )
+
+        assertEquals(null, database.messages().get("assistant:$attemptId"))
+        val canonical = database.messages().get("mobile:test:logical:history")!!
+        assertEquals(logicalTurnId, canonical.controlTurnId)
+        assertEquals("历史最终回答", canonical.text)
+        assertEquals(
+            canonical.messageId,
+            database.messages().getBlock("thinking:$attemptId:0")!!.messageId,
+        )
+        assertTrue(database.messages().activeAssistantTurns("server").isEmpty())
+    }
+
+    @Test
     fun terminalReplayRepairsLegacyStreamingTurnWithoutClientCorrelation() = runBlocking {
         val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         database.messages().upsert(

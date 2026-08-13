@@ -736,15 +736,22 @@ class LocalDeliveryStore(
                     "Proactive delivery id belongs to a non-proactive history message"
                 }
             }
-            val activeTurnSourceId = controlTurnId
-                ?.let { turnId -> "assistant:$turnId" }
-                ?.takeIf { sourceId ->
-                    database.messages().get(sourceId)?.let { source ->
-                        source.sessionId == sessionId &&
-                            source.role == "assistant" &&
-                            source.deliveryState == "streaming"
-                    } == true
+            val activeTurnSourceId = controlTurnId?.let { logicalTurnId ->
+                val exactSourceId = "assistant:$logicalTurnId"
+                val exactSource = database.messages().get(exactSourceId)
+                if (
+                    exactSource?.sessionId == sessionId &&
+                    exactSource.role == "assistant" &&
+                    exactSource.deliveryState == "streaming"
+                ) {
+                    exactSourceId
+                } else {
+                    val activeTurns = database.messages().activeAssistantTurnsForSession(sessionId)
+                    activeTurns.singleOrNull()
+                        ?.takeIf { active -> active.controlTurnId == logicalTurnId }
+                        ?.messageId
                 }
+            }
             val sourceId = if (activeTurnSourceId != null) {
                 activeTurnSourceId
             } else if (existingCanonical != null) {
@@ -1023,6 +1030,8 @@ class LocalDeliveryStore(
     private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
         val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
         val turnId = requireNotNull(envelope.turnId) { "Turn event has no turn_id" }
+        val controlTurnId = payloadText(envelope, "control_turn_id") ?: turnId
+        requireControlTurnId(controlTurnId)
         // 1. 显式 client_message_id 绑定 turn 关联列；用户 outbox 身份继续独占 clientMessageId
         val payloadClientMessageId = payloadText(envelope, "client_message_id")
         payloadClientMessageId?.let(::requireFrameId)
@@ -1031,12 +1040,12 @@ class LocalDeliveryStore(
         if (existing != null) {
             // 2. 旧版 streaming 投影没有 turn 关联列；权威事件可补写一次，非空变化 fail-loud
             if (existing.controlTurnId == null) {
-                check(database.messages().bindControlTurnId(messageId, turnId) == 1) {
-                    "Control turn id 补写失败: $turnId"
+                check(database.messages().bindControlTurnId(messageId, controlTurnId) == 1) {
+                    "Control turn id 补写失败: $controlTurnId"
                 }
             } else {
-                require(existing.controlTurnId == turnId) {
-                    "Control turn id 在重放中变化: $turnId"
+                require(existing.controlTurnId == controlTurnId) {
+                    "Control turn id 在重放中变化: $controlTurnId"
                 }
             }
             if (payloadClientMessageId != null && existing.turnClientMessageId == null) {
@@ -1054,7 +1063,7 @@ class LocalDeliveryStore(
             }
             return existing.copy(
                 turnClientMessageId = payloadClientMessageId ?: existing.turnClientMessageId,
-                controlTurnId = turnId,
+                controlTurnId = controlTurnId,
             )
         }
         val active = database.messages().activeAssistantTurn(sessionId)
@@ -1073,7 +1082,7 @@ class LocalDeliveryStore(
             createdAt = updatedAt,
             updatedAt = updatedAt,
             turnClientMessageId = payloadClientMessageId,
-            controlTurnId = turnId,
+            controlTurnId = controlTurnId,
         )
         database.messages().upsert(message)
         return message
@@ -1350,6 +1359,8 @@ class LocalDeliveryStore(
     ) {
         val sessionId = delivered.sessionId
         val messageId = delivered.messageId
+        val controlTurnId = payloadText(envelope, "control_turn_id")
+        controlTurnId?.let(::requireControlTurnId)
         database.messages().upsert(
             MessageEntity(
                 messageId = messageId,
@@ -1360,6 +1371,7 @@ class LocalDeliveryStore(
                 deliveryState = "complete",
                 createdAt = updatedAt,
                 updatedAt = updatedAt,
+                controlTurnId = controlTurnId,
             ),
         )
         val serverId = requireNotNull(database.conversations().get(sessionId)).serverId
@@ -1439,6 +1451,10 @@ class LocalDeliveryStore(
 
     private fun requireFrameId(value: String) {
         require(FRAME_ID.matches(value)) { "Frame id must be a UUIDv7 or ULID" }
+    }
+
+    private fun requireControlTurnId(value: String) {
+        require(value.isNotBlank() && value.length <= 512) { "Control turn id is invalid" }
     }
 
     private fun toolCallId(envelope: WireEnvelope): String =
