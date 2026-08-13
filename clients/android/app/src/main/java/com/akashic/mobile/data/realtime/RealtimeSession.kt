@@ -2042,6 +2042,9 @@ class RealtimeSession(
                     }
                     "session.list.ok", "history.get.ok" -> completeSyncReply(envelope)
                     "device.update.ok" -> Unit
+                    // 旧 Core 不支持 device.update 时静默降级：不刷新能力，也
+                    // 不把兼容性错误写成用户可见 errorMessage，避免每次重连报错。
+                    "device.update.error" -> Unit
                     else -> {
                         require(envelope.type.endsWith(".error")) { "Unexpected reply type: ${envelope.type}" }
                         mutableState.value = mutableState.value.copy(

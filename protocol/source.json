@@ -1,7 +1,7 @@
 {
   "version": 1,
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
-  "source_commit": "25261a0db761630361fc25f7d99c07597005cc80",
+  "source_commit": "867ceb502cedf8900ab02edb798642bd5a5787b6",
   "source_path": "schema/mobile-realtime-v1.json",
   "snapshot_path": "protocol/mobile-realtime-v1.json",
   "sha256": "fd94351f7c631cad794a0447c3df4869d000e46188b2cfed75b0ffa52825b64f"
