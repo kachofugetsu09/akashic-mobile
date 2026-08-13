@@ -70,6 +70,32 @@ class TurnStopCoordinatorTest {
     }
 
     @Test
+    fun outputCompletedClearsOnTerminalAndNewTurn() = runBlocking {
+        val coordinator = coordinator()
+        coordinator.onTurnStarted("mobile:one", "turn-1")
+        assertFalse(coordinator.isOutputCompleted("mobile:one"))
+
+        coordinator.onOutputCompleted("mobile:one", "turn-1")
+        assertTrue(coordinator.isOutputCompleted("mobile:one"))
+
+        coordinator.onTurnTerminal("mobile:one", "turn-1")
+        assertFalse(coordinator.isOutputCompleted("mobile:one"))
+
+        coordinator.onTurnStarted("mobile:one", "turn-2")
+        assertFalse(coordinator.isOutputCompleted("mobile:one"))
+        coordinator.onOutputCompleted("mobile:one", "turn-2")
+        assertTrue(coordinator.isOutputCompleted("mobile:one"))
+    }
+
+    @Test
+    fun outputCompletedForInactiveTurnFailsLoud() {
+        val coordinator = coordinator()
+        assertThrows(IllegalArgumentException::class.java) {
+            coordinator.onOutputCompleted("mobile:one", "turn-1")
+        }
+    }
+
+    @Test
     fun processRestartRestoresAndReplaysPersistedStopIdentity() = runBlocking {
         val persisted = mutableListOf<TurnStopRequest>()
         val first = coordinator(onPersist = persisted::add)

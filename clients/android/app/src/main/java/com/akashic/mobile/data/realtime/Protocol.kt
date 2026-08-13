@@ -12,6 +12,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
 const val WIRE_PROTOCOL_VERSION = 1
 const val MAX_JSON_FRAME_BYTES = 256 * 1024
 
+/** 声明后才能接收 turn.output.completed；旧客户端不声明即只收权威 terminal。 */
+const val TURN_OUTPUT_COMPLETED_CAPABILITY = "turn-output-completed-v1"
+
 /** 在 kotlinx.serialization 静默保留最后一个值前拒绝重复对象成员。 */
 internal fun requireNoDuplicateJsonKeys(text: String) {
     JsonDuplicateKeyScanner(text).scan()
@@ -616,6 +619,7 @@ object ProtocolCodec {
             "react.tool.started",
             "react.tool.completed",
             "answer.delta",
+            "turn.output.completed",
             "turn.snapshot",
             "message.final",
             "turn.interrupted",

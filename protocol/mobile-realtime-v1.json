@@ -88,6 +88,7 @@
     "sync.completed",
     "sync.reset_required",
     "turn.interrupted",
+    "turn.output.completed",
     "turn.snapshot",
     "turn.started"
   ],
@@ -569,6 +570,20 @@
             "default": null,
             "title": "Block Id"
           },
+          "control_turn_id": {
+            "anyOf": [
+              {
+                "maxLength": 512,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Control Turn Id"
+          },
           "delta": {
             "maxLength": 65536,
             "minLength": 1,
@@ -835,6 +850,7 @@
               "react.tool.started",
               "react.tool.completed",
               "message.final",
+              "turn.output.completed",
               "turn.interrupted",
               "message.proactive",
               "attachment.progress",
@@ -1881,6 +1897,7 @@
               "sync.completed": "#/$defs/GenericEvent",
               "sync.reset_required": "#/$defs/GenericEvent",
               "turn.interrupted": "#/$defs/GenericEvent",
+              "turn.output.completed": "#/$defs/GenericEvent",
               "turn.snapshot": "#/$defs/TurnSnapshotEvent",
               "turn.started": "#/$defs/GenericEvent"
             },
@@ -1985,6 +2002,7 @@
             "sync.completed": "#/$defs/GenericEvent",
             "sync.reset_required": "#/$defs/GenericEvent",
             "turn.interrupted": "#/$defs/GenericEvent",
+            "turn.output.completed": "#/$defs/GenericEvent",
             "turn.snapshot": "#/$defs/TurnSnapshotEvent",
             "turn.started": "#/$defs/GenericEvent"
           },

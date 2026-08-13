@@ -96,6 +96,30 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `decodes output completed event and declares its capability`() {
+        assertEquals("turn-output-completed-v1", TURN_OUTPUT_COMPLETED_CAPABILITY)
+        val frame = """
+            {
+              "v": 1,
+              "kind": "event",
+              "type": "turn.output.completed",
+              "id": "01J00000000000000000000003",
+              "connection_epoch": 7,
+              "event_seq": 1843,
+              "session_id": "mobile:session",
+              "turn_id": "turn-1",
+              "payload": {"client_message_id": "cmid-1"}
+            }
+        """.trimIndent()
+
+        val envelope = ProtocolCodec.decode(frame)
+
+        assertEquals(WireKind.EVENT, envelope.kind)
+        assertEquals("turn.output.completed", envelope.type)
+        assertEquals("turn-1", envelope.turnId)
+    }
+
+    @Test
     fun `round trips cumulative ack`() {
         val envelope = WireEnvelope(
             v = WIRE_PROTOCOL_VERSION,

@@ -81,6 +81,7 @@ data class MobileSessionState(
     val meteredLargeTransferApproved: Boolean = false,
     val isReloadingHistory: Boolean = false,
     val isStopping: Boolean = false,
+    val outputCompleted: Boolean = false,
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
@@ -1856,6 +1857,12 @@ class RealtimeSession(
                             requireNotNull(envelope.turnId),
                         )
                     }
+                    "turn.output.completed" -> {
+                        stops.onOutputCompleted(
+                            requireNotNull(envelope.sessionId),
+                            requireNotNull(envelope.turnId),
+                        )
+                    }
                     "message.final" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
                         stops.onTurnTerminal(
@@ -2034,6 +2041,18 @@ class RealtimeSession(
                         flushOutbox()
                     }
                     "session.list.ok", "history.get.ok" -> completeSyncReply(envelope)
+                    "device.update.ok" -> Unit
+                    // 仅旧 Core 不支持的 unsupported_command 静默降级；其他错误
+                    //（invalid_payload 等）保留可见，不得伪装成成功。
+                    "device.update.error" -> {
+                        val code = envelope.payload["code"]?.jsonPrimitive?.content
+                        if (code != "unsupported_command") {
+                            mutableState.value = mutableState.value.copy(
+                                errorMessage = envelope.payload["message"]?.toString()?.trim('"')
+                                    ?: "设备能力更新失败",
+                            )
+                        }
+                    }
                     else -> {
                         require(envelope.type.endsWith(".error")) { "Unexpected reply type: ${envelope.type}" }
                         mutableState.value = mutableState.value.copy(
@@ -2439,6 +2458,7 @@ class RealtimeSession(
         messageDownloads.onConnectionReady(currentProfile.serverId)
         stops.onConnectionReady()
         flushOutbox()
+        sendDeviceUpdateCommand()
     }
 
     private fun sendAttachmentCommand(
@@ -2477,6 +2497,30 @@ class RealtimeSession(
                 sessionId = request.sessionId,
                 turnId = request.turnId,
                 payload = buildJsonObject {},
+            ),
+        )
+    }
+
+    /** 认证连接建立后刷新能力声明，让升级 APK 无需重新配对即可接收新事件。 */
+    private fun sendDeviceUpdateCommand(): Boolean {
+        val epoch = activeEpoch ?: return false
+        val candidate = activeCandidate ?: return false
+        return socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = "device.update",
+                id = Ulid.next(),
+                connectionEpoch = epoch,
+                payload = buildJsonObject {
+                    put(
+                        "capabilities",
+                        kotlinx.serialization.json.JsonArray(
+                            CAPABILITIES.map(::JsonPrimitive),
+                        ),
+                    )
+                },
             ),
         )
     }
@@ -2984,6 +3028,7 @@ class RealtimeSession(
             activeTurnId = stops.activeTurnId(sessionId),
             activeSessionIds = stops.activeSessionIds(),
             isStopping = stops.isStopping(sessionId),
+            outputCompleted = stops.isOutputCompleted(sessionId),
         )
     }
 
@@ -3089,6 +3134,7 @@ class RealtimeSession(
             "attachments-v1",
             "history-content-range-v1",
             MOBILE_WEB_UI_CAPABILITY,
+            TURN_OUTPUT_COMPLETED_CAPABILITY,
         )
         val LEGACY_HISTORY_FALLBACK_CODES = setOf(
             "invalid_payload",
