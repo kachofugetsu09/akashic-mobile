@@ -50,7 +50,13 @@ internal enum class NotificationTargetProjection {
 }
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
+/**
+ * TODO(deprecated): 0034 之前旧协议数据没有稳定身份，只能按时间窗兜底匹配。
+ * 新数据走 client_message_id → delivery_id → control_turn_id 权威链；
+ * 旧数据滚动出保留窗口后删除本常量、transientLocalSourceId 与对应 DAO 查询。
+ */
 private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
+/** TODO(deprecated): 进程内 canonical 别名表只服务 UI 持有旧临时 ID 的短暂窗口，未来收紧临时 ID 生命周期后删除。 */
 private const val MAX_CANONICAL_MESSAGE_ALIASES = 256
 
 @Serializable
@@ -77,6 +83,10 @@ class LocalDeliveryStore(
     private val mediaCache: MediaCacheStore,
     private val messageContentStore: MessageContentStore,
 ) {
+    /**
+     * TODO(deprecated): 进程内 canonical 别名表只覆盖"UI 仍持有旧临时 ID"的短窗口；
+     * 临时 ID 生命周期收紧后由 DB 内 move 系列查询承接，不再保留内存别名。
+     */
     private val projectionStateMutex = Mutex()
     private val canonicalMessageAliases = linkedMapOf<String, String>()
 
@@ -918,6 +928,13 @@ class LocalDeliveryStore(
     }
 
     /** 仅在唯一匹配时把本地临时消息迁移到服务端 canonical identity。 */
+    /**
+     * 旧协议数据兜底：按正文加时间窗匹配本地临时消息。
+     *
+     * TODO(deprecated): 0034 之后服务端为 assistant 消息提供 control_turn_id，权威链
+     * client_message_id → delivery_id → control_turn_id 命中后不再到达这里；
+     * 旧协议数据滚动出保留窗口后删除本函数与对应 DAO 查询。
+     */
     private suspend fun transientLocalSourceId(
         canonical: MessageEntity,
         includeProactive: Boolean,
@@ -1041,6 +1058,8 @@ class LocalDeliveryStore(
         // 1. 显式 client_message_id 绑定 turn 关联列；用户 outbox 身份继续独占 clientMessageId
         val payloadClientMessageId = payloadText(envelope, "client_message_id")
         payloadClientMessageId?.let(::requireFrameId)
+        // TODO(deprecated): 流式阶段的本地临时 ID 命名空间，final/history 到达后原子迁移
+        // 为服务端 message_id；未来以服务端下发的稳定身份取代前缀拼接。
         val messageId = "assistant:$turnId"
         val existing = database.messages().get(messageId)
         if (existing != null) {
@@ -1475,6 +1494,7 @@ class LocalDeliveryStore(
         require(value.isNotBlank() && value.length <= 512) { "Control turn id is invalid" }
     }
 
+    /** TODO(deprecated): 协议固定 tool_call_id 后删除多候选键猜测，只保留 schema 字段。 */
     private fun toolCallId(envelope: WireEnvelope): String =
         payloadText(envelope, "tool_call_id")
             ?: payloadText(envelope, "call_id")
@@ -1507,6 +1527,7 @@ class LocalDeliveryStore(
         val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val SHA256 = Regex("^[0-9a-f]{64}$")
+        // TODO(deprecated): 与 Protocol.kt 的 FRAME_ID 重复，未来统一为 ProtocolCodec 单一出处
         val FRAME_ID = Regex(
             "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
                 "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",

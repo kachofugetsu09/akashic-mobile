@@ -14,6 +14,7 @@ data class FinalMessageEvent(
 
 internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String = when (envelope.type) {
     "message.final" -> envelope.payload["message_id"]?.jsonPrimitive?.content
+        // TODO(deprecated): 服务端 final 始终携带 message_id；frame 前缀身份只在极旧服务端数据出现，滚动出窗口后删除
         ?: "ephemeral:${requireNotNull(envelope.id) { "Final event has no frame id" }}"
     "message.proactive" -> envelope.payload["delivery_id"]?.jsonPrimitive?.content
         ?.let(::proactiveMessageId)
@@ -21,6 +22,7 @@ internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String = when 
     else -> error("Unsupported delivered message type: ${envelope.type}")
 }
 
+/** TODO(deprecated): 临时投递身份命名空间；历史 canonical 化后由服务端 message ID 取代，MOB-XREPO-003 旧数据窗口结束后删除前缀。 */
 internal fun proactiveMessageId(deliveryId: String): String {
     require(deliveryId.isNotBlank() && deliveryId.length <= 128) {
         "Proactive delivery id is invalid"

@@ -1285,6 +1285,7 @@ class RealtimeSession(
                                 now,
                             ),
                             message = MessageEntity(
+                                // TODO(deprecated): optimistic 本地临时 ID 命名空间，final 以 user_message_id 原子迁移
                                 messageId = "user:$clientMessageId",
                                 clientMessageId = clientMessageId,
                                 sessionId = sessionId,
@@ -3145,6 +3146,7 @@ class RealtimeSession(
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
+        /** TODO(deprecated): 流式临时消息 ID 前缀，服务端稳定身份取代后删除 */
         const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }
