@@ -881,6 +881,40 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun acknowledgedSentMessageSurvivesReloadableProjectionCleanup() = runBlocking {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "user:$clientId",
+                clientMessageId = clientId,
+                sessionId = "mobile:test",
+                role = "user",
+                text = "已 ACK 尚未 canonical 化",
+                deliveryState = "sent",
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+        database.messages().upsert(
+            MessageEntity(
+                messageId = "mobile:test:complete",
+                clientMessageId = null,
+                sessionId = "mobile:test",
+                role = "assistant",
+                text = "可重建投影",
+                deliveryState = "complete",
+                createdAt = 1,
+                updatedAt = 1,
+            ),
+        )
+
+        store.clearReloadableCache("server", preservedSessionId = null)
+
+        assertNotNull(database.messages().get("user:$clientId"))
+        assertEquals(null, database.messages().get("mobile:test:complete"))
+    }
+
+    @Test
     fun pendingNotificationSurvivesMessageProjectionCleanup() = runBlocking {
         store.applyEvent(
             serverId = "server",
@@ -1962,7 +1996,7 @@ class LocalDeliveryStoreTest {
         store.clearReloadableCache("server", "mobile:test")
 
         assertEquals(null, database.messages().get("remote"))
-        assertEquals(null, database.messages().get("sent"))
+        assertNotNull(database.messages().get("sent"))
         assertNotNull(database.messages().get("pending"))
         assertNotNull(database.messages().get("failed"))
         assertNotNull(database.outbox().get("pending-id"))
