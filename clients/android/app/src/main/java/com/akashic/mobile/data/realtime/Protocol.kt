@@ -616,6 +616,7 @@ object ProtocolCodec {
             "react.tool.started",
             "react.tool.completed",
             "answer.delta",
+            "turn.output.completed",
             "turn.snapshot",
             "message.final",
             "turn.interrupted",

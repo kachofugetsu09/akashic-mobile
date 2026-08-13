@@ -460,7 +460,8 @@ class MainViewModel(
             isStopping = session.isStopping,
             canStop = session.activeTurnId != null &&
                 session.connection.phase == ConnectionPhase.READY &&
-                !session.isStopping,
+                !session.isStopping &&
+                !session.outputCompleted,
             canSend = session.hasProfile &&
                 session.currentSessionId != null &&
                 !selectedRemoteMissing &&

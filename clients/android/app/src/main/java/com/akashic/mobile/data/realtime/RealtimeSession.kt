@@ -81,6 +81,7 @@ data class MobileSessionState(
     val meteredLargeTransferApproved: Boolean = false,
     val isReloadingHistory: Boolean = false,
     val isStopping: Boolean = false,
+    val outputCompleted: Boolean = false,
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
@@ -1856,6 +1857,12 @@ class RealtimeSession(
                             requireNotNull(envelope.turnId),
                         )
                     }
+                    "turn.output.completed" -> {
+                        stops.onOutputCompleted(
+                            requireNotNull(envelope.sessionId),
+                            requireNotNull(envelope.turnId),
+                        )
+                    }
                     "message.final" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
                         stops.onTurnTerminal(
@@ -2984,6 +2991,7 @@ class RealtimeSession(
             activeTurnId = stops.activeTurnId(sessionId),
             activeSessionIds = stops.activeSessionIds(),
             isStopping = stops.isStopping(sessionId),
+            outputCompleted = stops.isOutputCompleted(sessionId),
         )
     }
 

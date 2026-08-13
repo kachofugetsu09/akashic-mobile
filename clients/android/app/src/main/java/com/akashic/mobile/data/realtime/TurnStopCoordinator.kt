@@ -27,6 +27,7 @@ internal class TurnStopCoordinator(
     private val activeTurns = mutableMapOf<String, String>()
     private val pendingStops = mutableMapOf<String, PendingStop>()
     private val terminalAwaitingReplies = mutableMapOf<String, TurnStopRequest>()
+    private val outputCompletedTurns = mutableMapOf<String, String>()
 
     fun onTurnStarted(sessionId: String, turnId: String) {
         val existing = activeTurns[sessionId]
@@ -34,6 +35,7 @@ internal class TurnStopCoordinator(
             "同一会话出现重叠 turn: $existing -> $turnId"
         }
         activeTurns[sessionId] = turnId
+        outputCompletedTurns.remove(sessionId)
         onStateChanged()
     }
 
@@ -41,6 +43,7 @@ internal class TurnStopCoordinator(
         val existing = activeTurns[sessionId] ?: return
         require(existing == turnId) { "终态 turn 与当前活动 turn 不匹配" }
         activeTurns.remove(sessionId)
+        outputCompletedTurns.remove(sessionId)
         pendingStops[sessionId]?.let { pending ->
             require(pending.request.turnId == turnId) { "终态 turn 与停止请求不匹配" }
             removePersisted(pending)
@@ -49,6 +52,14 @@ internal class TurnStopCoordinator(
                 terminalAwaitingReplies[pending.request.commandId] = pending.request
             }
         }
+        onStateChanged()
+    }
+
+    /** 记录服务端已声明 output.completed，供 composer 提前收起"终止"。 */
+    fun onOutputCompleted(sessionId: String, turnId: String) {
+        val existing = activeTurns[sessionId]
+        require(existing != null && existing == turnId) { "output.completed 不属于当前活动 turn" }
+        outputCompletedTurns[sessionId] = turnId
         onStateChanged()
     }
 
@@ -117,6 +128,12 @@ internal class TurnStopCoordinator(
         return activeTurns[sessionId] == pending.request.turnId
     }
 
+    fun isOutputCompleted(sessionId: String?): Boolean {
+        if (sessionId == null) return false
+        val turnId = activeTurns[sessionId] ?: return false
+        return outputCompletedTurns[sessionId] == turnId
+    }
+
     /** 从持久投影和待发送 stop 命令重建进程内状态。 */
     suspend fun restore(
         activeTurnsBySession: Map<String, String>,
@@ -126,6 +143,7 @@ internal class TurnStopCoordinator(
         activeTurns.clear()
         pendingStops.clear()
         terminalAwaitingReplies.clear()
+        outputCompletedTurns.clear()
         activeTurns.putAll(activeTurnsBySession)
 
         // 2. 只重放仍指向同一活动 turn 的 stop 意图
@@ -143,6 +161,7 @@ internal class TurnStopCoordinator(
         activeTurns.clear()
         pendingStops.clear()
         terminalAwaitingReplies.clear()
+        outputCompletedTurns.clear()
         onStateChanged()
     }
 
