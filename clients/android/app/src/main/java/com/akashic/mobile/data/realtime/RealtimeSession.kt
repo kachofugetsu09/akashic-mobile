@@ -79,6 +79,7 @@ data class MobileSessionState(
     val hasActiveAttachmentDownload: Boolean = false,
     val transferNetwork: TransferNetworkState = TransferNetworkState(TransferNetworkKind.UNAVAILABLE, false),
     val meteredLargeTransferApproved: Boolean = false,
+    val isReloadingHistory: Boolean = false,
     val isStopping: Boolean = false,
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
@@ -601,11 +602,16 @@ class RealtimeSession(
     fun reloadFromServer() {
         scope.launch {
             mutex.withLock {
-                // 1. 只允许稳定空闲连接发起重建
+                // 1. 协议错误时连接无法进入 READY；重建入口只保护本地工作与并发传输
                 val currentProfile = requireNotNull(profile) { "Pair a server before reloading history" }
-                check(mutableState.value.connection.phase == ConnectionPhase.READY) {
-                    "History reload requires a ready connection"
+                if (deviceRevoked) {
+                    mutableState.value = endHistoryReload(
+                        mutableState.value,
+                        "设备配对已撤销：请重新配对",
+                    )
+                    return@withLock
                 }
+                check(!mutableState.value.isReloadingHistory) { "History reload is already running" }
                 check(mutableState.value.activeTurnId == null) { "History reload cannot interrupt an active turn" }
                 check(!mutableState.value.hasActiveAttachmentDownload) {
                     "History reload cannot interrupt an attachment download"
@@ -613,8 +619,15 @@ class RealtimeSession(
                 check(!messageDownloads.hasActiveDownload()) {
                     "History reload cannot interrupt a message content download"
                 }
+                val reloadOnCurrentConnection =
+                    mutableState.value.connection.phase == ConnectionPhase.READY
                 mutableState.value = mutableState.value.copy(
-                    connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
+                    connection = if (reloadOnCurrentConnection) {
+                        mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING)
+                    } else {
+                        mutableState.value.connection
+                    },
+                    isReloadingHistory = true,
                     errorMessage = null,
                 )
 
@@ -640,13 +653,23 @@ class RealtimeSession(
                 } finally {
                     if (!cleanupHandled) {
                         mutableState.value = mutableState.value.copy(
-                            connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
+                            connection = if (reloadOnCurrentConnection) {
+                                mutableState.value.connection.copy(phase = ConnectionPhase.READY)
+                            } else {
+                                mutableState.value.connection
+                            },
+                            isReloadingHistory = false,
                         )
                     }
                 }
 
-                // 3. 沿现有认证连接重新获取会话目录和完整历史
-                beginResetRebuild()
+                // 3. 健康连接直接重建；错误连接清掉毒投影后从同一 durable cursor 重连重放
+                if (reloadOnCurrentConnection) {
+                    beginResetRebuild()
+                } else {
+                    socket.close(reason = "本地消息缓存已清理，重新连接并同步")
+                    scheduleReconnect("本地消息缓存已清理，正在重新连接并同步")
+                }
                 if (cleanupError != null) {
                     mutableState.value = mutableState.value.copy(errorMessage = cleanupError)
                 }
@@ -1108,6 +1131,7 @@ class RealtimeSession(
         }
     }
 
+    @Suppress("SuspiciousIndentation") // Android lint 误把带标签的局部 return 识别为续行
     private fun enqueueMessage(
         text: String,
         includeDraftAttachments: Boolean,
@@ -2400,6 +2424,7 @@ class RealtimeSession(
         ensureCurrentSession(currentProfile)
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
+            isReloadingHistory = false,
         )
         cancelPhaseDeadline()
         requestCommandList()
@@ -2622,6 +2647,7 @@ class RealtimeSession(
         )
     }
 
+    @Suppress("SuspiciousIndentation") // Android lint 误把多行构造调用后的声明识别为续行
     private suspend fun conversationForMessage(
         currentProfile: ServerProfileEntity,
         sessionId: String,
@@ -2812,6 +2838,7 @@ class RealtimeSession(
                 phase = ConnectionPhase.FAILED,
                 lastErrorCode = "device_revoked",
             ),
+            isReloadingHistory = false,
             errorMessage = revokeError ?: "设备配对已撤销：请重新配对${reason.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()}",
         )
     }
@@ -2889,6 +2916,7 @@ class RealtimeSession(
                 phase = ConnectionPhase.FAILED,
                 lastErrorCode = "protocol_$code",
             ),
+            isReloadingHistory = false,
             errorMessage = "消息协议不兼容，请确认手机与电脑端版本一致后重新连接",
         )
     }
@@ -3074,6 +3102,9 @@ class RealtimeSession(
         const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }
+
+internal fun endHistoryReload(state: MobileSessionState, errorMessage: String): MobileSessionState =
+    state.copy(isReloadingHistory = false, errorMessage = errorMessage)
 
 private val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
 

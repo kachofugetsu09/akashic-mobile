@@ -62,6 +62,10 @@ GC 只能删除未被 serving、fallback、当前 ready desired 或 attempting �
 
 manifest/blob 本地验证、删除或 WebUI metadata 写入失败时，WebUI coordinator 必须保留 serving/attempt owner 并暴露可观察错误或有界重试。这类派生 UI 缓存故障不得被当成 realtime 协议错误而断开消息连接。
 
+### MOB-DATA-006 协议错误不得封死服务端投影重建入口
+
+已配对且设备授权仍有效的用户必须能在连接校验失败、同步中断或重连期间主动执行“清理缓存并同步”。该入口只清除可从核心重建的服务端投影并保留配对、本地未发送工作、草稿与上传附件；设备已撤销、活动 Turn、附件下载或已经开始的重建仍可阻止执行。错误连接上的重建先提交本地清理，再通过既有认证重连和 durable cursor 恢复，不要求连接先进入 `READY`。
+
 ## 4. 配对与删除
 
 ### MOB-PAIR-001 配对生命周期不是删除生命周期

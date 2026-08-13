@@ -40,7 +40,7 @@
 - 更新：delivery、stream、read position、cursor 和下载状态按各 DAO 状态机更新。用户/outbox 的 `clientMessageId` 与 assistant turn 的 `turnClientMessageId`、`controlTurnId` 分列保存，前者继续拥有唯一索引；`LocalDeliveryStore` 在同一事务中拥有“每个会话至多一个 streaming assistant turn”不变量；重叠 `turn.started` 在写消息和推进 cursor 前失败。v13→v14 只把 assistant 的旧 `clientMessageId` 移到 `turnClientMessageId` 并清空原列，用户/outbox 身份不变；v14→v15 只为 `assistant:<turnId>` streaming 临时行回填 `controlTurnId`，不改正文或终态。
 - 逻辑失效：附件缓存以 `evicted` 表达文件不可用；消息投递使用明确状态，不用缺行伪装终态。v10→v11 迁移只把同一会话中较旧的重复 streaming 临时消息更新为 `interrupted`，同步结束其 running blocks，并保留最新活动投影、消息正文和全部 turn blocks。
 - 物理删除：`reloadFromServer` 只允许清理可重载投影，并通过查询保护带本地工作的消息和会话。
-- 恢复：从固定核心协议重新同步；正常重连可从本地连续 `serverSeq` 投影的首个不完整页续传，投影完整时不重放；投影不连续、数量异常或核心要求 reset 时从第一页重建。失败必须暴露，不能用空列表冒充成功。
+- 恢复：从固定核心协议重新同步；正常重连可从本地连续 `serverSeq` 投影的首个不完整页续传，投影完整时不重放；投影不连续、数量异常、核心要求 reset 或用户在协议错误状态主动执行“清理缓存并同步”时从第一页重建。错误连接上的用户重建先提交可重载投影清理，再重连并从既有 durable cursor 恢复；失败必须暴露，不能用空列表冒充成功。
 
 ### Room 本地工作
 
