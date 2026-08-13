@@ -3097,6 +3097,7 @@ class RealtimeSession(
             "attachments-v1",
             "history-content-range-v1",
             MOBILE_WEB_UI_CAPABILITY,
+            TURN_OUTPUT_COMPLETED_CAPABILITY,
         )
         val LEGACY_HISTORY_FALLBACK_CODES = setOf(
             "invalid_payload",
