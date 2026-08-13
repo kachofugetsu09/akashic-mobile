@@ -549,6 +549,7 @@ object ProtocolCodec {
             "session.open",
             "history.get",
             "message.content.prepare",
+            "model.catalog.get",
             "message.send",
             "turn.stop",
             "attachment.begin",
