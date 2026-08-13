@@ -24,16 +24,19 @@ internal class TurnStopCoordinator(
         var persisted: Boolean = true,
     )
 
+    /**
+     * TODO(deprecated): 活动 turn 的内存投影缓存。权威事实在 Room 消息投影
+     * （LocalDeliveryStore.activeAssistantTurn 与事务内重叠检查）；
+     * 本 Map 只服务同步 UI 状态，未来改为 suspend 查询后删除。
+     */
     private val activeTurns = mutableMapOf<String, String>()
     private val pendingStops = mutableMapOf<String, PendingStop>()
     private val terminalAwaitingReplies = mutableMapOf<String, TurnStopRequest>()
     private val outputCompletedTurns = mutableMapOf<String, String>()
 
     fun onTurnStarted(sessionId: String, turnId: String) {
-        val existing = activeTurns[sessionId]
-        require(existing == null || existing == turnId) {
-            "同一会话出现重叠 turn: $existing -> $turnId"
-        }
+        // 重叠 turn 的唯一 owner 是 Room 事务（applyEvent 已 fail-loud 回滚），
+        // 这里只同步内存投影，不重复断言。
         activeTurns[sessionId] = turnId
         outputCompletedTurns.remove(sessionId)
         onStateChanged()
