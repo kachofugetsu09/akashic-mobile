@@ -427,18 +427,6 @@ interface MessageDao {
     )
     suspend fun deleteServerProjection(serverId: String): Int
 
-    @Query(
-        """
-        DELETE FROM messages
-        WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)
-          AND NOT (
-            clientMessageId IS NOT NULL
-            AND deliveryState IN ('pending', 'failed', 'failed_retryable', 'outcome_unknown')
-          )
-        """,
-    )
-    suspend fun deleteReloadableServerCache(serverId: String): Int
-
     @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE clientMessageId = :clientMessageId")
     suspend fun updateDelivery(clientMessageId: String, state: String, updatedAt: Long): Int
 

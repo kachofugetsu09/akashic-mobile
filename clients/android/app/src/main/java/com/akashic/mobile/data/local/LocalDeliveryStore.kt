@@ -339,10 +339,11 @@ class LocalDeliveryStore(
 
     /** 清除可从服务端恢复的投影与附件缓存，同时保留配对和未发送工作。 */
     suspend fun clearReloadableCache(serverId: String, preservedSessionId: String?) {
-        // 1. 原子移除已提交消息，保留待发送消息、草稿和连接身份
+        // 1. 原子移除已提交消息，保留待发送消息、草稿和连接身份；
+        //    与 sync.reset_required 共用同一白名单：sent（已 ACK 未 canonical 化）也保留
         projectionStateMutex.withLock {
             database.withTransaction {
-                database.messages().deleteReloadableServerCache(serverId)
+                database.messages().deleteServerProjection(serverId)
                 database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
             }
         }
