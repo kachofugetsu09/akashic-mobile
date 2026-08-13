@@ -4,6 +4,7 @@ import com.akashic.mobile.data.local.ConversationSummary
 import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.canRemoveFrom
 import com.akashic.mobile.data.local.isRemoteMissingIn
+import com.akashic.mobile.data.realtime.MobileSessionState
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
@@ -13,6 +14,23 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 
 class MainViewModelTest {
+    @Test
+    fun historyReloadRemainsAvailableDuringProtocolReconnect() {
+        val degraded = MobileSessionState(
+            hasProfile = true,
+            connection = ConnectionState(phase = ConnectionPhase.DEGRADED),
+        )
+        val syncing = degraded.copy(
+            connection = ConnectionState(phase = ConnectionPhase.SYNCING),
+        )
+
+        assertEquals(true, canReloadServerProjection(degraded))
+        assertEquals(true, canReloadServerProjection(syncing))
+        assertEquals(false, canReloadServerProjection(degraded.copy(isReloadingHistory = true)))
+        assertEquals(false, canReloadServerProjection(degraded.copy(activeTurnId = "turn:active")))
+        assertEquals(false, canReloadServerProjection(degraded.copy(hasActiveAttachmentDownload = true)))
+    }
+
     @Test
     fun persistedShareIdentityWinsAndPreparedStateIsRestoredExactlyOnce() {
         val persisted = PersistedIncomingShare(

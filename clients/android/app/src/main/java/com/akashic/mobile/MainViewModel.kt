@@ -454,10 +454,9 @@ class MainViewModel(
             transferStatus = transferStatus,
             commands = session.commands.map { CommandUi(it.command, it.description) },
             isStreaming = isStreaming,
-            isResyncing = session.connection.phase == ConnectionPhase.SYNCING,
-            canResync = session.connection.phase == ConnectionPhase.READY &&
-                session.activeTurnId == null &&
-                !session.hasActiveAttachmentDownload,
+            isResyncing = session.connection.phase == ConnectionPhase.SYNCING ||
+                session.isReloadingHistory,
+            canResync = canReloadServerProjection(session),
             isStopping = session.isStopping,
             canStop = session.activeTurnId != null &&
                 session.connection.phase == ConnectionPhase.READY &&
@@ -1000,6 +999,12 @@ class MainViewModel(
         )
     }
 }
+
+internal fun canReloadServerProjection(session: MobileSessionState): Boolean =
+    session.hasProfile &&
+        !session.isReloadingHistory &&
+        session.activeTurnId == null &&
+        !session.hasActiveAttachmentDownload
 
 private data class CachedMessageProjection(
     val source: MessageWithBlocks,
