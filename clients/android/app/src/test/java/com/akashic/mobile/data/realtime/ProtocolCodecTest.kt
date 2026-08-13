@@ -67,7 +67,7 @@ class ProtocolCodecTest {
             envelopes[5].payload,
         )
 
-        assertEquals(7, envelopes.size)
+        assertEquals(6, envelopes.size)
         assertEquals("2026-07-14T12:00:00+08:00", messagePayload.clientCreatedAt)
         assertEquals(listOf("turn-1"), resumePayload.activeTurns)
     }

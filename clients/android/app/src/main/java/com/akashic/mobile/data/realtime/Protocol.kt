@@ -620,8 +620,6 @@ object ProtocolCodec {
             "react.tool.completed",
             "answer.delta",
             "turn.output.completed",
-            // TODO(resume): 协议声明但客户端无消费者；resume 对账补发终态后接入或移除
-            "turn.snapshot",
             "message.final",
             "turn.interrupted",
             "message.proactive",
