@@ -2041,6 +2041,7 @@ class RealtimeSession(
                         flushOutbox()
                     }
                     "session.list.ok", "history.get.ok" -> completeSyncReply(envelope)
+                    "device.update.ok" -> Unit
                     else -> {
                         require(envelope.type.endsWith(".error")) { "Unexpected reply type: ${envelope.type}" }
                         mutableState.value = mutableState.value.copy(
@@ -2446,6 +2447,7 @@ class RealtimeSession(
         messageDownloads.onConnectionReady(currentProfile.serverId)
         stops.onConnectionReady()
         flushOutbox()
+        sendDeviceUpdateCommand()
     }
 
     private fun sendAttachmentCommand(
@@ -2484,6 +2486,30 @@ class RealtimeSession(
                 sessionId = request.sessionId,
                 turnId = request.turnId,
                 payload = buildJsonObject {},
+            ),
+        )
+    }
+
+    /** 认证连接建立后刷新能力声明，让升级 APK 无需重新配对即可接收新事件。 */
+    private fun sendDeviceUpdateCommand(): Boolean {
+        val epoch = activeEpoch ?: return false
+        val candidate = activeCandidate ?: return false
+        return socket.send(
+            candidate,
+            WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.COMMAND,
+                type = "device.update",
+                id = Ulid.next(),
+                connectionEpoch = epoch,
+                payload = buildJsonObject {
+                    put(
+                        "capabilities",
+                        kotlinx.serialization.json.JsonArray(
+                            CAPABILITIES.map(::JsonPrimitive),
+                        ),
+                    )
+                },
             ),
         )
     }
