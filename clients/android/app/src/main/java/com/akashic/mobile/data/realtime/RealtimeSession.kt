@@ -604,6 +604,13 @@ class RealtimeSession(
             mutex.withLock {
                 // 1. 协议错误时连接无法进入 READY；重建入口只保护本地工作与并发传输
                 val currentProfile = requireNotNull(profile) { "Pair a server before reloading history" }
+                if (deviceRevoked) {
+                    mutableState.value = endHistoryReload(
+                        mutableState.value,
+                        "设备配对已撤销：请重新配对",
+                    )
+                    return@withLock
+                }
                 check(!mutableState.value.isReloadingHistory) { "History reload is already running" }
                 check(mutableState.value.activeTurnId == null) { "History reload cannot interrupt an active turn" }
                 check(!mutableState.value.hasActiveAttachmentDownload) {
@@ -1124,6 +1131,7 @@ class RealtimeSession(
         }
     }
 
+    @Suppress("SuspiciousIndentation") // Android lint 误把带标签的局部 return 识别为续行
     private fun enqueueMessage(
         text: String,
         includeDraftAttachments: Boolean,
@@ -2639,6 +2647,7 @@ class RealtimeSession(
         )
     }
 
+    @Suppress("SuspiciousIndentation") // Android lint 误把多行构造调用后的声明识别为续行
     private suspend fun conversationForMessage(
         currentProfile: ServerProfileEntity,
         sessionId: String,
@@ -2829,6 +2838,7 @@ class RealtimeSession(
                 phase = ConnectionPhase.FAILED,
                 lastErrorCode = "device_revoked",
             ),
+            isReloadingHistory = false,
             errorMessage = revokeError ?: "设备配对已撤销：请重新配对${reason.takeIf { it.isNotBlank() }?.let { "（$it）" }.orEmpty()}",
         )
     }
@@ -2906,6 +2916,7 @@ class RealtimeSession(
                 phase = ConnectionPhase.FAILED,
                 lastErrorCode = "protocol_$code",
             ),
+            isReloadingHistory = false,
             errorMessage = "消息协议不兼容，请确认手机与电脑端版本一致后重新连接",
         )
     }
@@ -3091,6 +3102,9 @@ class RealtimeSession(
         const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }
+
+internal fun endHistoryReload(state: MobileSessionState, errorMessage: String): MobileSessionState =
+    state.copy(isReloadingHistory = false, errorMessage = errorMessage)
 
 private val COMMAND_NAME = Regex("^[a-z][a-z0-9_]{0,31}$")
 

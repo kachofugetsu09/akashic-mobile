@@ -1002,6 +1002,7 @@ class MainViewModel(
 
 internal fun canReloadServerProjection(session: MobileSessionState): Boolean =
     session.hasProfile &&
+        session.connection.lastErrorCode != "device_revoked" &&
         !session.isReloadingHistory &&
         session.activeTurnId == null &&
         !session.hasActiveAttachmentDownload
