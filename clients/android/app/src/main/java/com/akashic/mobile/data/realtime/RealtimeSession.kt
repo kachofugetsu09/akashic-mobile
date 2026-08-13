@@ -2042,9 +2042,17 @@ class RealtimeSession(
                     }
                     "session.list.ok", "history.get.ok" -> completeSyncReply(envelope)
                     "device.update.ok" -> Unit
-                    // 旧 Core 不支持 device.update 时静默降级：不刷新能力，也
-                    // 不把兼容性错误写成用户可见 errorMessage，避免每次重连报错。
-                    "device.update.error" -> Unit
+                    // 仅旧 Core 不支持的 unsupported_command 静默降级；其他错误
+                    //（invalid_payload 等）保留可见，不得伪装成成功。
+                    "device.update.error" -> {
+                        val code = envelope.payload["code"]?.jsonPrimitive?.content
+                        if (code != "unsupported_command") {
+                            mutableState.value = mutableState.value.copy(
+                                errorMessage = envelope.payload["message"]?.toString()?.trim('"')
+                                    ?: "设备能力更新失败",
+                            )
+                        }
+                    }
                     else -> {
                         require(envelope.type.endsWith(".error")) { "Unexpected reply type: ${envelope.type}" }
                         mutableState.value = mutableState.value.copy(
