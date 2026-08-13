@@ -285,6 +285,7 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE clientMessageId = :clientMessageId")
     suspend fun getByClientMessageId(clientMessageId: String): MessageEntity?
 
+    /** TODO(deprecated): 旧协议数据无稳定身份时的时间窗兜底，权威字段滚动出窗口后删除。 */
     @Query(
         """
         SELECT * FROM messages
@@ -305,6 +306,7 @@ interface MessageDao {
         latestCreatedAt: Long,
     ): List<MessageEntity>
 
+    /** TODO(deprecated): 旧协议数据无稳定身份时的时间窗兜底，权威字段滚动出窗口后删除。 */
     @Query(
         """
         SELECT * FROM messages
