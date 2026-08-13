@@ -1487,19 +1487,16 @@ class LocalDeliveryStore(
     }
 
     private fun requireFrameId(value: String) {
-        require(FRAME_ID.matches(value)) { "Frame id must be a UUIDv7 or ULID" }
+        require(ProtocolCodec.FRAME_ID.matches(value)) { "Frame id must be a UUIDv7 or ULID" }
     }
 
     private fun requireControlTurnId(value: String) {
         require(value.isNotBlank() && value.length <= 512) { "Control turn id is invalid" }
     }
 
-    /** TODO(deprecated): 协议固定 tool_call_id 后删除多候选键猜测，只保留 schema 字段。 */
+    /** 服务端只发布 call_id；envelope.id 兜底保留到旧协议数据滚动出窗口。 */
     private fun toolCallId(envelope: WireEnvelope): String =
-        payloadText(envelope, "tool_call_id")
-            ?: payloadText(envelope, "call_id")
-            ?: payloadText(envelope, "tool_id")
-            ?: requireNotNull(envelope.id)
+        payloadText(envelope, "call_id") ?: requireNotNull(envelope.id)
 
     private fun payloadText(envelope: WireEnvelope, key: String): String? =
         (envelope.payload[key] as? JsonPrimitive)?.contentOrNull
@@ -1527,10 +1524,5 @@ class LocalDeliveryStore(
         val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val SHA256 = Regex("^[0-9a-f]{64}$")
-        // TODO(deprecated): 与 Protocol.kt 的 FRAME_ID 重复，未来统一为 ProtocolCodec 单一出处
-        val FRAME_ID = Regex(
-            "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
-                "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
-        )
     }
 }

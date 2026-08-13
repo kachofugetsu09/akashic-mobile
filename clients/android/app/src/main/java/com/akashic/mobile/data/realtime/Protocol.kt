@@ -727,7 +727,7 @@ object ProtocolCodec {
         }
     }
 
-    private val FRAME_ID = Regex(
+    internal val FRAME_ID = Regex(
         "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
             "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
     )
