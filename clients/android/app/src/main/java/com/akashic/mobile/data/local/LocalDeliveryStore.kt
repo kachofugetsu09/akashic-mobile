@@ -823,9 +823,14 @@ class LocalDeliveryStore(
                 descriptors = remote.attachments,
                 updatedAt = completedAt,
             )
-            if (remote.role == "assistant") {
+            if (
+                remote.role == "assistant" &&
+                (remote.toolChain != null || remote.extra["reasoning_content"] != null)
+            ) {
                 database.messages().deleteBlocks(messageId)
                 database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
+            } else if (remote.role == "assistant") {
+                database.messages().completeRunningBlocks(messageId, completedAt)
             }
         }
     }
@@ -1224,6 +1229,14 @@ class LocalDeliveryStore(
     ) {
         canonicalizeUserMessage(envelope, updatedAt)
         val current = ensureAssistantTurn(envelope, updatedAt)
+        val legacyIdentity = current.controlTurnId ?: envelope.turnId?.let { turnId ->
+            // legacy 流式行没有 wire 身份列时，final 以权威 attempt ID 补写一次
+            requireControlTurnId(turnId)
+            check(database.messages().bindControlTurnId(current.messageId, turnId) == 1) {
+                "Legacy control turn id 补写失败: $turnId"
+            }
+            turnId
+        }
         val blocks = database.messages().getBlocks(current.messageId)
         val finalThinking = payloadText(envelope, "thinking")?.trim().orEmpty()
         if (finalThinking.isNotEmpty() && blocks.none { it.kind == "thinking" }) {
@@ -1250,6 +1263,7 @@ class LocalDeliveryStore(
             text = delivered.content.ifEmpty { current.text },
             deliveryState = "complete",
             updatedAt = updatedAt,
+            controlTurnId = current.controlTurnId ?: legacyIdentity,
         )
         mergeCanonicalMessage(current.messageId, canonical)
         upsertMessageAttachments(
