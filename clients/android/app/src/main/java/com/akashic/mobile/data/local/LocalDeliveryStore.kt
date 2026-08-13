@@ -1030,22 +1030,22 @@ class LocalDeliveryStore(
     private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
         val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
         val turnId = requireNotNull(envelope.turnId) { "Turn event has no turn_id" }
-        val controlTurnId = payloadText(envelope, "control_turn_id") ?: turnId
-        requireControlTurnId(controlTurnId)
+        val payloadControlTurnId = payloadText(envelope, "control_turn_id")
+        payloadControlTurnId?.let(::requireControlTurnId)
         // 1. 显式 client_message_id 绑定 turn 关联列；用户 outbox 身份继续独占 clientMessageId
         val payloadClientMessageId = payloadText(envelope, "client_message_id")
         payloadClientMessageId?.let(::requireFrameId)
         val messageId = "assistant:$turnId"
         val existing = database.messages().get(messageId)
         if (existing != null) {
-            // 2. 旧版 streaming 投影没有 turn 关联列；权威事件可补写一次，非空变化 fail-loud
-            if (existing.controlTurnId == null) {
-                check(database.messages().bindControlTurnId(messageId, controlTurnId) == 1) {
-                    "Control turn id 补写失败: $controlTurnId"
+            // 2. 只有显式 wire 身份才能补写或校验；旧增量缺字段不产生第二套本地事实
+            if (payloadControlTurnId != null && existing.controlTurnId == null) {
+                check(database.messages().bindControlTurnId(messageId, payloadControlTurnId) == 1) {
+                    "Control turn id 补写失败: $payloadControlTurnId"
                 }
-            } else {
-                require(existing.controlTurnId == controlTurnId) {
-                    "Control turn id 在重放中变化: $controlTurnId"
+            } else if (payloadControlTurnId != null) {
+                require(existing.controlTurnId == payloadControlTurnId) {
+                    "Control turn id 在重放中变化: $payloadControlTurnId"
                 }
             }
             if (payloadClientMessageId != null && existing.turnClientMessageId == null) {
@@ -1063,7 +1063,7 @@ class LocalDeliveryStore(
             }
             return existing.copy(
                 turnClientMessageId = payloadClientMessageId ?: existing.turnClientMessageId,
-                controlTurnId = controlTurnId,
+                controlTurnId = payloadControlTurnId ?: existing.controlTurnId,
             )
         }
         val active = database.messages().activeAssistantTurn(sessionId)
@@ -1072,6 +1072,9 @@ class LocalDeliveryStore(
                 "同一会话出现重叠 turn: ${active.messageId.removePrefix("assistant:")} -> $turnId",
             )
         }
+        // 3. 没有 turn.started 的 legacy 恢复流才以 attempt 身份创建首个本地投影
+        val controlTurnId = payloadControlTurnId ?: turnId
+        requireControlTurnId(controlTurnId)
         val message = MessageEntity(
             messageId = messageId,
             clientMessageId = null,

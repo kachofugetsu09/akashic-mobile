@@ -233,11 +233,34 @@ class LocalDeliveryStoreTest {
             ),
             2,
         )
+        // 已部署服务端留下的 durable delta 没有重复携带逻辑身份；不得把 attempt 当成新身份。
         store.applyEvent(
             "server",
             "device",
             event(
                 2,
+                "react.thinking.delta",
+                buildJsonObject {
+                    put("block_id", "thinking:$attemptId:0")
+                    put("ordinal", 0)
+                    put("delta", "分析")
+                },
+                turnId = attemptId,
+            ),
+            3,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(3, "answer.delta", buildJsonObject { put("delta", "回答") }, turnId = attemptId),
+            4,
+        )
+        assertEquals(logicalTurnId, database.messages().get("assistant:$attemptId")!!.controlTurnId)
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                4,
                 "message.final",
                 buildJsonObject {
                     put("message_id", "mobile:test:logical:final")
@@ -246,13 +269,51 @@ class LocalDeliveryStoreTest {
                 },
                 turnId = attemptId,
             ),
-            3,
+            5,
         )
 
         assertEquals(null, database.messages().get("assistant:$attemptId"))
         val canonical = database.messages().get("mobile:test:logical:final")!!
         assertEquals(logicalTurnId, canonical.controlTurnId)
         assertEquals("最终回答", canonical.text)
+    }
+
+    @Test
+    fun explicitControlTurnIdChangeStillFailsLoudly() = runBlocking {
+        val attemptId = "turn:attempt-4"
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject { put("control_turn_id", "turn:logical-a") },
+                turnId = attemptId,
+            ),
+            2,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking {
+                store.applyEvent(
+                    "server",
+                    "device",
+                    event(
+                        2,
+                        "answer.delta",
+                        buildJsonObject {
+                            put("delta", "错误身份")
+                            put("control_turn_id", "turn:logical-b")
+                        },
+                        turnId = attemptId,
+                    ),
+                    3,
+                )
+            }
+        }
+        assertEquals("turn:logical-a", database.messages().get("assistant:$attemptId")!!.controlTurnId)
+        assertEquals(1, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
+        Unit
     }
 
     @Test
