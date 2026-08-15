@@ -2284,6 +2284,7 @@ private class MobileSnapshotPump(
                 }
                 val forceSnapshot = forceFullSnapshot.getAndSet(false)
                 if (!forceSnapshot && deliveredState == latest) continue
+                if (!forceSnapshot && shouldDeferResyncSnapshot(deliveredState, latest)) continue
                 val streamPatch = deliveredState
                     ?.takeUnless { forceSnapshot }
                     ?.let(latest::toMobileWebStreamPatch)
@@ -2360,3 +2361,13 @@ private class MobileSnapshotPump(
         scope.cancel()
     }
 }
+
+/** Hold structural history growth during sync and publish one final snapshot at READY. */
+internal fun shouldDeferResyncSnapshot(
+    delivered: ConversationUiState?,
+    latest: ConversationUiState,
+): Boolean = delivered != null &&
+    latest.isResyncing &&
+    latest.selectedSessionId == delivered.selectedSessionId &&
+    latest.projectionGeneration == delivered.projectionGeneration &&
+    latest.messages.size != delivered.messages.size

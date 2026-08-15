@@ -30,6 +30,23 @@ import org.junit.Test
 
 class MobileWebSnapshotTest {
     @Test
+    fun defersHistoryGrowthUntilResyncBecomesReady() {
+        val delivered = EmptyConversationState.copy(
+            selectedSessionId = "mobile:test",
+            projectionGeneration = 7,
+            messages = listOf(userMessage("message-1")),
+            isResyncing = true,
+        )
+        val nextPage = delivered.copy(
+            messages = listOf(userMessage("message-1"), userMessage("message-2")),
+        )
+
+        assertTrue(shouldDeferResyncSnapshot(delivered, nextPage))
+        assertEquals(false, shouldDeferResyncSnapshot(delivered, nextPage.copy(isResyncing = false)))
+        assertEquals(false, shouldDeferResyncSnapshot(null, nextPage))
+    }
+
+    @Test
     fun createsPatchForAppendOnlyStreamingAnswer() {
         val beforeMessage = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
@@ -528,3 +545,13 @@ class MobileWebSnapshotTest {
         assertTrue(encoded.contains("\"deliveryAction\":\"retry\""))
     }
 }
+
+private fun userMessage(id: String) = MessageUi.User(
+    id = id,
+    sessionId = "mobile:test",
+    text = id,
+    deliveryLabel = "已发送",
+    replyable = true,
+    createdAtMillis = 1_000,
+    reply = null,
+)
