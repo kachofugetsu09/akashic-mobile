@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "source_repository": "https://github.com/kachofugetsu09/akashic-agent",
-  "source_commit": "6ce9b978f88ff538404a07b773681eb889892086",
-  "source_tree": "d2b661c6a87012ffb0896d643b660467cb5cf2b8",
+  "source_commit": "a55cc990d67c899c43febd1e73579c3b97112198",
+  "source_tree": "b207540705437146a71c4ad7b0e377b16a933bea",
   "entrypoint": "mobile.html",
-  "asset_digest": "98f7de6734a20f6b61ca7ea51fe0074ca470741e0021f5761ca73a1a4c67fb4d"
+  "asset_digest": "af04939613ceda42caaeefc930555722ee0e063ffa8a6f8561c80e1c8fa6768a"
 }
