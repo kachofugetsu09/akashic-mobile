@@ -190,7 +190,7 @@ private data class ComposerLocalState(
 
 private data class ConversationProjection(
     val session: MobileSessionState,
-    val graph: List<MessageWithBlocks>,
+    val messages: List<MessageUi>,
     val conversations: List<ConversationSummary>,
     val composer: ComposerLocalState,
 )
@@ -306,6 +306,9 @@ class MainViewModel(
             ?.let(container.database.messages()::observeMessageGraph)
             ?.distinctUntilChanged()
             ?: flowOf(emptyList())
+        val messages = graph.map { currentGraph ->
+            projectMessages(sessionId, currentGraph)
+        }
         val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
         val composer = if (serverId == null || sessionId == null) {
             flowOf(ComposerLocalState(emptyList(), null))
@@ -317,8 +320,8 @@ class MainViewModel(
                 ComposerLocalState(attachments, draft)
             }
         }
-        combine(graph, conversations, composer) { currentGraph, currentConversations, currentComposer ->
-            ConversationProjection(state, currentGraph, currentConversations, currentComposer)
+        combine(messages, conversations, composer) { currentMessages, currentConversations, currentComposer ->
+            ConversationProjection(state, currentMessages, currentConversations, currentComposer)
         }
     }
 
@@ -329,12 +332,11 @@ class MainViewModel(
         modelCatalog,
     ) { projection, target, runtime, models ->
         val session = projection.session
-        val graph = projection.graph
+        val messages = projection.messages
         val conversations = projection.conversations
         val composerLocal = projection.composer
         val attachments = composerLocal.attachments
         val draft = composerLocal.draft
-        val messages = projectMessages(session.currentSessionId, graph)
         val sessionId = session.currentSessionId
         val observation = turnProjectionObserver.observe(messages, sessionId, session.activeTurnId)
         // 1. 只观测活动或刚关闭 turn 的 UI 投影；空 thinking 块不是可见首字
