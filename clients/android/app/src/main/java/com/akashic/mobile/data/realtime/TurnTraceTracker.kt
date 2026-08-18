@@ -103,7 +103,13 @@ class TurnTraceTracker(
             logMissingOrigin(sendKey(clientMessageId), TurnTraceStage.LOCAL_OUTBOX_COMMITTED)
             return
         }
-        require(entry.sessionId == sessionId) { "Local outbox commit session mismatch" }
+        if (entry.sessionId != sessionId) {
+            logIdentityMismatch(
+                "cmid=$clientMessageId resolved_session=${entry.sessionId} " +
+                    "observed_session=$sessionId stage=local_outbox_committed",
+            )
+            return
+        }
         record(entry, sendKey(clientMessageId), TurnTraceStage.LOCAL_OUTBOX_COMMITTED)
     }
 
@@ -166,14 +172,23 @@ class TurnTraceTracker(
         val turnKey = turnKey(sessionId, turnId)
         val existing = entries[turnKey]
         if (existing != null) {
-            require(existing.sessionId == sessionId) { "Turn trace session mismatch" }
-            // 1. 已有 entry 时补写缺失的 cmid，非空则校验一致
+            if (existing.sessionId != sessionId) {
+                logIdentityMismatch(
+                    "resolved_session=${existing.sessionId} observed_session=$sessionId " +
+                        "turn=$turnId stage=turn_started_received",
+                )
+                return
+            }
+            // 1. 已有 entry 时补写缺失的 cmid；与既有 cmid 不一致时保留既有值并记录，不覆盖
             if (clientMessageId != null) {
                 if (existing.clientMessageId == null) {
                     existing.clientMessageId = clientMessageId
                     clientMessageIdToTurnKey[clientMessageId] = turnKey
-                } else {
-                    require(existing.clientMessageId == clientMessageId) { "Turn trace client_message_id mismatch" }
+                } else if (existing.clientMessageId != clientMessageId) {
+                    logIdentityMismatch(
+                        "cmid=$clientMessageId resolved_cmid=${existing.clientMessageId} " +
+                            "turn=$turnId stage=turn_started_received",
+                    )
                 }
             }
             record(existing, turnKey, TurnTraceStage.TURN_STARTED_RECEIVED)
@@ -330,14 +345,31 @@ class TurnTraceTracker(
         )
     }
 
+    /** 投影身份与观测到的 session/turn/cmid 不一致：只记录，不 fail-loud。 */
+    private fun logIdentityMismatch(detail: String) {
+        val nowElapsed = clock.elapsedMillis()
+        val nowWall = clock.wallMillis()
+        logSink(
+            "trace identity_mismatch $detail " +
+                "mono=$nowElapsed wall=${Instant.ofEpochMilli(nowWall)}",
+        )
+    }
+
     private fun entryFor(key: String, sessionId: String, turnId: String, clientMessageId: String?): TraceEntry? {
         val entry = entries[key]
         if (entry != null) return entry
         if (clientMessageId == null) return null
-        // 反查 cmid 命中的 entry 必须与当前 session/turn 一致，跨会话或跨 turn 复用即 fail-loud
+        // 反查 cmid 命中的 entry 与当前 session/turn 不一致：cmid 已跨 turn/会话复用。
+        // 移动端只是服务端投影、不是身份 owner，记录不一致并返回 null，让调用方走 origin=missing
         val resolved = entries[clientMessageIdToTurnKey[clientMessageId]] ?: return null
-        require(resolved.sessionId == sessionId) { "Turn trace session mismatch" }
-        require(resolved.turnId == turnId) { "Turn trace turn mismatch" }
+        if (resolved.sessionId != sessionId || resolved.turnId != turnId) {
+            logIdentityMismatch(
+                "cmid=$clientMessageId resolved_session=${resolved.sessionId} " +
+                    "resolved_turn=${resolved.turnId ?: "missing"} " +
+                    "observed_session=$sessionId observed_turn=$turnId",
+            )
+            return null
+        }
         return resolved
     }
 
@@ -346,7 +378,12 @@ class TurnTraceTracker(
         val entry = entries[sendKey(clientMessageId)]
             ?: entries[clientMessageIdToTurnKey[clientMessageId]]
             ?: return null
-        require(entry.sessionId == sessionId) { "Turn trace session mismatch" }
+        if (entry.sessionId != sessionId) {
+            logIdentityMismatch(
+                "cmid=$clientMessageId resolved_session=${entry.sessionId} observed_session=$sessionId",
+            )
+            return null
+        }
         return entry
     }
 
@@ -358,7 +395,12 @@ class TurnTraceTracker(
     private fun entryKey(entry: TraceEntry, clientMessageId: String): String {
         if (entries[sendKey(clientMessageId)] === entry) return sendKey(clientMessageId)
         val turnKey = clientMessageIdToTurnKey[clientMessageId]
-        require(turnKey != null && entries[turnKey] === entry) { "Turn trace entry key mismatch" }
+        if (turnKey == null || entries[turnKey] !== entry) {
+            logIdentityMismatch(
+                "cmid=$clientMessageId mapped_key=${turnKey ?: "missing"} entry_not_resident",
+            )
+            return sendKey(clientMessageId)
+        }
         return turnKey
     }
 

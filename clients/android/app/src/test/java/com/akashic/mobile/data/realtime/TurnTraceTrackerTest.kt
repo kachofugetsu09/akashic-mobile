@@ -464,42 +464,34 @@ class TurnTraceTrackerTest {
     }
 
     @Test
-    fun localOutboxCommitAndDispatchValidateSession() {
+    fun localOutboxCommitAndDispatchLogSessionMismatchInsteadOfCrash() {
         val tracker = tracker()
         bindSend(tracker, "mobile:test", "cmid-12")
-        try {
-            tracker.onLocalOutboxCommitted("other:session", "cmid-12")
-            throw AssertionError("session mismatch must fail loudly")
-        } catch (error: IllegalArgumentException) {
-            assertTrue(error.message!!.contains("session mismatch"))
-        }
-        try {
-            tracker.onSocketDispatched("other:session", "cmid-12")
-            throw AssertionError("session mismatch must fail loudly")
-        } catch (error: IllegalArgumentException) {
-            assertTrue(error.message!!.contains("session mismatch"))
-        }
+        tracker.onLocalOutboxCommitted("other:session", "cmid-12")
+        assertTrue(lastLine().contains("identity_mismatch"))
+        tracker.onSocketDispatched("other:session", "cmid-12")
+        assertEquals(2, lines.count { it.contains("identity_mismatch") })
+        assertTrue(lastLine().contains("origin=missing"))
+        assertEquals(1, tracker.entryCount())
     }
 
     @Test
-    fun cmidReverseLookupRejectedWhenSameSessionReusesTurn() {
+    fun cmidReverseLookupLogsMissingWhenSameSessionReusesTurn() {
         val tracker = tracker()
         bindSend(tracker, "mobile:test", "cmid-14")
         tracker.onTurnStartedReceived("mobile:test", "turn-11a", "cmid-14")
-        // 同 session 复用 cmid 指向旧 turn：反查 entry 的 turnId 不匹配必须 fail-loud
-        try {
-            tracker.onUiProjected(
-                sessionId = "mobile:test",
-                turnId = "turn-11b",
-                clientMessageId = "cmid-14",
-                hasThinking = true,
-                hasAnswer = false,
-                streaming = true,
-            )
-            throw AssertionError("turn mismatch must fail loudly")
-        } catch (error: IllegalArgumentException) {
-            assertTrue(error.message!!.contains("turn mismatch"))
-        }
+        // 同 session 复用 cmid 指向旧 turn：反查 entry 的 turnId 不匹配时记录不一致并走 origin=missing，不再 crash
+        tracker.onUiProjected(
+            sessionId = "mobile:test",
+            turnId = "turn-11b",
+            clientMessageId = "cmid-14",
+            hasThinking = true,
+            hasAnswer = false,
+            streaming = true,
+        )
+        assertTrue(lines.any { it.contains("identity_mismatch") })
+        assertTrue(lastLine().contains("origin=missing"))
+        assertEquals(1, tracker.entryCount())
     }
 
     @Test
@@ -511,13 +503,10 @@ class TurnTraceTrackerTest {
         tracker.onTurnStartedReceived("mobile:test", "turn-9", "cmid-9")
         tracker.onTerminalReceived("mobile:test", "turn-9", "completed")
         assertTrue(lastLine().contains("turn=turn-9 cmid=cmid-9 stage=terminal_received"))
-        // 2. cmid 不一致时 fail-loud
-        try {
-            tracker.onTurnStartedReceived("mobile:test", "turn-9", "cmid-wrong")
-            throw AssertionError("cmid mismatch must fail loudly")
-        } catch (error: IllegalArgumentException) {
-            assertTrue(error.message!!.contains("client_message_id mismatch"))
-        }
+        // 2. cmid 不一致时记录不一致并保留既有 cmid，不再 crash
+        tracker.onTurnStartedReceived("mobile:test", "turn-9", "cmid-wrong")
+        assertTrue(lines.any { it.contains("identity_mismatch") })
+        assertEquals(1, tracker.entryCount())
     }
 
     @Test
