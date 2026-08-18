@@ -1756,9 +1756,8 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
-    fun finalCanonicalIdReplacesReplyingOptimisticUserMessage() = runBlocking {
+    fun finalCompletesOptimisticUserWithoutMigratingIdentity() = runBlocking {
         val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        val attachmentId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
         database.messages().upsert(
             MessageEntity(
                 messageId = "user:$clientId",
@@ -1769,14 +1768,7 @@ class LocalDeliveryStoreTest {
                 deliveryState = "sent",
                 createdAt = 1,
                 updatedAt = 1,
-                replyToMessageId = "mobile:test:0",
-                replyRole = "assistant",
-                replyPreview = "旧回答",
             ),
-        )
-        database.mediaAttachments().upsert(mediaAttachment(attachmentId))
-        database.mediaAttachments().linkAll(
-            listOf(MessageAttachmentEntity("user:$clientId", attachmentId, 0)),
         )
 
         store.applyEvent(
@@ -1791,16 +1783,10 @@ class LocalDeliveryStoreTest {
             2,
         )
 
-        assertEquals(null, database.messages().get("user:$clientId"))
-        val canonical = database.messages().get("mobile:test:user:canonical")!!
-        assertEquals("complete", canonical.deliveryState)
-        assertEquals("mobile:test:0", canonical.replyToMessageId)
-        assertEquals("assistant", canonical.replyRole)
-        assertEquals("旧回答", canonical.replyPreview)
-        assertEquals(
-            listOf(attachmentId),
-            database.mediaAttachments().forMessage(canonical.messageId).map { it.attachmentId },
-        )
+        // final 只推进乐观用户消息状态，不迁移 canonical 身份（仍由 history 投影重建）
+        assertEquals(null, database.messages().get("mobile:test:user:canonical"))
+        val optimistic = database.messages().get("user:$clientId")!!
+        assertEquals("complete", optimistic.deliveryState)
         assertEquals("回答", database.messages().get("mobile:test:assistant:canonical")!!.text)
     }
 

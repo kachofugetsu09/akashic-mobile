@@ -1285,7 +1285,7 @@ class RealtimeSession(
                                 now,
                             ),
                             message = MessageEntity(
-                                // TODO(deprecated): optimistic 本地临时 ID 命名空间，final 以 user_message_id 原子迁移
+                                // TODO(deprecated): optimistic 本地临时 ID 命名空间，canonical 身份由服务端 history 投影原子迁移
                                 messageId = "user:$clientMessageId",
                                 clientMessageId = clientMessageId,
                                 sessionId = sessionId,
