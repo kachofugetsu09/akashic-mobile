@@ -1246,7 +1246,7 @@ class LocalDeliveryStore(
         delivered: FinalMessageEvent,
         updatedAt: Long,
     ) {
-        canonicalizeUserMessage(envelope, updatedAt)
+        completeOptimisticUser(envelope, updatedAt)
         val current = ensureAssistantTurn(envelope, updatedAt)
         val legacyIdentity = current.controlTurnId ?: envelope.turnId?.let { turnId ->
             // legacy 流式行没有 wire 身份列时，final 以权威 attempt ID 补写一次
@@ -1297,25 +1297,15 @@ class LocalDeliveryStore(
         database.messages().completeRunningBlocks(canonicalId, updatedAt)
     }
 
-    /** 用服务端最终事件把 optimistic 用户消息迁移为 canonical identity。 */
-    private suspend fun canonicalizeUserMessage(envelope: WireEnvelope, updatedAt: Long) {
+    /** final 终态把乐观用户消息推进为 complete；canonical 身份仍由服务端 history 投影迁移。 */
+    private suspend fun completeOptimisticUser(envelope: WireEnvelope, updatedAt: Long) {
         val clientMessageId = payloadText(envelope, "client_message_id") ?: return
-        val canonicalId = requireNotNull(payloadText(envelope, "user_message_id")) {
-            "Final event with client_message_id has no user_message_id"
-        }
         requireFrameId(clientMessageId)
-        require(canonicalId.isNotBlank() && canonicalId.length <= 512) {
-            "Canonical user message id is invalid"
-        }
         val source = database.messages().getByClientMessageId(clientMessageId) ?: return
-        mergeCanonicalMessage(
-            source.messageId,
-            source.copy(
-                messageId = canonicalId,
-                deliveryState = "complete",
-                updatedAt = updatedAt,
-            ),
-        )
+        if (source.role != "user" || source.deliveryState !in setOf("pending", "sent")) return
+        check(database.messages().updateDelivery(clientMessageId, "complete", updatedAt) == 1) {
+            "Optimistic user message disappeared"
+        }
     }
 
     /** 把流式或 optimistic 消息原子迁移到服务端 canonical identity。 */
