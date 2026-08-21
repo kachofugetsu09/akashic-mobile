@@ -163,6 +163,50 @@ class ConnectionRecoveryPolicyTest {
     }
 
     @Test
+    fun `versioned history snapshot accepts sparse seq and detects stale projection`() {
+        assertEquals(
+            HistorySyncAction.COMPLETE,
+            historySyncAction(1_816, 1_817, HistoryProjectionProgress(1_816, 1_817), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESUME,
+            historySyncAction(1_816, 1_817, HistoryProjectionProgress(900, 901), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESET,
+            historySyncAction(1_816, 1_818, HistoryProjectionProgress(1_816, 1_817), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESET,
+            historySyncAction(1_816, 1_817, HistoryProjectionProgress(1_815, 1_817), false),
+        )
+        assertEquals(
+            HistorySyncAction.COMPLETE,
+            historySyncAction(0, -1, HistoryProjectionProgress(0, null), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESET,
+            historySyncAction(0, -1, HistoryProjectionProgress(1, 7), false),
+        )
+    }
+
+    @Test
+    fun `history reset negotiates a fresh snapshot and terminal count catches stale rows`() {
+        assertNull(historyRequestSnapshotMaxSeq(HistorySyncAction.RESET, 1_817))
+        assertEquals(1_817L, historyRequestSnapshotMaxSeq(HistorySyncAction.RESUME, 1_817))
+        assertFalse(historyTerminalMatches(101, HistoryProjectionProgress(102, 102)))
+        assertTrue(historyTerminalMatches(101, HistoryProjectionProgress(101, 102)))
+    }
+
+    @Test
+    fun `session list retries legacy payload once per generation`() {
+        assertTrue(shouldRetryLegacySessionList("session.list", "invalid_payload", 8, null))
+        assertFalse(shouldRetryLegacySessionList("session.list", "invalid_payload", 8, 8))
+        assertFalse(shouldRetryLegacySessionList("history.get", "invalid_payload", 8, null))
+        assertFalse(shouldRetryLegacySessionList("session.list", "unsupported_command", 8, null))
+    }
+
+    @Test
     fun `history batch stops after transport send failure`() = runBlocking {
         val requested = mutableListOf<Pair<String, Int>>()
         val sessions = listOf(

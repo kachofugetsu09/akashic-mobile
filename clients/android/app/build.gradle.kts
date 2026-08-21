@@ -62,8 +62,8 @@ android {
         applicationId = "com.akashic.mobile"
         minSdk = 26
         targetSdk = 36
-        versionCode = 64
-        versionName = "0.8.33-rc.4"
+        versionCode = 65
+        versionName = "0.8.33-rc.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

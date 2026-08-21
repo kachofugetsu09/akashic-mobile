@@ -542,6 +542,7 @@ data class RemoteSessionSummary(
     val title: String,
     @SerialName("updated_at") val updatedAt: String,
     @SerialName("message_count") val messageCount: Int,
+    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
 )
 
 @Serializable
