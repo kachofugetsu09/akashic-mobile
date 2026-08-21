@@ -64,6 +64,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
+internal const val HISTORY_PAGE_SIZE = 100
+
 data class MobileSessionState(
     val initialized: Boolean = false,
     val scanGeneration: Long = 0,
@@ -2329,12 +2331,7 @@ class RealtimeSession(
         return sendSyncCommand(
             type = "history.get",
             sessionId = sessionId,
-            payload = buildJsonObject {
-                put("page_size", HISTORY_PAGE_SIZE)
-                put("content_ref_version", 1)
-                put("after_seq", afterSeq)
-                snapshotMaxSeq?.let { put("snapshot_max_seq", it) }
-            },
+            payload = historyCursorPayload(afterSeq, snapshotMaxSeq),
             legacyPage = legacyPage,
         )
     }
@@ -3142,7 +3139,6 @@ class RealtimeSession(
             "unsupported_content_ref_version",
         )
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-        const val HISTORY_PAGE_SIZE = 100
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
@@ -3150,6 +3146,14 @@ class RealtimeSession(
         const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }
+
+internal fun historyCursorPayload(afterSeq: Long, snapshotMaxSeq: Long?): JsonObject =
+    buildJsonObject {
+        put("page_size", HISTORY_PAGE_SIZE)
+        put("content_ref_version", 1)
+        put("after_seq", afterSeq)
+        snapshotMaxSeq?.let { put("snapshot_max_seq", it) }
+    }
 
 internal fun endHistoryReload(state: MobileSessionState, errorMessage: String): MobileSessionState =
     state.copy(isReloadingHistory = false, errorMessage = errorMessage)

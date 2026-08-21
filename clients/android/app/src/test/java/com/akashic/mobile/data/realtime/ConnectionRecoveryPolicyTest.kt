@@ -3,6 +3,7 @@ package com.akashic.mobile.data.realtime
 import com.akashic.mobile.data.local.HistoryProjectionProgress
 import com.akashic.mobile.domain.model.ConnectionPhase
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,6 +13,16 @@ import org.junit.Test
 class ConnectionRecoveryPolicyTest {
     private val unavailable = TransferNetworkState(TransferNetworkKind.UNAVAILABLE, false)
     private val unmetered = TransferNetworkState(TransferNetworkKind.UNMETERED, true)
+
+    @Test
+    fun `history cursor request uses the production page size`() {
+        val payload = historyCursorPayload(afterSeq = 41, snapshotMaxSeq = 99)
+
+        assertEquals(JsonPrimitive(100), payload["page_size"])
+        assertEquals(JsonPrimitive(1), payload["content_ref_version"])
+        assertEquals(JsonPrimitive(41), payload["after_seq"])
+        assertEquals(JsonPrimitive(99), payload["snapshot_max_seq"])
+    }
 
     @Test
     fun `failure before recovery consumes one immediate reconnect`() {
