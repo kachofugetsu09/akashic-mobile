@@ -3,6 +3,7 @@ package com.akashic.mobile.data.realtime
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -137,7 +138,8 @@ class RuntimeInspectionCoordinatorTest {
                 payload = """
                     {"snapshot_id":"snap","plugins":[],"skills":[],
                     "mcp_servers":[{"owner_id":"workspace","name":"fitbit",
-                    "tool_count":2,"tools":[{"name":"sleep","description":"睡眠"}]}]}
+                    "tool_count":2,"tools":[{"name":"sleep","description":"睡眠",
+                    "input_schema":{"type":"object","properties":{"date":{"type":"string"}}}}]}]}
                 """,
             ),
         )
@@ -156,6 +158,12 @@ class RuntimeInspectionCoordinatorTest {
         assertFalse(coordinator.state.value.refreshing)
         assertEquals("memory", coordinator.state.value.documents.single().id)
         assertEquals("fitbit", coordinator.state.value.mcpServers.single().name)
+        assertEquals(
+            "object",
+            coordinator.state.value.mcpServers.single().tools.single().inputSchema["type"]
+                ?.jsonPrimitive
+                ?.content,
+        )
         assertEquals("job-1", coordinator.state.value.jobs.single().id)
 
         coordinator.openDocument("memory")

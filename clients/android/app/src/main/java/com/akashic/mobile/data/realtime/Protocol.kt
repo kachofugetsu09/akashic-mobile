@@ -484,6 +484,7 @@ data class RuntimeMcpSummary(
 data class RuntimeMcpToolSummary(
     val name: String,
     val description: String,
+    @SerialName("input_schema") val inputSchema: JsonObject,
 )
 
 @Serializable
