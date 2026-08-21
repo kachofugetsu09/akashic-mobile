@@ -1,6 +1,8 @@
 package com.akashic.mobile
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -32,6 +34,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
@@ -380,6 +383,15 @@ class MainActivity : ComponentActivity() {
                             onRestartPairing = viewModel::restartPairing,
                             onDismiss = { pairingRecoveryNoticeDismissed.value = true },
                         )
+                    } else if (session.errorMessage != null) {
+                        ErrorCopyNotice(
+                            message = requireNotNull(session.errorMessage),
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 16.dp, vertical = 20.dp),
+                            onCopy = ::copyErrorToClipboard,
+                            onDismiss = viewModel::dismissError,
+                        )
                     } else if (notificationPermissionNoticeVisible(
                             notificationsEnabled = notificationsEnabled.value,
                             permissionRequested = notificationPermissionWasRequested(),
@@ -529,6 +541,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun copyErrorToClipboard(message: String) {
+        getSystemService(ClipboardManager::class.java).setPrimaryClip(
+            ClipData.newPlainText("Akashic error", message),
+        )
+        Toast.makeText(this, "完整错误已复制", Toast.LENGTH_SHORT).show()
+    }
+
     private fun shareDiagnostics() {
         val report = CrashDiagnostics.exportReport(application)
         if (!nativeActivityLaunchSucceeded(
@@ -613,6 +632,30 @@ private fun IncomingShareNotice(
         dismissAction = { TextButton(onClick = onDiscard) { Text("放弃") } },
     ) {
         Text(message)
+    }
+}
+
+@Composable
+private fun ErrorCopyNotice(
+    message: String,
+    modifier: Modifier = Modifier,
+    onCopy: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Snackbar(
+        modifier = modifier,
+        action = {
+            TextButton(onClick = { onCopy(message) }) {
+                Text("复制错误")
+            }
+        },
+        dismissAction = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    ) {
+        Text(
+            text = message,
+            maxLines = 4,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
