@@ -3142,7 +3142,7 @@ class RealtimeSession(
             "unsupported_content_ref_version",
         )
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-        const val HISTORY_PAGE_SIZE = 10
+        const val HISTORY_PAGE_SIZE = 100
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
