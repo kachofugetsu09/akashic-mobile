@@ -415,6 +415,50 @@ data class RuntimePluginSummary(
     val id: String,
     val revision: String,
     @SerialName("generation_id") val generationId: String,
+    @SerialName("api_version") val apiVersion: Int? = null,
+    val composition: RuntimePluginComposition? = null,
+)
+
+@Serializable
+data class RuntimePluginComposition(
+    val ready: Boolean,
+    @SerialName("topology_identity") val topologyIdentity: String,
+    @SerialName("composition_revision") val compositionRevision: Int,
+    val fibers: List<RuntimePluginFiber>,
+    val health: List<RuntimePluginHealth>,
+    @SerialName("incident_count") val incidentCount: Long,
+    @SerialName("recent_incidents") val recentIncidents: List<RuntimePluginIncident>,
+    @SerialName("incident_overflowed") val incidentOverflowed: Boolean,
+)
+
+@Serializable
+data class RuntimePluginFiber(
+    val name: String,
+    val parent: String?,
+    val state: String,
+    val required: Boolean,
+    @SerialName("static_active") val staticActive: Boolean,
+    val dependencies: List<String>,
+    @SerialName("missing_services") val missingServices: List<String>,
+    val error: String?,
+)
+
+@Serializable
+data class RuntimePluginHealth(
+    val owner: String,
+    val name: String,
+    val required: Boolean,
+    val healthy: Boolean,
+    val reason: String?,
+)
+
+@Serializable
+data class RuntimePluginIncident(
+    val sequence: Long,
+    val owner: String,
+    val kind: String,
+    val message: String,
+    @SerialName("error_type") val errorType: String?,
 )
 
 @Serializable
@@ -440,6 +484,7 @@ data class RuntimeMcpSummary(
 data class RuntimeMcpToolSummary(
     val name: String,
     val description: String,
+    @SerialName("input_schema") val inputSchema: JsonObject,
 )
 
 @Serializable
@@ -497,6 +542,7 @@ data class RemoteSessionSummary(
     val title: String,
     @SerialName("updated_at") val updatedAt: String,
     @SerialName("message_count") val messageCount: Int,
+    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
 )
 
 @Serializable

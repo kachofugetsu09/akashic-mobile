@@ -3,6 +3,7 @@ package com.akashic.mobile.data.realtime
 import com.akashic.mobile.data.local.HistoryProjectionProgress
 import com.akashic.mobile.domain.model.ConnectionPhase
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -12,6 +13,16 @@ import org.junit.Test
 class ConnectionRecoveryPolicyTest {
     private val unavailable = TransferNetworkState(TransferNetworkKind.UNAVAILABLE, false)
     private val unmetered = TransferNetworkState(TransferNetworkKind.UNMETERED, true)
+
+    @Test
+    fun `history cursor request uses the production page size`() {
+        val payload = historyCursorPayload(afterSeq = 41, snapshotMaxSeq = 99)
+
+        assertEquals(JsonPrimitive(100), payload["page_size"])
+        assertEquals(JsonPrimitive(1), payload["content_ref_version"])
+        assertEquals(JsonPrimitive(41), payload["after_seq"])
+        assertEquals(JsonPrimitive(99), payload["snapshot_max_seq"])
+    }
 
     @Test
     fun `failure before recovery consumes one immediate reconnect`() {
@@ -149,6 +160,50 @@ class ConnectionRecoveryPolicyTest {
                 pageSize = 10,
             ),
         )
+    }
+
+    @Test
+    fun `versioned history snapshot accepts sparse seq and detects stale projection`() {
+        assertEquals(
+            HistorySyncAction.COMPLETE,
+            historySyncAction(1_816, 1_817, HistoryProjectionProgress(1_816, 1_817), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESUME,
+            historySyncAction(1_816, 1_817, HistoryProjectionProgress(900, 901), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESET,
+            historySyncAction(1_816, 1_818, HistoryProjectionProgress(1_816, 1_817), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESET,
+            historySyncAction(1_816, 1_817, HistoryProjectionProgress(1_815, 1_817), false),
+        )
+        assertEquals(
+            HistorySyncAction.COMPLETE,
+            historySyncAction(0, -1, HistoryProjectionProgress(0, null), false),
+        )
+        assertEquals(
+            HistorySyncAction.RESET,
+            historySyncAction(0, -1, HistoryProjectionProgress(1, 7), false),
+        )
+    }
+
+    @Test
+    fun `history reset negotiates a fresh snapshot and terminal count catches stale rows`() {
+        assertNull(historyRequestSnapshotMaxSeq(HistorySyncAction.RESET, 1_817))
+        assertEquals(1_817L, historyRequestSnapshotMaxSeq(HistorySyncAction.RESUME, 1_817))
+        assertFalse(historyTerminalMatches(101, HistoryProjectionProgress(102, 102)))
+        assertTrue(historyTerminalMatches(101, HistoryProjectionProgress(101, 102)))
+    }
+
+    @Test
+    fun `session list retries legacy payload once per generation`() {
+        assertTrue(shouldRetryLegacySessionList("session.list", "invalid_payload", 8, null))
+        assertFalse(shouldRetryLegacySessionList("session.list", "invalid_payload", 8, 8))
+        assertFalse(shouldRetryLegacySessionList("history.get", "invalid_payload", 8, null))
+        assertFalse(shouldRetryLegacySessionList("session.list", "unsupported_command", 8, null))
     }
 
     @Test

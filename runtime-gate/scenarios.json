@@ -225,6 +225,12 @@
       "consumer_test": "refreshProjectsAllListsAndOpensMarkdownDetail"
     },
     {
+      "id": "plugin-v3-runtime-inspection-composition",
+      "provider_test": "tests/test_runtime_inspection.py::test_capabilities_project_bounded_v3_composition_facts",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/RuntimeInspectionCoordinatorTest.kt",
+      "consumer_test": "decodes plugin v3 composition with strict schema"
+    },
+    {
       "id": "model-catalog-projects-session-selection",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_model_catalog_returns_bound_registry_and_session_selection",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ModelCatalogCoordinatorTest.kt",

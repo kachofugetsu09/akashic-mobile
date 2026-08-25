@@ -64,6 +64,8 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
+internal const val HISTORY_PAGE_SIZE = 100
+
 data class MobileSessionState(
     val initialized: Boolean = false,
     val scanGeneration: Long = 0,
@@ -209,6 +211,56 @@ internal fun historyStartPage(
     if (!contiguous || local.messageCount > remoteMessageCount) return 1
     if (local.messageCount == remoteMessageCount) return null
     return local.messageCount / pageSize + 1
+}
+
+internal enum class HistorySyncAction { COMPLETE, RESUME, RESET }
+
+internal fun shouldRetryLegacySessionList(
+    pendingType: String,
+    errorCode: String?,
+    generation: Long,
+    legacyGeneration: Long?,
+): Boolean =
+    pendingType == "session.list" &&
+        errorCode == "invalid_payload" &&
+        legacyGeneration != generation
+
+internal fun historyRequestSnapshotMaxSeq(
+    action: HistorySyncAction,
+    snapshotMaxSeq: Long?,
+): Long? = if (action == HistorySyncAction.RESET) null else snapshotMaxSeq
+
+internal fun historyTerminalMatches(remoteTotal: Int, local: HistoryProjectionProgress): Boolean =
+    local.messageCount == remoteTotal
+
+/** 用权威消息数与 seq 高水位选择历史恢复动作。 */
+internal fun historySyncAction(
+    remoteMessageCount: Int,
+    snapshotMaxSeq: Long?,
+    local: HistoryProjectionProgress,
+    forceReload: Boolean,
+): HistorySyncAction {
+    if (forceReload) return HistorySyncAction.RESET
+    if (snapshotMaxSeq == null) {
+        return when (historyStartPage(remoteMessageCount, local, false, HISTORY_PAGE_SIZE)) {
+            null -> HistorySyncAction.COMPLETE
+            1 -> HistorySyncAction.RESET
+            else -> HistorySyncAction.RESUME
+        }
+    }
+    require(remoteMessageCount >= 0 && snapshotMaxSeq >= -1)
+    require((remoteMessageCount == 0) == (snapshotMaxSeq == -1L))
+    if (local.messageCount > remoteMessageCount) return HistorySyncAction.RESET
+    if (local.messageCount == remoteMessageCount) {
+        val expectedLocalMaxSeq = snapshotMaxSeq.takeUnless { it == -1L }
+        return if (local.maxServerSeq == expectedLocalMaxSeq) {
+            HistorySyncAction.COMPLETE
+        } else {
+            HistorySyncAction.RESET
+        }
+    }
+    val localMaxSeq = local.maxServerSeq ?: return HistorySyncAction.RESUME
+    return if (localMaxSeq < snapshotMaxSeq) HistorySyncAction.RESUME else HistorySyncAction.RESET
 }
 
 /** 从本地连续进度继续历史请求，并在传输失效后停止当前批次。 */
@@ -424,6 +476,8 @@ class RealtimeSession(
     private var syncGeneration = 0L
     private var completedSyncGeneration = 0L
     private var resetRebuildGeneration: Long? = null
+    private var legacySessionListGeneration: Long? = null
+    private var terminalHistoryMismatchGeneration: Long? = null
     private val pendingSyncCommands = mutableMapOf<String, PendingSyncCommand>()
     private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
     private val requestedHistoryCursors = mutableSetOf<Triple<Long, String, Long>>()
@@ -1974,6 +2028,18 @@ class RealtimeSession(
                     require(envelope.type == "${pending.type}.error") { "历史同步错误类型不匹配" }
                     val errorCode = envelope.payload["code"]?.jsonPrimitive?.content
                     if (
+                        shouldRetryLegacySessionList(
+                            pending.type,
+                            errorCode,
+                            syncGeneration,
+                            legacySessionListGeneration,
+                        )
+                    ) {
+                        legacySessionListGeneration = syncGeneration
+                        requestSessionList()
+                        return
+                    }
+                    if (
                         pending.type == "history.get" &&
                         pending.afterSeq != null &&
                         pending.page != null &&
@@ -2088,7 +2154,15 @@ class RealtimeSession(
 
     private fun requestSessionList() {
         if (hasPendingSyncCommand("session.list")) return
-        sendSyncCommand(type = "session.list", sessionId = null, payload = buildJsonObject {})
+        sendSyncCommand(
+            type = "session.list",
+            sessionId = null,
+            payload = buildJsonObject {
+                if (legacySessionListGeneration != syncGeneration) {
+                    put("history_snapshot_version", 1)
+                }
+            },
+        )
     }
 
     private fun requestCommandList() {
@@ -2207,29 +2281,52 @@ class RealtimeSession(
     private suspend fun requestAllHistory(envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
         val forceReload = resetRebuildGeneration == syncGeneration
-        for (session in payload.items) {
-            if (session.messageCount <= 0) continue
-            val local = database.messages().historyProjectionProgress(session.sessionId)
-            val contiguous = if (local.messageCount == 0) {
-                local.maxServerSeq == null
-            } else {
-                local.maxServerSeq == local.messageCount.toLong() - 1
+        val sessions = payload.items
+        var localProgress = sessions.associateWith {
+            database.messages().historyProjectionProgress(it.sessionId)
+        }
+        val projectionMismatch = !forceReload && sessions.any { session ->
+            historySyncAction(
+                session.messageCount,
+                session.snapshotMaxSeq,
+                requireNotNull(localProgress[session]),
+                forceReload = false,
+            ) == HistorySyncAction.RESET
+        }
+        if (forceReload || projectionMismatch) {
+            val currentProfile = requireNotNull(profile)
+            deliveryStore.clearReloadableCache(
+                currentProfile.serverId,
+                mutableState.value.currentSessionId,
+            )
+            messageContentStore.reconcile()
+            mutableState.value = mutableState.value.copy(
+                projectionGeneration = mutableState.value.projectionGeneration + 1,
+            )
+            localProgress = sessions.associateWith {
+                database.messages().historyProjectionProgress(it.sessionId)
             }
-            val afterSeq = when {
-                forceReload || !contiguous || local.messageCount > session.messageCount -> -1L
-                local.messageCount == session.messageCount -> null
-                else -> local.maxServerSeq ?: -1L
-            } ?: continue
-            val legacyPage = historyStartPage(
-                remoteMessageCount = session.messageCount,
-                local = local,
-                forceReload = forceReload,
-                pageSize = HISTORY_PAGE_SIZE,
-            ) ?: continue
+        }
+        for (session in sessions) {
+            val local = requireNotNull(localProgress[session])
+            val action = historySyncAction(
+                session.messageCount,
+                session.snapshotMaxSeq,
+                local,
+                forceReload || projectionMismatch,
+            )
+            if (action == HistorySyncAction.COMPLETE) continue
+            if (session.messageCount == 0) continue
+            val afterSeq = if (action == HistorySyncAction.RESET) -1L else local.maxServerSeq ?: -1L
+            val legacyPage = if (action == HistorySyncAction.RESET) {
+                1
+            } else {
+                local.messageCount / HISTORY_PAGE_SIZE + 1
+            }
             if (!requestHistoryCursor(
                     session.sessionId,
                     afterSeq,
-                    snapshotMaxSeq = null,
+                    snapshotMaxSeq = historyRequestSnapshotMaxSeq(action, session.snapshotMaxSeq),
                     legacyPage = legacyPage,
                 )
             ) return
@@ -2292,7 +2389,7 @@ class RealtimeSession(
         }
     }
 
-    private fun requestNextHistoryPage(envelope: WireEnvelope) {
+    private suspend fun requestNextHistoryPage(envelope: WireEnvelope) {
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
         if (payload.contentRefVersion == null) {
@@ -2315,6 +2412,12 @@ class RealtimeSession(
         if (hasMore) {
             require(nextAfterSeq > afterSeq) { "History page cursor did not advance" }
             requestHistoryCursor(sessionId, nextAfterSeq, snapshotMaxSeq)
+        } else {
+            val local = database.messages().historyProjectionProgress(sessionId)
+            if (!historyTerminalMatches(payload.total, local)) {
+                terminalHistoryMismatchGeneration = syncGeneration
+                restartHistorySyncAfterTerminalMismatch()
+            }
         }
     }
 
@@ -2329,12 +2432,7 @@ class RealtimeSession(
         return sendSyncCommand(
             type = "history.get",
             sessionId = sessionId,
-            payload = buildJsonObject {
-                put("page_size", HISTORY_PAGE_SIZE)
-                put("content_ref_version", 1)
-                put("after_seq", afterSeq)
-                snapshotMaxSeq?.let { put("snapshot_max_seq", it) }
-            },
+            payload = historyCursorPayload(afterSeq, snapshotMaxSeq),
             legacyPage = legacyPage,
         )
     }
@@ -2409,7 +2507,26 @@ class RealtimeSession(
                 "历史同步 reply page 不匹配"
             }
         }
+        if (restartHistorySyncAfterTerminalMismatch()) return
         finishSessionSyncIfComplete()
+    }
+
+    /** 终页数量不一致时清掉可重建投影，并从服务端取得一份新快照。 */
+    private suspend fun restartHistorySyncAfterTerminalMismatch(): Boolean {
+        if (terminalHistoryMismatchGeneration != syncGeneration) return false
+        if (pendingSyncCommands.isNotEmpty()) return false
+        val currentProfile = requireNotNull(profile)
+        terminalHistoryMismatchGeneration = null
+        deliveryStore.clearReloadableCache(
+            currentProfile.serverId,
+            mutableState.value.currentSessionId,
+        )
+        messageContentStore.reconcile()
+        mutableState.value = mutableState.value.copy(
+            projectionGeneration = mutableState.value.projectionGeneration + 1,
+        )
+        beginResetRebuild()
+        return true
     }
 
     /** 从 reset event 的新 cursor 开始重建当前服务端投影视图。 */
@@ -3142,7 +3259,6 @@ class RealtimeSession(
             "unsupported_content_ref_version",
         )
         val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
-        const val HISTORY_PAGE_SIZE = 10
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
@@ -3150,6 +3266,14 @@ class RealtimeSession(
         const val ASSISTANT_TURN_PREFIX = "assistant:"
     }
 }
+
+internal fun historyCursorPayload(afterSeq: Long, snapshotMaxSeq: Long?): JsonObject =
+    buildJsonObject {
+        put("page_size", HISTORY_PAGE_SIZE)
+        put("content_ref_version", 1)
+        put("after_seq", afterSeq)
+        snapshotMaxSeq?.let { put("snapshot_max_seq", it) }
+    }
 
 internal fun endHistoryReload(state: MobileSessionState, errorMessage: String): MobileSessionState =
     state.copy(isReloadingHistory = false, errorMessage = errorMessage)
