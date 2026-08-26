@@ -402,8 +402,8 @@ class MainViewModel(
                 requiresMeteredApproval = requiresApproval,
             )
         }
-        val mobileConversations = conversations.filter { it.sessionId.startsWith("mobile:") }
-        val selectedRemoteMissing = mobileConversations
+        val akashicConversations = conversations.filter { it.sessionId.startsWith("akashic:") }
+        val selectedRemoteMissing = akashicConversations
             .firstOrNull { it.sessionId == session.currentSessionId }
             ?.isRemoteMissingIn(session.remoteSessionIds) == true
 
@@ -415,7 +415,7 @@ class MainViewModel(
             connectionStatus = connection.status,
             connectionNotice = connection.notice,
             errorNotice = session.errorMessage,
-            sessions = mobileConversations
+            sessions = akashicConversations
                 .map {
                     SessionUi(
                         sessionId = it.sessionId,

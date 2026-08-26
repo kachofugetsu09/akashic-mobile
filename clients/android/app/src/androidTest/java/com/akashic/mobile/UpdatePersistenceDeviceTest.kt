@@ -7,6 +7,7 @@ import com.akashic.mobile.data.local.MessageEntity
 import com.akashic.mobile.data.local.ServerProfileEntity
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -58,20 +59,26 @@ class UpdatePersistenceDeviceTest {
         app.container.preferences.selectSession(SESSION_ID)
     }
 
-    /** 确认覆盖安装后 Room、DataStore 与 Android Keystore 身份都仍存在。 */
+    /** 确认覆盖安装后配对身份保留，而旧 Session 选择由启动恢复清掉。 */
     @Test
     fun pairedStateSurvivesInPlaceUpdate() = runBlocking {
         val profile = app.container.database.serverProfiles().get(SERVER_ID)
-        val settings = app.container.preferences.settings.first()
+        app.container.realtimeSession.start()
+        withTimeout(10_000) {
+            app.container.realtimeSession.state.first { it.initialized }
+        }
+        val settings = withTimeout(10_000) {
+            app.container.preferences.settings.first { it.currentSessionId == null }
+        }
 
         assertNotNull(profile)
         assertEquals(SERVER_ID, settings.currentServerId)
-        assertEquals(SESSION_ID, settings.currentSessionId)
+        assertEquals(null, settings.currentSessionId)
         assertTrue(app.container.deviceKeyStore.contains(requireNotNull(profile).keyAlias))
     }
 
     private companion object {
         const val SERVER_ID = "review-update-server"
-        const val SESSION_ID = "mobile:00000000-0000-0000-0000-000000000701"
+        const val SESSION_ID = "mobile:review-update-session"
     }
 }

@@ -66,7 +66,7 @@ class LocalDeliveryStoreCursorTest {
             id = "final-frame",
             connectionEpoch = 1,
             eventSeq = 5,
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             turnId = "turn-1",
             payload = buildJsonObject { put("metadata", JsonPrimitive("broken")) },
         )
@@ -89,7 +89,7 @@ class LocalDeliveryStoreCursorTest {
             id = "proactive-frame",
             connectionEpoch = 1,
             eventSeq = 5,
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             payload = buildJsonObject { put("metadata", JsonPrimitive("broken")) },
         )
 
@@ -105,13 +105,13 @@ class LocalDeliveryStoreCursorTest {
     @Test
     fun repairingSameServerReplacesOnlyDerivedCursor() = runBlocking {
         database.conversations().upsert(
-            ConversationEntity("mobile:kept", "server-1", "保留会话", 2),
+            ConversationEntity("akashic:kept", "server-1", "保留会话", 2),
         )
         database.messages().upsert(
             MessageEntity(
                 "message-kept",
                 null,
-                "mobile:kept",
+                "akashic:kept",
                 "assistant",
                 "保留历史",
                 "complete",

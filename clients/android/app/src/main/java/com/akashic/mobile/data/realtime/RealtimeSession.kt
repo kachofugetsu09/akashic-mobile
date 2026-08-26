@@ -33,7 +33,6 @@ import com.akashic.mobile.data.realtime.pluginui.PluginUiCoordinator
 import com.akashic.mobile.data.realtime.pluginui.PluginUiHttpRequest
 import java.time.Instant
 import java.io.IOException
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -482,6 +481,7 @@ class RealtimeSession(
     private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
     private val requestedHistoryCursors = mutableSetOf<Triple<Long, String, Long>>()
     private var pendingCommandListId: String? = null
+    private var pendingSessionCreateId: String? = null
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -653,7 +653,7 @@ class RealtimeSession(
         }
     }
 
-    /** 保留配对身份，清除服务端投影后重新拉取全部手机会话。 */
+    /** 保留配对身份，清除服务端投影后重新拉取全部 Akashic 会话。 */
     fun reloadFromServer() {
         scope.launch {
             mutex.withLock {
@@ -940,7 +940,7 @@ class RealtimeSession(
         )
     }
 
-    /** 从系统通知向指定手机会话发送纯文本回复。 */
+    /** 从系统通知向指定 Akashic 会话发送纯文本回复。 */
     fun sendNotificationReply(sessionId: String, text: String) {
         enqueueMessage(
             text,
@@ -1021,7 +1021,7 @@ class RealtimeSession(
     ) {
         scope.launch {
             mutex.withLock {
-                if (sessionId != null && !MOBILE_SESSION.matches(sessionId)) {
+                if (sessionId != null && !AKASHIC_SESSION.matches(sessionId)) {
                     pluginUi.reject(requestId, "插件请求的会话无效")
                     return@withLock
                 }
@@ -1203,7 +1203,7 @@ class RealtimeSession(
             withSendResult(onPersisted) { reportResult ->
                 attachmentOperations.perform {
                     mutex.withLock {
-                        // 1. 确定当前手机会话
+                        // 1. 确定当前 Akashic 会话
                         val currentProfile = profile ?: run {
                             mutableState.value = mutableState.value.copy(errorMessage = "请先连接电脑")
                             reportResult(false)
@@ -1211,7 +1211,7 @@ class RealtimeSession(
                         }
                         val body = text.trim()
                         val sessionId = targetSessionId ?: ensureCurrentSession(currentProfile)
-                        require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                        require(AKASHIC_SESSION.matches(sessionId)) { "Invalid akashic session_id" }
                         require(sentDraftRevision == null || sentDraftRevision in 1..9_007_199_254_740_991) {
                             "会话草稿 revision 无效"
                         }
@@ -1378,18 +1378,39 @@ class RealtimeSession(
         }
     }
 
-    /** 创建并选中一个独立的手机会话。 */
+    /** 请求 Core 分配并选中一个共享 Akashic 会话。 */
     fun createSession() {
         scope.launch {
             mutex.withLock {
-                // 1. 创建本地会话
-                val currentProfile = requireNotNull(profile) { "Pair a server before creating a session" }
-                val sessionId = createLocalSession(currentProfile)
-
-                // 2. 切换当前会话
-                preferences.selectSession(sessionId)
-                mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
-                publishTurnState()
+                if (pendingSessionCreateId != null) return@withLock
+                val epoch = activeEpoch
+                val candidate = activeCandidate
+                if (
+                    epoch == null || candidate == null ||
+                    mutableState.value.connection.phase != ConnectionPhase.READY
+                ) {
+                    mutableState.value = mutableState.value.copy(
+                        errorMessage = "连接电脑后才能新建会话",
+                    )
+                    return@withLock
+                }
+                val commandId = Ulid.next()
+                pendingSessionCreateId = commandId
+                val sent = socket.send(
+                    candidate,
+                    WireEnvelope(
+                        v = WIRE_PROTOCOL_VERSION,
+                        kind = WireKind.COMMAND,
+                        type = "session.create",
+                        id = commandId,
+                        connectionEpoch = epoch,
+                        payload = buildJsonObject {},
+                    ),
+                )
+                if (!sent) {
+                    pendingSessionCreateId = null
+                    scheduleReconnect("新建会话命令未进入 WebSocket 队列")
+                }
             }
         }
     }
@@ -1399,7 +1420,7 @@ class RealtimeSession(
         scope.launch {
             mutex.withLock {
                 // 1. 重新核对服务端目录，避免删除刚恢复的会话
-                require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                require(AKASHIC_SESSION.matches(sessionId)) { "Invalid akashic session_id" }
                 val currentProfile = requireNotNull(profile) { "Pair a server before removing a session" }
                 val remoteSessionIds = mutableState.value.remoteSessionIds
                 if (remoteSessionIds == null || sessionId in remoteSessionIds) {
@@ -1438,14 +1459,13 @@ class RealtimeSession(
                     return@withLock
                 }
 
-                // 3. 当前会话被移除时，切到最近可用会话；没有则创建新会话
+                // 3. 当前会话被移除时，切到最近可用会话；没有则留空。
                 if (mutableState.value.currentSessionId == sessionId) {
                     val nextSessionId = database.conversations()
                         .observeSummaries(currentProfile.serverId)
                         .first()
                         .firstOrNull { !it.isRemoteMissingIn(remoteSessionIds) }
                         ?.sessionId
-                        ?: createLocalSession(currentProfile)
                     preferences.selectSession(nextSessionId)
                     mutableState.value = mutableState.value.copy(currentSessionId = nextSessionId)
                     publishTurnState()
@@ -1484,7 +1504,7 @@ class RealtimeSession(
     ): NotificationTargetOpenResult = mutex.withLock {
         // 1. Intent 是外部边界；非法身份直接作为过期通知显式失败
         if (
-            sessionId == null || !MOBILE_SESSION.matches(sessionId) ||
+            sessionId == null || !AKASHIC_SESSION.matches(sessionId) ||
             (messageId != null && messageId.length !in 1..512)
         ) {
             mutableState.value = mutableState.value.copy(errorMessage = STALE_NOTIFICATION_MESSAGE)
@@ -1509,17 +1529,17 @@ class RealtimeSession(
         result
     }
 
-    /** 选择属于当前电脑的现有手机会话。 */
+    /** 选择属于当前电脑的现有 Akashic 会话。 */
     fun selectSession(sessionId: String) {
         scope.launch {
             mutex.withLock {
                 // 1. 校验会话归属
-                require(MOBILE_SESSION.matches(sessionId)) { "Invalid mobile session_id" }
+                require(AKASHIC_SESSION.matches(sessionId)) { "Invalid akashic session_id" }
                 val currentProfile = requireNotNull(profile) { "Pair a server before selecting a session" }
                 val conversation = requireNotNull(database.conversations().get(sessionId)) {
-                    "Unknown mobile session: $sessionId"
+                    "Unknown akashic session: $sessionId"
                 }
-                require(conversation.serverId == currentProfile.serverId) { "Mobile session belongs to another server" }
+                require(conversation.serverId == currentProfile.serverId) { "Akashic session belongs to another server" }
                 selectKnownSession(currentProfile, sessionId)
             }
         }
@@ -2063,6 +2083,39 @@ class RealtimeSession(
                     return
                 }
                 when (envelope.type) {
+                    "session.created" -> {
+                        require(id == pendingSessionCreateId) {
+                            "收到未知 session.create reply: $id"
+                        }
+                        val currentProfile = requireNotNull(profile)
+                        val sessionId = requireNotNull(envelope.sessionId) {
+                            "session.created 缺少 session_id"
+                        }
+                        require(AKASHIC_SESSION.matches(sessionId)) {
+                            "session.created 返回无效 session_id"
+                        }
+                        database.conversations().upsert(
+                            ConversationEntity(
+                                sessionId,
+                                currentProfile.serverId,
+                                "新对话",
+                                System.currentTimeMillis(),
+                            ),
+                        )
+                        pendingSessionCreateId = null
+                        mutableState.value = mutableState.value.copy(errorMessage = null)
+                        selectKnownSession(currentProfile, sessionId)
+                    }
+                    "session.create.error" -> {
+                        require(id == pendingSessionCreateId) {
+                            "收到未知 session.create error: $id"
+                        }
+                        pendingSessionCreateId = null
+                        mutableState.value = mutableState.value.copy(
+                            errorMessage = envelope.payload["message"]
+                                ?.jsonPrimitive?.content ?: "新建会话失败",
+                        )
+                    }
                     "message.send.ok" -> {
                         require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的 ACK: $id" }
                         // 1. ACK 到达先记 received，Room 事务提交后记 committed；两次记录间不新增任何发送
@@ -2536,6 +2589,7 @@ class RealtimeSession(
         resetRebuildGeneration = syncGeneration
         pendingSyncCommands.clear()
         pendingCommandListId = null
+        pendingSessionCreateId = null
         pluginUi.onDisconnected("服务端要求重新同步")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
@@ -2558,7 +2612,7 @@ class RealtimeSession(
         if (mutableState.value.connection.phase == ConnectionPhase.READY) return
         if (resetRebuildGeneration == syncGeneration) resetRebuildGeneration = null
         val currentProfile = requireNotNull(profile)
-        ensureCurrentSession(currentProfile)
+        val currentSessionId = restoreCurrentSession(currentProfile)
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
             isReloadingHistory = false,
@@ -2569,7 +2623,7 @@ class RealtimeSession(
         runtimeInspection.onConnectionReady(currentProfile.serverId)
         modelCatalog.onConnectionReady(
             currentProfile.serverId,
-            requireNotNull(mutableState.value.currentSessionId),
+            currentSessionId,
         )
         uploads.onConnectionReady(currentProfile.serverId)
         downloads.onConnectionReady(currentProfile.serverId)
@@ -2835,28 +2889,29 @@ class RealtimeSession(
     }
 
     private suspend fun ensureCurrentSession(currentProfile: ServerProfileEntity): String {
+        return requireNotNull(restoreCurrentSession(currentProfile)) { "请先新建会话" }
+    }
+
+    /** 恢复已有选择；全新 Core 没有会话时保持空选择。 */
+    private suspend fun restoreCurrentSession(
+        currentProfile: ServerProfileEntity,
+    ): String? {
         val existing = mutableState.value.currentSessionId
         if (existing != null) {
             val conversation = requireNotNull(database.conversations().get(existing)) {
-                "Selected mobile session does not exist"
+                "Selected Akashic session does not exist"
             }
             require(conversation.serverId == currentProfile.serverId) {
-                "Selected mobile session belongs to another server"
+                "Selected Akashic session belongs to another server"
             }
             return existing
         }
-        val sessionId = deliveryStore.restoreSelectedSession(currentProfile.serverId, null)
-            ?: createLocalSession(currentProfile)
+        val sessionId = deliveryStore.restoreSelectedSession(
+            currentProfile.serverId,
+            null,
+        ) ?: return null
         preferences.selectSession(sessionId)
         mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
-        return sessionId
-    }
-
-    private suspend fun createLocalSession(currentProfile: ServerProfileEntity): String {
-        val sessionId = "mobile:${UUID.randomUUID()}"
-        database.conversations().upsert(
-            ConversationEntity(sessionId, currentProfile.serverId, "新对话", System.currentTimeMillis()),
-        )
         return sessionId
     }
 
@@ -2929,6 +2984,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pendingSyncCommands.clear()
         pendingCommandListId = null
+        pendingSessionCreateId = null
         pluginUi.onDisconnected("连接已中断")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
@@ -2992,6 +3048,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pendingSyncCommands.clear()
         pendingCommandListId = null
+        pendingSessionCreateId = null
         pluginUi.onDisconnected("设备配对已撤销")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
@@ -3054,6 +3111,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pendingSyncCommands.clear()
         pendingCommandListId = null
+        pendingSessionCreateId = null
         pluginUi.onDisconnected("协议不兼容")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
@@ -3133,6 +3191,7 @@ class RealtimeSession(
         activeEpoch = null
         activeOutboxCommandId = null
         pendingCommandListId = null
+        pendingSessionCreateId = null
         messageDownloads.onDisconnected()
         pluginUi.onDisconnected("连接已重置")
         runtimeInspection.onDisconnected()
@@ -3258,7 +3317,7 @@ class RealtimeSession(
             "invalid_payload",
             "unsupported_content_ref_version",
         )
-        val MOBILE_SESSION = Regex("^mobile:(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$")
+        val AKASHIC_SESSION = Regex("^akashic:[0-9a-f]{32}$")
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
         const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024

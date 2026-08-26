@@ -26,7 +26,7 @@ class PendingTurnStopDaoTest {
             ServerProfileEntity("server", "电脑", "device", "alias", "pin", "[]", "[]", "[]", 1),
         )
         database.conversations().upsert(
-            ConversationEntity("mobile:test", "server", "会话", 2, remoteKnown = true),
+            ConversationEntity("akashic:test", "server", "会话", 2, remoteKnown = true),
         )
     }
 
@@ -35,12 +35,12 @@ class PendingTurnStopDaoTest {
 
     @Test
     fun stopIntentSurvivesConversationProjectionCleanupUntilExplicitlyConsumed() = runBlocking {
-        val stop = PendingTurnStopEntity("stop-1", "server", "mobile:test", "turn-1", 3)
+        val stop = PendingTurnStopEntity("stop-1", "server", "akashic:test", "turn-1", 3)
         database.messages().upsert(
             MessageEntity(
                 "assistant:turn-1",
                 null,
-                "mobile:test",
+                "akashic:test",
                 "assistant",
                 "生成中",
                 "streaming",
@@ -55,7 +55,7 @@ class PendingTurnStopDaoTest {
             listOf("assistant:turn-1"),
             database.messages().activeAssistantTurns("server").map(MessageEntity::messageId),
         )
-        assertEquals(1, database.conversations().delete("server", "mobile:test"))
+        assertEquals(1, database.conversations().delete("server", "akashic:test"))
         assertEquals(listOf(stop), dao.listForServer("server"))
 
         assertEquals(1, dao.delete("stop-1"))

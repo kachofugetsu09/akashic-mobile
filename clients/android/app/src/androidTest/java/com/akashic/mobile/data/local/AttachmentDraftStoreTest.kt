@@ -37,7 +37,7 @@ class AttachmentDraftStoreTest {
         database.serverProfiles().upsert(
             ServerProfileEntity("server", "server", "device", "alias", "pin", "[]", "[]", "[]", 1),
         )
-        database.conversations().upsert(ConversationEntity("mobile:test", "server", "test", 1))
+        database.conversations().upsert(ConversationEntity("akashic:test", "server", "test", 1))
     }
 
     @After
@@ -86,7 +86,7 @@ class AttachmentDraftStoreTest {
         val releaseSend = CompletableDeferred<Unit>()
         val send = async {
             owner.perform {
-                val drafts = database.attachmentTransfers().drafts("server", "mobile:test")
+                val drafts = database.attachmentTransfers().drafts("server", "akashic:test")
                 assertTrue(attachmentDraftMatchesExpected(drafts.map { it.attachmentId }, listOf(transfer.attachmentId)))
                 sendEntered.complete(Unit)
                 releaseSend.await()
@@ -125,7 +125,7 @@ class AttachmentDraftStoreTest {
         removeEntered.await()
         val sendAccepted = async {
             owner.perform {
-                val actual = database.attachmentTransfers().drafts("server", "mobile:test")
+                val actual = database.attachmentTransfers().drafts("server", "akashic:test")
                 attachmentDraftMatchesExpected(actual.map { it.attachmentId }, listOf(transfer.attachmentId))
             }
         }
@@ -152,14 +152,14 @@ class AttachmentDraftStoreTest {
 
         val first = store.import(
             serverId = "server",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             uris = listOf(uri),
             now = 2,
             attachmentIds = listOf("01STABLESHAREATTACHMENT00"),
         )
         val second = store.import(
             serverId = "server",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             uris = listOf(uri),
             now = 3,
             attachmentIds = listOf("01STABLESHAREATTACHMENT00"),
@@ -188,7 +188,7 @@ class AttachmentDraftStoreTest {
             val failure = runCatching {
                 store.import(
                     serverId = "server",
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     uris = listOf(uri),
                     now = 10L + index,
                     attachmentIds = listOf(attachmentId),
@@ -206,7 +206,7 @@ class AttachmentDraftStoreTest {
     private fun transfer(id: String, state: String) = AttachmentTransferEntity(
         attachmentId = id,
         serverId = "server",
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         filename = "$id.png",
         contentType = "image/png",
         sizeBytes = 7,

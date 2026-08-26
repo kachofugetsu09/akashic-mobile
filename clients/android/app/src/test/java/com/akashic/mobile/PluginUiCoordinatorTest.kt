@@ -52,7 +52,7 @@ class PluginUiCoordinatorTest {
             assertEquals(true, assets.contains(moduleSha, "module", module.size))
 
             coordinator.query(
-                "request-after-repair", "owner", "turn.after_answer", "mobile:one", null,
+                "request-after-repair", "owner", "turn.after_answer", "akashic:one", null,
                 "observe", "health.snapshot", "{}", "none", "old-server",
             )
             assertEquals("插件界面尚未就绪", coordinator.results.first().error)
@@ -192,12 +192,12 @@ class PluginUiCoordinatorTest {
             coordinator.onReply(catalogReply(sent.single().second, catalog))
 
             coordinator.query(
-                "request-1", "owner-1", "turn.after_answer", "mobile:one", null,
+                "request-1", "owner-1", "turn.after_answer", "akashic:one", null,
                 "observe", "kvcache.message_usage", "{\"message_id\":\"message-1\"}",
                 "immutable", "mobile-lab",
             )
             coordinator.query(
-                "request-2", "owner-2", "turn.after_answer", "mobile:one", null,
+                "request-2", "owner-2", "turn.after_answer", "akashic:one", null,
                 "observe", "kvcache.message_usage", "{\"message_id\":\"message-1\"}",
                 "immutable", "mobile-lab",
             )
@@ -216,7 +216,7 @@ class PluginUiCoordinatorTest {
             }
             restored.onConnectionReady("mobile-lab")
             restored.query(
-                "request-3", "owner-3", "turn.after_answer", "mobile:one", null,
+                "request-3", "owner-3", "turn.after_answer", "akashic:one", null,
                 "observe", "kvcache.message_usage", "{\"message_id\":\"message-1\"}",
                 "immutable", "mobile-lab",
             )
@@ -264,7 +264,7 @@ class PluginUiCoordinatorTest {
                 "request-https",
                 "owner-akasha",
                 "turn.after_answer",
-                "mobile:one",
+                "akashic:one",
                 "turn-one",
                 "akasha",
                 "recall.current",
@@ -279,7 +279,7 @@ class PluginUiCoordinatorTest {
             val httpRequest = started.single()
             assertEquals(prepare.second, httpRequest.commandId)
             assertEquals("akasha", httpRequest.body["plugin_id"]?.toString()?.trim('"'))
-            assertEquals("mobile:one", httpRequest.body["session_id"]?.toString()?.trim('"'))
+            assertEquals("akashic:one", httpRequest.body["session_id"]?.toString()?.trim('"'))
             coordinator.onHttpQueryResponse(
                 prepare.second,
                 PluginUiHttpResponse(
@@ -299,7 +299,7 @@ class PluginUiCoordinatorTest {
                 "request-invalid",
                 "owner-akasha",
                 "turn.after_answer",
-                "mobile:one",
+                "akashic:one",
                 "turn-two",
                 "akasha",
                 "recall.current",
@@ -320,7 +320,7 @@ class PluginUiCoordinatorTest {
                 "request-disconnected",
                 "owner-akasha",
                 "turn.after_answer",
-                "mobile:one",
+                "akashic:one",
                 "turn-three",
                 "akasha",
                 "recall.current",
@@ -364,11 +364,11 @@ class PluginUiCoordinatorTest {
             )
 
             coordinator.query(
-                "request-method", "owner", "turn.after_answer", "mobile:one", null,
+                "request-method", "owner", "turn.after_answer", "akashic:one", null,
                 "observe", "x".repeat(257), "{}", "none", "mobile-lab",
             )
             coordinator.query(
-                "request-payload", "owner", "turn.after_answer", "mobile:one", null,
+                "request-payload", "owner", "turn.after_answer", "akashic:one", null,
                 "observe", "health.snapshot", "x".repeat(64 * 1024 + 1), "none", "mobile-lab",
             )
 
@@ -404,11 +404,11 @@ class PluginUiCoordinatorTest {
             )
 
             coordinator.query(
-                "", "owner", "turn.after_answer", "mobile:one", null,
+                "", "owner", "turn.after_answer", "akashic:one", null,
                 "observe", "health.snapshot", "{}", "none", "mobile-lab",
             )
             coordinator.query(
-                "request-owner", "x".repeat(129), "turn.after_answer", "mobile:one", null,
+                "request-owner", "x".repeat(129), "turn.after_answer", "akashic:one", null,
                 "observe", "health.snapshot", "{}", "none", "mobile-lab",
             )
 
@@ -448,7 +448,7 @@ class PluginUiCoordinatorTest {
 
             repeat(129) { index ->
                 coordinator.query(
-                    "request-$index", "owner-$index", "turn.after_answer", "mobile:one", "turn-one",
+                    "request-$index", "owner-$index", "turn.after_answer", "akashic:one", "turn-one",
                     "observe", "health.snapshot", "{}", "immutable", "mobile-lab",
                 )
             }

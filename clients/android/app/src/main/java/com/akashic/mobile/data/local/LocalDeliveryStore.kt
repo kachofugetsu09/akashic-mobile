@@ -118,7 +118,7 @@ class LocalDeliveryStore(
         }
 
         // 2. 否则只从当前电脑的持久会话中选择最近一项
-        return database.conversations().latestMobileForServer(serverId)?.sessionId
+        return database.conversations().latestForServer(serverId)?.sessionId
     }
 
     /** 核对系统通知指向当前电脑拥有的本地会话与消息投影。 */

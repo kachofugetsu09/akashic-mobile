@@ -60,7 +60,7 @@ class LocalDeliveryStoreTest {
             ServerProfileEntity("server", "server", "device", "alias", "pin", "[]", "[]", "[]", 1),
             RealtimeCursorEntity("device", "server", 0, 0, 1),
         )
-        database.conversations().upsert(ConversationEntity("mobile:test", "server", "test", 1))
+        database.conversations().upsert(ConversationEntity("akashic:test", "server", "test", 1))
     }
 
     @After
@@ -77,7 +77,7 @@ class LocalDeliveryStoreTest {
 
         val message = database.messages().get("assistant:turn")
         assertNotNull(message)
-        assertEquals("mobile:test", message!!.sessionId)
+        assertEquals("akashic:test", message!!.sessionId)
         assertEquals(null, message.clientMessageId)
         assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message.turnClientMessageId)
         assertEquals("turn", message.controlTurnId)
@@ -102,7 +102,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:$clientId",
                 clientMessageId = clientId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "本地问题",
                 deliveryState = "sent",
@@ -199,7 +199,7 @@ class LocalDeliveryStoreTest {
                 4,
                 "message.final",
                 buildJsonObject {
-                    put("message_id", "mobile:test:flow:final")
+                    put("message_id", "akashic:test:flow:final")
                     put("content", "最终回答")
                 },
                 turnId = "flow-turn",
@@ -207,7 +207,7 @@ class LocalDeliveryStoreTest {
             5,
         )
 
-        val message = database.messages().get("mobile:test:flow:final")
+        val message = database.messages().get("akashic:test:flow:final")
         assertNotNull(message)
         assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", message!!.turnClientMessageId)
         assertEquals("complete", message.deliveryState)
@@ -263,7 +263,7 @@ class LocalDeliveryStoreTest {
                 4,
                 "message.final",
                 buildJsonObject {
-                    put("message_id", "mobile:test:logical:final")
+                    put("message_id", "akashic:test:logical:final")
                     put("content", "最终回答")
                     put("control_turn_id", logicalTurnId)
                 },
@@ -273,7 +273,7 @@ class LocalDeliveryStoreTest {
         )
 
         assertEquals(null, database.messages().get("assistant:$attemptId"))
-        val canonical = database.messages().get("mobile:test:logical:final")!!
+        val canonical = database.messages().get("akashic:test:logical:final")!!
         assertEquals(logicalTurnId, canonical.controlTurnId)
         assertEquals("最终回答", canonical.text)
     }
@@ -361,8 +361,8 @@ class LocalDeliveryStoreTest {
                     put("page_size", 10)
                     put("items", buildJsonArray {
                         add(buildJsonObject {
-                            put("id", "mobile:test:logical:history")
-                            put("session_key", "mobile:test")
+                            put("id", "akashic:test:logical:history")
+                            put("session_key", "akashic:test")
                             put("seq", 1)
                             put("role", "assistant")
                             put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -379,7 +379,7 @@ class LocalDeliveryStoreTest {
         )
 
         assertEquals(null, database.messages().get("assistant:$attemptId"))
-        val canonical = database.messages().get("mobile:test:logical:history")!!
+        val canonical = database.messages().get("akashic:test:logical:history")!!
         assertEquals(logicalTurnId, canonical.controlTurnId)
         assertEquals("历史最终回答", canonical.text)
         assertEquals(
@@ -396,7 +396,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "assistant:legacy-turn",
                 clientMessageId = null,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "assistant",
                 text = "旧流式正文",
                 deliveryState = "streaming",
@@ -413,8 +413,8 @@ class LocalDeliveryStoreTest {
                 "message.final",
                 buildJsonObject {
                     put("client_message_id", clientId)
-                    put("user_message_id", "mobile:test:legacy:user")
-                    put("message_id", "mobile:test:legacy:canonical")
+                    put("user_message_id", "akashic:test:legacy:user")
+                    put("message_id", "akashic:test:legacy:canonical")
                     put("content", "最终正文")
                 },
                 turnId = "legacy-turn",
@@ -423,7 +423,7 @@ class LocalDeliveryStoreTest {
         )
 
         assertEquals(null, database.messages().get("assistant:legacy-turn"))
-        val canonical = database.messages().get("mobile:test:legacy:canonical")!!
+        val canonical = database.messages().get("akashic:test:legacy:canonical")!!
         assertEquals(null, canonical.clientMessageId)
         assertEquals(clientId, canonical.turnClientMessageId)
         assertEquals("legacy-turn", canonical.controlTurnId)
@@ -495,7 +495,7 @@ class LocalDeliveryStoreTest {
                 MessageEntity(
                     messageId = "canonical-$seq",
                     clientMessageId = null,
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     role = "assistant",
                     text = "历史 $seq",
                     deliveryState = "complete",
@@ -527,7 +527,7 @@ class LocalDeliveryStoreTest {
             8,
         )
         // 3. 投影进度只数带 seq 的行；远端已提交 user+assistant（8 条）时计数必然不等
-        val progress = database.messages().historyProjectionProgress("mobile:test")
+        val progress = database.messages().historyProjectionProgress("akashic:test")
         assertEquals(6, progress.messageCount)
         assertEquals(5L, progress.maxServerSeq)
         assertNotNull(
@@ -543,7 +543,7 @@ class LocalDeliveryStoreTest {
     /** 相等跳过只在服务端没有任何新提交时发生，此时不存在可丢失的 final。 */
     @Test
     fun equalCountHistorySkipRequiresNoServerSideCommit() = runBlocking {
-        val progress = database.messages().historyProjectionProgress("mobile:test")
+        val progress = database.messages().historyProjectionProgress("akashic:test")
         assertEquals(0, progress.messageCount)
         assertEquals(
             null,
@@ -559,10 +559,10 @@ class LocalDeliveryStoreTest {
     @Test
     fun reachingConversationTailClearsPersistedReadingAnchor() = runBlocking {
         database.messages().upsert(
-            MessageEntity("message-in-history", null, "mobile:test", "assistant", "历史", "complete", 1, 1),
+            MessageEntity("message-in-history", null, "akashic:test", "assistant", "历史", "complete", 1, 1),
         )
         assertTrue(store.saveReadingPosition(
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             messageId = "message-in-history",
             offsetPx = -24,
             expectedServerId = "server",
@@ -570,7 +570,7 @@ class LocalDeliveryStoreTest {
         ))
 
         store.markSessionReadThrough(
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             readAt = 3,
             expectedServerId = "server",
             updatedAt = 3,
@@ -592,8 +592,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:degraded-attachment")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:degraded-attachment")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "附件缺失不影响正文")
@@ -610,7 +610,7 @@ class LocalDeliveryStoreTest {
             1,
         )
 
-        val message = requireNotNull(database.messages().get("mobile:test:degraded-attachment"))
+        val message = requireNotNull(database.messages().get("akashic:test:degraded-attachment"))
         assertEquals("附件缺失不影响正文", message.text)
         assertEquals(
             emptyList<MediaAttachmentEntity>(),
@@ -621,11 +621,11 @@ class LocalDeliveryStoreTest {
     @Test
     fun tallMessageReadingAnchorPreservesLargeNegativeOffset() = runBlocking {
         database.messages().upsert(
-            MessageEntity("tall-message", null, "mobile:test", "assistant", "长回复", "complete", 1, 1),
+            MessageEntity("tall-message", null, "akashic:test", "assistant", "长回复", "complete", 1, 1),
         )
 
         assertTrue(store.saveReadingPosition(
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             messageId = "tall-message",
             offsetPx = -25_000,
             expectedServerId = "server",
@@ -640,15 +640,15 @@ class LocalDeliveryStoreTest {
     @Test
     fun deliberateConversationEntryClearsAnchorWithoutAdvancingReadWatermark() = runBlocking {
         database.messages().upsert(
-            MessageEntity("already-read", null, "mobile:test", "assistant", "已读", "complete", 10, 10),
+            MessageEntity("already-read", null, "akashic:test", "assistant", "已读", "complete", 10, 10),
         )
         database.messages().upsert(
-            MessageEntity("still-unread", null, "mobile:test", "assistant", "未读", "complete", 20, 20),
+            MessageEntity("still-unread", null, "akashic:test", "assistant", "未读", "complete", 20, 20),
         )
-        store.markSessionReadThrough("mobile:test", 10, "server", 21)
-        assertTrue(store.saveReadingPosition("mobile:test", "already-read", -24, "server", 22))
+        store.markSessionReadThrough("akashic:test", 10, "server", 21)
+        assertTrue(store.saveReadingPosition("akashic:test", "already-read", -24, "server", 22))
 
-        store.clearReadingPosition("mobile:test", "server", 23)
+        store.clearReadingPosition("akashic:test", "server", 23)
 
         val summary = database.conversations().observeSummaries("server").first().single()
         assertEquals(null, summary.anchorMessageId)
@@ -658,12 +658,12 @@ class LocalDeliveryStoreTest {
 
     @Test
     fun removesUnavailableRemoteProjectionAndKeepsLocalWork() = runBlocking {
-        assertEquals(1, database.conversations().markRemoteKnown("mobile:test"))
+        assertEquals(1, database.conversations().markRemoteKnown("akashic:test"))
         database.messages().upsert(
             MessageEntity(
                 "remote-history",
                 null,
-                "mobile:test",
+                "akashic:test",
                 "assistant",
                 "历史",
                 "complete",
@@ -675,19 +675,19 @@ class LocalDeliveryStoreTest {
 
         assertEquals(
             RemoveUnavailableConversationResult.REMOVED,
-            store.removeUnavailableConversation("server", "mobile:test"),
+            store.removeUnavailableConversation("server", "akashic:test"),
         )
-        assertEquals(null, database.conversations().get("mobile:test"))
-        assertEquals(0, database.messages().countForSession("mobile:test"))
+        assertEquals(null, database.conversations().get("akashic:test"))
+        assertEquals(0, database.messages().countForSession("akashic:test"))
 
         database.conversations().upsert(
-            ConversationEntity("mobile:pending", "server", "待发送", 2, remoteKnown = true),
+            ConversationEntity("akashic:pending", "server", "待发送", 2, remoteKnown = true),
         )
         database.messages().upsert(
             MessageEntity(
                 "remote-pending",
                 null,
-                "mobile:pending",
+                "akashic:pending",
                 "assistant",
                 "历史",
                 "complete",
@@ -700,7 +700,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 "user:pending",
                 "pending",
-                "mobile:pending",
+                "akashic:pending",
                 "user",
                 "尚未发送",
                 "pending",
@@ -711,19 +711,19 @@ class LocalDeliveryStoreTest {
 
         assertEquals(
             RemoveUnavailableConversationResult.HAS_LOCAL_WORK,
-            store.removeUnavailableConversation("server", "mobile:pending"),
+            store.removeUnavailableConversation("server", "akashic:pending"),
         )
-        assertNotNull(database.conversations().get("mobile:pending"))
+        assertNotNull(database.conversations().get("akashic:pending"))
     }
 
     @Test
     fun keepsUnavailableConversationWithAttachmentDraft() = runBlocking {
-        assertEquals(1, database.conversations().markRemoteKnown("mobile:test"))
+        assertEquals(1, database.conversations().markRemoteKnown("akashic:test"))
         database.messages().upsert(
             MessageEntity(
                 "remote-history",
                 null,
-                "mobile:test",
+                "akashic:test",
                 "assistant",
                 "历史",
                 "complete",
@@ -736,7 +736,7 @@ class LocalDeliveryStoreTest {
             AttachmentTransferEntity(
                 attachmentId = "draft",
                 serverId = "server",
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 filename = "draft.txt",
                 contentType = "text/plain",
                 sizeBytes = 4,
@@ -749,9 +749,9 @@ class LocalDeliveryStoreTest {
 
         assertEquals(
             RemoveUnavailableConversationResult.HAS_LOCAL_WORK,
-            store.removeUnavailableConversation("server", "mobile:test"),
+            store.removeUnavailableConversation("server", "akashic:test"),
         )
-        assertNotNull(database.conversations().get("mobile:test"))
+        assertNotNull(database.conversations().get("akashic:test"))
     }
 
     @Test
@@ -760,7 +760,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 "assistant:answer",
                 null,
-                "mobile:test",
+                "akashic:test",
                 "assistant",
                 "历史回答",
                 "complete",
@@ -770,45 +770,45 @@ class LocalDeliveryStoreTest {
         )
 
         store.saveComposerDraft(
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             text = "继续追问",
             replyToMessageId = "assistant:answer",
             expectedServerId = "server",
             updatedAt = 2,
         )
 
-        val persisted = database.composerDrafts().get("server", "mobile:test")
+        val persisted = database.composerDrafts().get("server", "akashic:test")
         assertEquals("继续追问", persisted?.text)
         assertEquals("assistant:answer", persisted?.replyToMessageId)
         assertTrue(database.conversations().observeSummaries("server").first().single().hasLocalWork)
 
-        store.saveComposerDraft("mobile:test", "", null, "server", 3)
-        assertEquals(null, database.composerDrafts().get("server", "mobile:test"))
+        store.saveComposerDraft("akashic:test", "", null, "server", 3)
+        assertEquals(null, database.composerDrafts().get("server", "akashic:test"))
     }
 
     @Test
     fun dropsMissingReplyIdentityButPreservesDraftText() = runBlocking {
         store.saveComposerDraft(
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             text = "目标消失后文字仍在",
             replyToMessageId = "assistant:missing",
             expectedServerId = "server",
             updatedAt = 2,
         )
 
-        val persisted = database.composerDrafts().get("server", "mobile:test")
+        val persisted = database.composerDrafts().get("server", "akashic:test")
         assertEquals("目标消失后文字仍在", persisted?.text)
         assertEquals(null, persisted?.replyToMessageId)
     }
 
     @Test
     fun preparedShareCommitsOnlyAgainstItsExactDraftBase() = runBlocking {
-        store.saveComposerDraft("mobile:test", "原草稿", null, "server", 2)
+        store.saveComposerDraft("akashic:test", "原草稿", null, "server", 2)
 
         assertEquals(
             PreparedComposerDraftResult.COMMITTED,
             store.commitPreparedComposerDraft(
-                "mobile:test",
+                "akashic:test",
                 "原草稿\n共享文字",
                 "assistant:missing",
                 "原草稿",
@@ -821,7 +821,7 @@ class LocalDeliveryStoreTest {
         assertEquals(
             PreparedComposerDraftResult.ALREADY_COMMITTED,
             store.commitPreparedComposerDraft(
-                "mobile:test",
+                "akashic:test",
                 "原草稿\n共享文字",
                 "assistant:missing",
                 "原草稿",
@@ -832,11 +832,11 @@ class LocalDeliveryStoreTest {
             ),
         )
 
-        store.saveComposerDraft("mobile:test", "用户继续编辑", null, "server", 5)
+        store.saveComposerDraft("akashic:test", "用户继续编辑", null, "server", 5)
         assertEquals(
             PreparedComposerDraftResult.CONFLICT,
             store.commitPreparedComposerDraft(
-                "mobile:test",
+                "akashic:test",
                 "旧的 prepared",
                 null,
                 "原草稿\n共享文字",
@@ -848,7 +848,7 @@ class LocalDeliveryStoreTest {
         )
         assertEquals(
             "用户继续编辑",
-            database.composerDrafts().get("server", "mobile:test")?.text,
+            database.composerDrafts().get("server", "akashic:test")?.text,
         )
     }
 
@@ -866,7 +866,7 @@ class LocalDeliveryStoreTest {
                     id = "proactive-$sequence",
                     connectionEpoch = 0,
                     eventSeq = sequence,
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     payload = buildJsonObject { put("content", "主动消息 $sequence") },
                 ),
                 updatedAt = sequence,
@@ -887,7 +887,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:$clientId",
                 clientMessageId = clientId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "已 ACK 尚未 canonical 化",
                 deliveryState = "sent",
@@ -897,9 +897,9 @@ class LocalDeliveryStoreTest {
         )
         database.messages().upsert(
             MessageEntity(
-                messageId = "mobile:test:complete",
+                messageId = "akashic:test:complete",
                 clientMessageId = null,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "assistant",
                 text = "可重建投影",
                 deliveryState = "complete",
@@ -911,7 +911,7 @@ class LocalDeliveryStoreTest {
         store.clearReloadableCache("server", preservedSessionId = null)
 
         assertNotNull(database.messages().get("user:$clientId"))
-        assertEquals(null, database.messages().get("mobile:test:complete"))
+        assertEquals(null, database.messages().get("akashic:test:complete"))
     }
 
     @Test
@@ -926,7 +926,7 @@ class LocalDeliveryStoreTest {
                 id = "proactive-cascade",
                 connectionEpoch = 0,
                 eventSeq = 1,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 payload = buildJsonObject { put("content", "稍后会被投影清理") },
             ),
             updatedAt = 1,
@@ -945,42 +945,42 @@ class LocalDeliveryStoreTest {
             ServerProfileEntity("other", "other", "other-device", "alias", "pin", "[]", "[]", "[]", 1),
             RealtimeCursorEntity("other-device", "other", 0, 0, 1),
         )
-        database.conversations().upsert(ConversationEntity("mobile:other", "other", "other", 3))
+        database.conversations().upsert(ConversationEntity("akashic:other", "other", "other", 3))
 
         assertEquals(
-            "mobile:test",
-            store.restoreSelectedSession("server", "mobile:other"),
+            "akashic:test",
+            store.restoreSelectedSession("server", "akashic:other"),
         )
         assertEquals(
-            "mobile:other",
-            store.restoreSelectedSession("other", "mobile:other"),
+            "akashic:other",
+            store.restoreSelectedSession("other", "akashic:other"),
         )
     }
 
     @Test
     fun messageCommitAtomicallyConsumesOnlyItsCapturedDraftRevision() = runBlocking {
-        store.saveComposerDraft("mobile:test", "准备发送", null, "server", 10)
+        store.saveComposerDraft("akashic:test", "准备发送", null, "server", 10)
 
         store.enqueueMessage(
-            conversation = ConversationEntity("mobile:test", "server", "准备发送", 11),
+            conversation = ConversationEntity("akashic:test", "server", "准备发送", 11),
             message = pendingUserMessage("user:atomic", "atomic", "准备发送", 11),
             command = pendingOutbox("atomic", 11),
             attachments = emptyList(),
             sentDraftRevision = 10,
         )
 
-        assertEquals(null, database.composerDrafts().get("server", "mobile:test"))
+        assertEquals(null, database.composerDrafts().get("server", "akashic:test"))
         assertNotNull(database.messages().get("user:atomic"))
         assertNotNull(database.outbox().get("atomic"))
     }
 
     @Test
     fun newerComposerRevisionSurvivesAnOlderMessageCommit() = runBlocking {
-        store.saveComposerDraft("mobile:test", "准备发送", null, "server", 10)
-        store.saveComposerDraft("mobile:test", "发送后继续输入", null, "server", 11)
+        store.saveComposerDraft("akashic:test", "准备发送", null, "server", 10)
+        store.saveComposerDraft("akashic:test", "发送后继续输入", null, "server", 11)
 
         store.enqueueMessage(
-            conversation = ConversationEntity("mobile:test", "server", "准备发送", 12),
+            conversation = ConversationEntity("akashic:test", "server", "准备发送", 12),
             message = pendingUserMessage("user:older", "older", "准备发送", 12),
             command = pendingOutbox("older", 12),
             attachments = emptyList(),
@@ -989,18 +989,18 @@ class LocalDeliveryStoreTest {
 
         assertEquals(
             "发送后继续输入",
-            database.composerDrafts().get("server", "mobile:test")?.text,
+            database.composerDrafts().get("server", "akashic:test")?.text,
         )
     }
 
     @Test
     fun failedMessageTransactionKeepsDraftAndRollsBackMessage() = runBlocking {
-        store.saveComposerDraft("mobile:test", "仍需保留", null, "server", 10)
+        store.saveComposerDraft("akashic:test", "仍需保留", null, "server", 10)
         database.outbox().enqueue(pendingOutbox("duplicate", 10))
 
         val failure = runCatching {
             store.enqueueMessage(
-                conversation = ConversationEntity("mobile:test", "server", "仍需保留", 11),
+                conversation = ConversationEntity("akashic:test", "server", "仍需保留", 11),
                 message = pendingUserMessage("user:rollback", "duplicate", "仍需保留", 11),
                 command = pendingOutbox("duplicate", 11),
                 attachments = emptyList(),
@@ -1010,29 +1010,29 @@ class LocalDeliveryStoreTest {
 
         assertNotNull(failure)
         assertEquals(null, database.messages().get("user:rollback"))
-        assertEquals("仍需保留", database.composerDrafts().get("server", "mobile:test")?.text)
+        assertEquals("仍需保留", database.composerDrafts().get("server", "akashic:test")?.text)
     }
 
     @Test
     fun keepsUnavailableConversationWithComposerDraft() = runBlocking {
-        assertEquals(1, database.conversations().markRemoteKnown("mobile:test"))
-        store.saveComposerDraft("mobile:test", "稍后继续", null, "server", 2)
+        assertEquals(1, database.conversations().markRemoteKnown("akashic:test"))
+        store.saveComposerDraft("akashic:test", "稍后继续", null, "server", 2)
 
         assertEquals(
             RemoveUnavailableConversationResult.HAS_LOCAL_WORK,
-            store.removeUnavailableConversation("server", "mobile:test"),
+            store.removeUnavailableConversation("server", "akashic:test"),
         )
-        assertNotNull(database.conversations().get("mobile:test"))
+        assertNotNull(database.conversations().get("akashic:test"))
     }
 
     @Test
     fun conversationSummarySeparatesRemoteHistoryFromLocalWork() = runBlocking {
-        assertEquals(1, database.conversations().markRemoteKnown("mobile:test"))
+        assertEquals(1, database.conversations().markRemoteKnown("akashic:test"))
         database.messages().upsert(
             MessageEntity(
                 "remote-history",
                 null,
-                "mobile:test",
+                "akashic:test",
                 "assistant",
                 "历史",
                 "complete",
@@ -1049,7 +1049,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 "user:failed",
                 "failed",
-                "mobile:test",
+                "akashic:test",
                 "user",
                 "失败草稿",
                 "failed_retryable",
@@ -1085,7 +1085,7 @@ class LocalDeliveryStoreTest {
         )
         events.forEach { store.applyEvent("server", "device", it, it.eventSeq!!) }
 
-        assertTrue(requireNotNull(database.conversations().get("mobile:test")).remoteKnown)
+        assertTrue(requireNotNull(database.conversations().get("akashic:test")).remoteKnown)
         val blocks = database.messages().getBlocks("assistant:turn")
         assertEquals(listOf("think-1", "tool-1", "think-2"), blocks.map { it.blockId })
         assertEquals(listOf("completed", "completed", "running"), blocks.map { it.status })
@@ -1104,11 +1104,11 @@ class LocalDeliveryStoreTest {
 
     @Test
     fun firstRemoteTurnCreatesConversationBeforeAssistantProjection() = runBlocking {
-        assertEquals(1, database.conversations().delete("server", "mobile:test"))
+        assertEquals(1, database.conversations().delete("server", "akashic:test"))
 
         store.applyEvent("server", "device", event(1, "turn.started", buildJsonObject {}), 2)
 
-        val conversation = requireNotNull(database.conversations().get("mobile:test"))
+        val conversation = requireNotNull(database.conversations().get("akashic:test"))
         assertTrue(conversation.remoteKnown)
         assertEquals("streaming", database.messages().get("assistant:turn")!!.deliveryState)
         assertEquals(1, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
@@ -1147,13 +1147,13 @@ class LocalDeliveryStoreTest {
                 put("arguments", buildJsonObject { put("description", "检查实际进程") })
             }),
             event(4, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:final")
+                put("message_id", "akashic:test:assistant:final")
                 put("content", "答案"); put("thinking", "先确认运行状态，再给出结论。")
             }),
         )
         events.forEach { store.applyEvent("server", "device", it, it.eventSeq!!) }
 
-        val blocks = database.messages().getBlocks("mobile:test:assistant:final")
+        val blocks = database.messages().getBlocks("akashic:test:assistant:final")
         assertEquals(listOf("thinking", "tool"), blocks.map { it.kind })
         assertEquals(listOf(-1, 0), blocks.map { it.ordinal })
         assertEquals("failed", blocks.last().status)
@@ -1182,8 +1182,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:history:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:history:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "持久化回答")
@@ -1195,18 +1195,18 @@ class LocalDeliveryStoreTest {
             3,
         )
 
-        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertEquals(2, database.messages().countForSession("akashic:test"))
         assertEquals("控制指令结果", database.messages().get(ephemeralId)!!.text)
-        assertEquals("持久化回答", database.messages().get("mobile:test:history:canonical")!!.text)
+        assertEquals("持久化回答", database.messages().get("akashic:test:history:canonical")!!.text)
         assertEquals(
             listOf("历史思考"),
-            database.messages().getBlocks("mobile:test:history:canonical").map { it.content },
+            database.messages().getBlocks("akashic:test:history:canonical").map { it.content },
         )
     }
 
     @Test
     fun historyContentRefRestoresExactBodyWithoutChangingThinkingOrTools() = runBlocking {
-        val messageId = "mobile:test:history:large"
+        val messageId = "akashic:test:history:large"
         val content = ("长正文🌙\n".repeat(40_000)).toByteArray(Charsets.UTF_8)
         val digest = MessageDigest.getInstance("SHA-256").digest(content)
             .joinToString("") { "%02x".format(it) }
@@ -1224,7 +1224,7 @@ class LocalDeliveryStoreTest {
                 put("items", buildJsonArray {
                     add(buildJsonObject {
                         put("id", messageId)
-                        put("session_key", "mobile:test")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "assistant")
                         put("content_ref", buildJsonObject {
@@ -1284,7 +1284,7 @@ class LocalDeliveryStoreTest {
 
     @Test
     fun repeatedHistoryManifestRequeuesFailedContentTransfer() = runBlocking {
-        val messageId = "mobile:test:history:retry"
+        val messageId = "akashic:test:history:retry"
         val content = "完整正文".toByteArray(Charsets.UTF_8)
         val digest = MessageDigest.getInstance("SHA-256").digest(content)
             .joinToString("") { "%02x".format(it) }
@@ -1299,7 +1299,7 @@ class LocalDeliveryStoreTest {
             put("items", buildJsonArray {
                 add(buildJsonObject {
                     put("id", messageId)
-                    put("session_key", "mobile:test")
+                    put("session_key", "akashic:test")
                     put("seq", 0)
                     put("role", "assistant")
                     put("content_ref", buildJsonObject {
@@ -1339,7 +1339,7 @@ class LocalDeliveryStoreTest {
                 MessageEntity(
                     messageId = "ephemeral:$index",
                     clientMessageId = null,
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     role = "assistant",
                     text = "相同回答",
                     deliveryState = "complete",
@@ -1359,8 +1359,8 @@ class LocalDeliveryStoreTest {
                 put("items", buildJsonArray {
                     listOf(firstCompletedAt, secondCompletedAt).forEachIndexed { index, _ ->
                         add(buildJsonObject {
-                            put("id", "mobile:test:canonical:$index")
-                            put("session_key", "mobile:test")
+                            put("id", "akashic:test:canonical:$index")
+                            put("session_key", "akashic:test")
                             put("seq", index)
                             put("role", "assistant")
                             put("content", "相同回答")
@@ -1373,11 +1373,11 @@ class LocalDeliveryStoreTest {
             secondCompletedAt,
         )
 
-        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertEquals(2, database.messages().countForSession("akashic:test"))
         assertEquals(null, database.messages().get("ephemeral:0"))
         assertEquals(null, database.messages().get("ephemeral:1"))
-        assertEquals("相同回答", database.messages().get("mobile:test:canonical:0")!!.text)
-        assertEquals("相同回答", database.messages().get("mobile:test:canonical:1")!!.text)
+        assertEquals("相同回答", database.messages().get("akashic:test:canonical:0")!!.text)
+        assertEquals("相同回答", database.messages().get("akashic:test:canonical:1")!!.text)
     }
 
     @Test
@@ -1403,8 +1403,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:proactive:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:proactive:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "只应显示一次的主动消息")
@@ -1416,11 +1416,11 @@ class LocalDeliveryStoreTest {
             completedAt + 120_001,
         )
 
-        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(1, database.messages().countForSession("akashic:test"))
         assertEquals(null, database.messages().get(proactiveId))
         assertEquals(
             "只应显示一次的主动消息",
-            database.messages().get("mobile:test:proactive:canonical")!!.text,
+            database.messages().get("akashic:test:proactive:canonical")!!.text,
         )
     }
 
@@ -1449,8 +1449,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:proactive:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:proactive:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "文本和时间不参与身份判断")
@@ -1465,11 +1465,11 @@ class LocalDeliveryStoreTest {
             completedAt + 120_001,
         )
 
-        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(1, database.messages().countForSession("akashic:test"))
         assertEquals(null, database.messages().get(proactiveId))
         assertEquals(
             "文本和时间不参与身份判断",
-            database.messages().get("mobile:test:proactive:canonical")!!.text,
+            database.messages().get("akashic:test:proactive:canonical")!!.text,
         )
     }
 
@@ -1488,7 +1488,7 @@ class LocalDeliveryStoreTest {
             )
         }
 
-        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertEquals(2, database.messages().countForSession("akashic:test"))
         assertNotNull(database.messages().get("proactive:delivery-1"))
         assertNotNull(database.messages().get("proactive:delivery-2"))
     }
@@ -1516,8 +1516,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:ordinary:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:ordinary:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "可能重复但语义不同")
@@ -1529,9 +1529,9 @@ class LocalDeliveryStoreTest {
             completedAt + 1,
         )
 
-        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertEquals(2, database.messages().countForSession("akashic:test"))
         assertNotNull(database.messages().get(proactiveId))
-        assertNotNull(database.messages().get("mobile:test:ordinary:canonical"))
+        assertNotNull(database.messages().get("akashic:test:ordinary:canonical"))
     }
 
     @Test
@@ -1542,7 +1542,7 @@ class LocalDeliveryStoreTest {
                 MessageEntity(
                     messageId = "proactive:ambiguous-$index",
                     clientMessageId = null,
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     role = "assistant",
                     text = "不能猜测对应关系",
                     deliveryState = "complete",
@@ -1561,8 +1561,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:ambiguous:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:ambiguous:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "不能猜测对应关系")
@@ -1574,10 +1574,10 @@ class LocalDeliveryStoreTest {
             completedAt + 1,
         )
 
-        assertEquals(3, database.messages().countForSession("mobile:test"))
+        assertEquals(3, database.messages().countForSession("akashic:test"))
         assertNotNull(database.messages().get("proactive:ambiguous-0"))
         assertNotNull(database.messages().get("proactive:ambiguous-1"))
-        assertNotNull(database.messages().get("mobile:test:ambiguous:canonical"))
+        assertNotNull(database.messages().get("akashic:test:ambiguous:canonical"))
     }
 
     @Test
@@ -1596,7 +1596,7 @@ class LocalDeliveryStoreTest {
             "server",
             "device",
             event(2, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:same")
+                put("message_id", "akashic:test:assistant:same")
                 put("content", "实时回答")
             }),
             3,
@@ -1610,8 +1610,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:assistant:same")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:assistant:same")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "历史回答")
@@ -1623,10 +1623,10 @@ class LocalDeliveryStoreTest {
             4,
         )
 
-        assertEquals(1, database.messages().countForSession("mobile:test"))
-        assertEquals("历史回答", database.messages().get("mobile:test:assistant:same")!!.text)
-        val blocks = database.messages().getBlocks("mobile:test:assistant:same")
-        assertEquals(listOf("history:mobile:test:assistant:same:0"), blocks.map { it.blockId })
+        assertEquals(1, database.messages().countForSession("akashic:test"))
+        assertEquals("历史回答", database.messages().get("akashic:test:assistant:same")!!.text)
+        val blocks = database.messages().getBlocks("akashic:test:assistant:same")
+        assertEquals(listOf("history:akashic:test:assistant:same:0"), blocks.map { it.blockId })
         assertEquals(listOf("历史思考"), blocks.map { it.content })
     }
 
@@ -1641,8 +1641,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:0")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:0")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "user")
                         put("content", "恢复问题")
@@ -1650,8 +1650,8 @@ class LocalDeliveryStoreTest {
                         put("ts", "2026-07-14T16:00:00Z")
                     })
                     add(buildJsonObject {
-                        put("id", "mobile:test:1")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:1")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "恢复回答")
@@ -1681,13 +1681,13 @@ class LocalDeliveryStoreTest {
 
         store.applyEvent("server", "device", history, 1)
 
-        assertEquals("恢复问题", database.messages().get("mobile:test:0")!!.text)
-        assertEquals("恢复回答", database.messages().get("mobile:test:1")!!.text)
+        assertEquals("恢复问题", database.messages().get("akashic:test:0")!!.text)
+        assertEquals("恢复回答", database.messages().get("akashic:test:1")!!.text)
         assertEquals(
             listOf("恢复问题", "恢复回答"),
-            database.messages().observeMessages("mobile:test").first().map { it.text },
+            database.messages().observeMessages("akashic:test").first().map { it.text },
         )
-        val blocks = database.messages().getBlocks("mobile:test:1")
+        val blocks = database.messages().getBlocks("akashic:test:1")
         assertEquals(listOf("thinking", "tool", "thinking"), blocks.map { it.kind })
         assertEquals("failed", blocks[1].status)
         assertEquals(StoredToolBlock("shell", "读取状态", "未执行"), decodeStoredToolBlock(blocks[1].content))
@@ -1701,7 +1701,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:$clientId",
                 clientMessageId = clientId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "本地问题",
                 deliveryState = "sent",
@@ -1722,9 +1722,9 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:user:canonical")
+                        put("id", "akashic:test:user:canonical")
                         put("client_message_id", clientId)
-                        put("session_key", "mobile:test")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "user")
                         put("content", "本地问题")
@@ -1746,12 +1746,12 @@ class LocalDeliveryStoreTest {
         )
 
         assertEquals(null, database.messages().get("user:$clientId"))
-        val canonical = database.messages().get("mobile:test:user:canonical")!!
+        val canonical = database.messages().get("akashic:test:user:canonical")!!
         assertEquals(clientId, canonical.clientMessageId)
         assertEquals("complete", canonical.deliveryState)
         assertEquals(
             listOf(attachmentId),
-            database.mediaAttachments().forMessage("mobile:test:user:canonical").map { it.attachmentId },
+            database.mediaAttachments().forMessage("akashic:test:user:canonical").map { it.attachmentId },
         )
     }
 
@@ -1762,7 +1762,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:$clientId",
                 clientMessageId = clientId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "继续",
                 deliveryState = "sent",
@@ -1775,19 +1775,19 @@ class LocalDeliveryStoreTest {
             "server",
             "device",
             event(1, "message.final", buildJsonObject {
-                put("user_message_id", "mobile:test:user:canonical")
+                put("user_message_id", "akashic:test:user:canonical")
                 put("client_message_id", clientId)
-                put("message_id", "mobile:test:assistant:canonical")
+                put("message_id", "akashic:test:assistant:canonical")
                 put("content", "回答")
             }),
             2,
         )
 
         // final 只推进乐观用户消息状态，不迁移 canonical 身份（仍由 history 投影重建）
-        assertEquals(null, database.messages().get("mobile:test:user:canonical"))
+        assertEquals(null, database.messages().get("akashic:test:user:canonical"))
         val optimistic = database.messages().get("user:$clientId")!!
         assertEquals("complete", optimistic.deliveryState)
-        assertEquals("回答", database.messages().get("mobile:test:assistant:canonical")!!.text)
+        assertEquals("回答", database.messages().get("akashic:test:assistant:canonical")!!.text)
     }
 
     @Test
@@ -1798,7 +1798,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:$clientId",
                 clientMessageId = clientId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "旧版问题",
                 deliveryState = "sent",
@@ -1816,8 +1816,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:user:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:user:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "user")
                         put("content", "旧版问题")
@@ -1829,9 +1829,9 @@ class LocalDeliveryStoreTest {
             sentAt + 10_000,
         )
 
-        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(1, database.messages().countForSession("akashic:test"))
         assertEquals(null, database.messages().get("user:$clientId"))
-        assertEquals("旧版问题", database.messages().get("mobile:test:user:canonical")!!.text)
+        assertEquals("旧版问题", database.messages().get("akashic:test:user:canonical")!!.text)
     }
 
     @Test
@@ -1842,7 +1842,7 @@ class LocalDeliveryStoreTest {
                 MessageEntity(
                     messageId = "user:$clientId",
                     clientMessageId = clientId,
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     role = "user",
                     text = "重复问题",
                     deliveryState = "sent",
@@ -1861,8 +1861,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:user:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:user:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "user")
                         put("content", "重复问题")
@@ -1874,7 +1874,7 @@ class LocalDeliveryStoreTest {
             sentAt + 10_000,
         )
 
-        assertEquals(3, database.messages().countForSession("mobile:test"))
+        assertEquals(3, database.messages().countForSession("akashic:test"))
     }
 
     @Test
@@ -1885,7 +1885,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:$clientId",
                 clientMessageId = clientId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "稍后又问的相同问题",
                 deliveryState = "sent",
@@ -1903,8 +1903,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:user:old-canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:user:old-canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "user")
                         put("content", "稍后又问的相同问题")
@@ -1916,19 +1916,19 @@ class LocalDeliveryStoreTest {
             historyAt + 30 * 60 * 1_000,
         )
 
-        assertEquals(2, database.messages().countForSession("mobile:test"))
+        assertEquals(2, database.messages().countForSession("akashic:test"))
         assertNotNull(database.messages().get("user:$clientId"))
-        assertNotNull(database.messages().get("mobile:test:user:old-canonical"))
+        assertNotNull(database.messages().get("akashic:test:user:old-canonical"))
     }
 
     @Test
     fun gapResetClearsOnlyServerProjectionAndPreservesLocalWork() = runBlocking {
         val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         database.messages().upsert(
-            MessageEntity("remote", null, "mobile:test", "assistant", "旧投影", "complete", 1, 1),
+            MessageEntity("remote", null, "akashic:test", "assistant", "旧投影", "complete", 1, 1),
         )
         database.messages().upsert(
-            MessageEntity("user:$clientId", clientId, "mobile:test", "user", "待发送", "pending", 2, 2),
+            MessageEntity("user:$clientId", clientId, "akashic:test", "user", "待发送", "pending", 2, 2),
         )
         database.outbox().enqueue(
             OutboxCommandEntity(clientId, "server", "{}", "pending", 0, 2, null),
@@ -1938,9 +1938,9 @@ class LocalDeliveryStoreTest {
             ServerProfileEntity("other", "other", "other-device", "alias", "pin", "[]", "[]", "[]", 1),
             RealtimeCursorEntity("other-device", "other", 0, 0, 1),
         )
-        database.conversations().upsert(ConversationEntity("mobile:other", "other", "other", 1))
+        database.conversations().upsert(ConversationEntity("akashic:other", "other", "other", 1))
         database.messages().upsert(
-            MessageEntity("other-message", null, "mobile:other", "assistant", "其他电脑", "complete", 1, 1),
+            MessageEntity("other-message", null, "akashic:other", "assistant", "其他电脑", "complete", 1, 1),
         )
 
         store.applyEvent(
@@ -1948,7 +1948,7 @@ class LocalDeliveryStoreTest {
             "device",
             event(50, "sync.reset_required", buildJsonObject { put("reason", "inbox_retention_exceeded") }),
             3,
-            preservedSessionId = "mobile:test",
+            preservedSessionId = "akashic:test",
         )
 
         assertEquals(50, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
@@ -1963,23 +1963,23 @@ class LocalDeliveryStoreTest {
     fun manualReloadClearsCommittedCacheButPreservesPairingAndUnsentWork() = runBlocking {
         val pendingId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         database.messages().upsert(
-            MessageEntity("remote", null, "mobile:test", "assistant", "旧投影", "complete", 1, 1, 1),
+            MessageEntity("remote", null, "akashic:test", "assistant", "旧投影", "complete", 1, 1, 1),
         )
         database.messages().upsert(
-            MessageEntity("sent", pendingId, "mobile:test", "user", "已提交", "sent", 2, 2),
+            MessageEntity("sent", pendingId, "akashic:test", "user", "已提交", "sent", 2, 2),
         )
         database.messages().upsert(
-            MessageEntity("pending", "pending-id", "mobile:test", "user", "待发送", "pending", 3, 3),
+            MessageEntity("pending", "pending-id", "akashic:test", "user", "待发送", "pending", 3, 3),
         )
         database.messages().upsert(
-            MessageEntity("failed", "failed-id", "mobile:test", "user", "发送失败", "failed", 4, 4),
+            MessageEntity("failed", "failed-id", "akashic:test", "user", "发送失败", "failed", 4, 4),
         )
         database.outbox().enqueue(
             OutboxCommandEntity("pending-id", "server", "{}", "pending", 0, 3, null),
         )
         database.attachmentTransfers().upsert(transfer("ready", 1_048_579, "draft"))
 
-        store.clearReloadableCache("server", "mobile:test")
+        store.clearReloadableCache("server", "akashic:test")
 
         assertEquals(null, database.messages().get("remote"))
         assertNotNull(database.messages().get("sent"))
@@ -1989,7 +1989,7 @@ class LocalDeliveryStoreTest {
         assertNotNull(database.attachmentTransfers().get("draft"))
         assertNotNull(database.serverProfiles().get("server"))
         assertNotNull(database.realtimeCursors().get("device"))
-        assertNotNull(database.conversations().get("mobile:test"))
+        assertNotNull(database.conversations().get("akashic:test"))
     }
 
     @Test
@@ -2022,8 +2022,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:history")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:history")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "历史恢复")
@@ -2039,18 +2039,18 @@ class LocalDeliveryStoreTest {
             "server",
             "device",
             event(202, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:live")
+                put("message_id", "akashic:test:live")
                 put("content", "重建后的实时消息")
             }),
             5,
         )
 
         assertEquals(202, database.realtimeCursors().get("device")!!.lastAcknowledgedEventSeq)
-        assertEquals("历史恢复", database.messages().get("mobile:test:history")!!.text)
-        assertEquals("重建后的实时消息", database.messages().get("mobile:test:live")!!.text)
+        assertEquals("历史恢复", database.messages().get("akashic:test:history")!!.text)
+        assertEquals("重建后的实时消息", database.messages().get("akashic:test:live")!!.text)
         assertEquals(
             listOf("01ARZ3NDEKTSV4RRFFQ69G5FAW"),
-            database.mediaAttachments().forMessage("mobile:test:history").map { it.attachmentId },
+            database.mediaAttachments().forMessage("akashic:test:history").map { it.attachmentId },
         )
     }
 
@@ -2091,7 +2091,7 @@ class LocalDeliveryStoreTest {
         database.attachmentTransfers().upsert(transfer(state = "ready", offset = 1_048_579))
         val payload = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             text = "",
             mediaRefs = listOf("attachment"),
             clientCreatedAt = Instant.EPOCH.toString(),
@@ -2102,18 +2102,18 @@ class LocalDeliveryStoreTest {
             type = "message.send",
             id = payload.clientMessageId,
             connectionEpoch = 1,
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             payload = ProtocolCodec.json().encodeToJsonElement(
                 MessageSendPayload.serializer(),
                 payload,
             ).jsonObject,
         )
         store.enqueueMessage(
-            conversation = ConversationEntity("mobile:test", "server", "image.png", 2),
+            conversation = ConversationEntity("akashic:test", "server", "image.png", 2),
             message = MessageEntity(
                 messageId = "user:${payload.clientMessageId}",
                 clientMessageId = payload.clientMessageId,
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "",
                 deliveryState = "pending",
@@ -2142,7 +2142,7 @@ class LocalDeliveryStoreTest {
             store.acknowledgeOutbox(command.id, 3),
         )
         assertEquals("sent", database.attachmentTransfers().get("attachment")!!.state)
-        assertTrue(database.conversations().get("mobile:test")!!.remoteKnown)
+        assertTrue(database.conversations().get("akashic:test")!!.remoteKnown)
         assertEquals(
             listOf("attachment"),
             database.mediaAttachments().forMessage("user:${payload.clientMessageId}").map { it.attachmentId },
@@ -2168,7 +2168,7 @@ class LocalDeliveryStoreTest {
         assertEquals(newCommandId, payload.clientMessageId)
         assertEquals(2_000, command.createdAt)
         assertEquals(null, database.outbox().get(oldCommandId))
-        assertEquals(1, database.messages().countForSession("mobile:test"))
+        assertEquals(1, database.messages().countForSession("akashic:test"))
     }
 
     @Test
@@ -2207,7 +2207,7 @@ class LocalDeliveryStoreTest {
         database.messages().upsert(retryMessage("failed-local", "failed-command", 2_000, null, "failed_retryable"))
         database.messages().upsert(retryMessage("server-after", null, 3_000, 2))
 
-        val ordered = database.messages().observeMessages("mobile:test").first()
+        val ordered = database.messages().observeMessages("akashic:test").first()
 
         assertEquals(listOf("server-before", "failed-local", "server-after"), ordered.map { it.messageId })
     }
@@ -2229,11 +2229,11 @@ class LocalDeliveryStoreTest {
             persisted.serverProfiles().upsert(
                 ServerProfileEntity("restart", "restart", "restart-device", "alias", "pin", "[]", "[]", "[]", 1),
             )
-            persisted.conversations().upsert(ConversationEntity("mobile:restart", "restart", "restart", 1))
+            persisted.conversations().upsert(ConversationEntity("akashic:restart", "restart", "restart", 1))
             persisted.messages().upsert(
-                MessageEntity(messageId, messageId.removePrefix("user:"), "mobile:restart", "user", "附件：image.png", "sent", 1, 1),
+                MessageEntity(messageId, messageId.removePrefix("user:"), "akashic:restart", "user", "附件：image.png", "sent", 1, 1),
             )
-            persisted.mediaAttachments().upsert(attachment.copy(serverId = "restart", sessionId = "mobile:restart"))
+            persisted.mediaAttachments().upsert(attachment.copy(serverId = "restart", sessionId = "akashic:restart"))
             persisted.mediaAttachments().linkAll(
                 listOf(MessageAttachmentEntity(messageId, attachment.attachmentId, 0)),
             )
@@ -2263,7 +2263,7 @@ class LocalDeliveryStoreTest {
             "server",
             "device",
             event(1, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:attachment")
+                put("message_id", "akashic:test:assistant:attachment")
                 put("content", "完成")
                 put("attachments", buildJsonArray { add(descriptor) })
             }),
@@ -2278,8 +2278,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:1")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:1")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "完成")
@@ -2297,11 +2297,11 @@ class LocalDeliveryStoreTest {
         assertEquals("pending", attachment!!.state)
         assertEquals(
             listOf(attachment.attachmentId),
-            database.mediaAttachments().forMessage("mobile:test:assistant:attachment").map { it.attachmentId },
+            database.mediaAttachments().forMessage("akashic:test:assistant:attachment").map { it.attachmentId },
         )
         assertEquals(
             listOf(attachment.attachmentId),
-            database.mediaAttachments().forMessage("mobile:test:1").map { it.attachmentId },
+            database.mediaAttachments().forMessage("akashic:test:1").map { it.attachmentId },
         )
     }
 
@@ -2320,7 +2320,7 @@ class LocalDeliveryStoreTest {
             "server",
             "device",
             event(1, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:large-attachment")
+                put("message_id", "akashic:test:assistant:large-attachment")
                 put("content", "附件")
                 put("attachments", buildJsonArray {
                     add(descriptor(smallId, 10L * 1024 * 1024 - 1))
@@ -2362,12 +2362,12 @@ class LocalDeliveryStoreTest {
         val unavailableId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         val availableId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
         database.conversations().upsert(
-            ConversationEntity("mobile:stale", "server", "stale", 2, remoteKnown = true),
+            ConversationEntity("akashic:stale", "server", "stale", 2, remoteKnown = true),
         )
         database.mediaAttachments().upsertAll(
             listOf(
                 mediaAttachment(unavailableId).copy(
-                    sessionId = "mobile:stale",
+                    sessionId = "akashic:stale",
                     sizeBytes = 1,
                     transferredBytes = 0,
                     state = "pending",
@@ -2390,12 +2390,12 @@ class LocalDeliveryStoreTest {
             sendCommand = { _, _, sessionId, _ -> sentSessions += sessionId; true },
             onTransportUnavailable = {},
             onDownloadFailed = {},
-            canTransfer = { it.sessionId != "mobile:stale" },
+            canTransfer = { it.sessionId != "akashic:stale" },
         )
 
         downloads.onConnectionReady("server")
 
-        assertEquals(listOf("mobile:test"), sentSessions)
+        assertEquals(listOf("akashic:test"), sentSessions)
         assertEquals("pending", database.mediaAttachments().get(unavailableId)!!.state)
     }
 
@@ -2428,17 +2428,17 @@ class LocalDeliveryStoreTest {
         database.messages().upsert(retryMessage("remote-before", null, 1_000, 10))
         database.messages().upsert(retryMessage("local-failed", "client-failed", 2_000, null, "failed_retryable"))
         database.messages().upsert(retryMessage("remote-after", null, 3_000, 11))
-        val ordered = database.messages().observeMessages("mobile:test").first()
+        val ordered = database.messages().observeMessages("akashic:test").first()
         assertEquals(listOf("remote-before", "local-failed", "remote-after"), ordered.map { it.messageId })
 
         // 2. 阅读水位只统计之后完成的助手消息，锚点独立保存
         database.messages().upsert(
-            MessageEntity("assistant-old", null, "mobile:test", "assistant", "旧回答", "complete", 4_000, 4_000, 12),
+            MessageEntity("assistant-old", null, "akashic:test", "assistant", "旧回答", "complete", 4_000, 4_000, 12),
         )
-        database.conversationReadStates().markReadThrough("mobile:test", 4_000, 4_100)
-        database.conversationReadStates().savePosition("mobile:test", "local-failed", -14, 4_200)
+        database.conversationReadStates().markReadThrough("akashic:test", 4_000, 4_100)
+        database.conversationReadStates().savePosition("akashic:test", "local-failed", -14, 4_200)
         database.messages().upsert(
-            MessageEntity("assistant-new", null, "mobile:test", "assistant", "新回答", "complete", 5_000, 5_000, 13),
+            MessageEntity("assistant-new", null, "akashic:test", "assistant", "新回答", "complete", 5_000, 5_000, 13),
         )
         val summary = database.conversations().observeSummaries("server").first().single()
         assertEquals(1, summary.unreadCount)
@@ -2456,7 +2456,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 optimisticId,
                 clientId,
-                "mobile:test",
+                "akashic:test",
                 "user",
                 "本地问题",
                 "sent",
@@ -2464,7 +2464,7 @@ class LocalDeliveryStoreTest {
                 1,
             ),
         )
-        assertTrue(store.saveReadingPosition("mobile:test", optimisticId, -12, "server", 2))
+        assertTrue(store.saveReadingPosition("akashic:test", optimisticId, -12, "server", 2))
         store.applyEvent(
             "server",
             "device",
@@ -2474,9 +2474,9 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:user:canonical")
+                        put("id", "akashic:test:user:canonical")
                         put("client_message_id", clientId)
-                        put("session_key", "mobile:test")
+                        put("session_key", "akashic:test")
                         put("seq", 0)
                         put("role", "user")
                         put("content", "本地问题")
@@ -2488,31 +2488,31 @@ class LocalDeliveryStoreTest {
             3,
         )
         var summary = database.conversations().observeSummaries("server").first().single()
-        assertEquals("mobile:test:user:canonical", summary.anchorMessageId)
+        assertEquals("akashic:test:user:canonical", summary.anchorMessageId)
         assertEquals(-12, summary.anchorOffsetPx)
-        assertTrue(store.saveReadingPosition("mobile:test", optimisticId, -30, "server", 4))
+        assertTrue(store.saveReadingPosition("akashic:test", optimisticId, -30, "server", 4))
         summary = database.conversations().observeSummaries("server").first().single()
-        assertEquals("mobile:test:user:canonical", summary.anchorMessageId)
+        assertEquals("akashic:test:user:canonical", summary.anchorMessageId)
         assertEquals(-30, summary.anchorOffsetPx)
 
         // 2. 最终事件将 streaming 助手消息与阅读锚点一起迁移
         store.applyEvent("server", "device", event(2, "turn.started", buildJsonObject {}), 4)
-        assertTrue(store.saveReadingPosition("mobile:test", "assistant:turn", -20, "server", 5))
+        assertTrue(store.saveReadingPosition("akashic:test", "assistant:turn", -20, "server", 5))
         store.applyEvent(
             "server",
             "device",
             event(3, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:canonical")
+                put("message_id", "akashic:test:assistant:canonical")
                 put("content", "最终回答")
             }),
             6,
         )
         summary = database.conversations().observeSummaries("server").first().single()
-        assertEquals("mobile:test:assistant:canonical", summary.anchorMessageId)
+        assertEquals("akashic:test:assistant:canonical", summary.anchorMessageId)
         assertEquals(-20, summary.anchorOffsetPx)
-        assertTrue(store.saveReadingPosition("mobile:test", "assistant:turn", -40, "server", 7))
+        assertTrue(store.saveReadingPosition("akashic:test", "assistant:turn", -40, "server", 7))
         summary = database.conversations().observeSummaries("server").first().single()
-        assertEquals("mobile:test:assistant:canonical", summary.anchorMessageId)
+        assertEquals("akashic:test:assistant:canonical", summary.anchorMessageId)
         assertEquals(-40, summary.anchorOffsetPx)
     }
 
@@ -2523,15 +2523,15 @@ class LocalDeliveryStoreTest {
             "server",
             "device",
             event(2, "message.final", buildJsonObject {
-                put("message_id", "mobile:test:assistant:canonical")
+                put("message_id", "akashic:test:assistant:canonical")
                 put("content", "最终回答")
             }),
             3,
         )
 
-        assertTrue(store.saveReadingPosition("mobile:test", "assistant:turn", -18, "server", 4))
+        assertTrue(store.saveReadingPosition("akashic:test", "assistant:turn", -18, "server", 4))
         val summary = database.conversations().observeSummaries("server").first().single()
-        assertEquals("mobile:test:assistant:canonical", summary.anchorMessageId)
+        assertEquals("akashic:test:assistant:canonical", summary.anchorMessageId)
         assertEquals(-18, summary.anchorOffsetPx)
     }
 
@@ -2542,7 +2542,7 @@ class LocalDeliveryStoreTest {
             MessageEntity(
                 messageId = "user:history-owner",
                 clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 role = "user",
                 text = "问题",
                 deliveryState = "sent",
@@ -2574,8 +2574,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:assistant:canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:assistant:canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
@@ -2589,7 +2589,7 @@ class LocalDeliveryStoreTest {
         )
 
         assertEquals(null, database.messages().get("assistant:turn"))
-        val canonical = database.messages().get("mobile:test:assistant:canonical")
+        val canonical = database.messages().get("akashic:test:assistant:canonical")
         assertNotNull(canonical)
         assertEquals("complete", canonical!!.deliveryState)
         assertEquals("最终回答", canonical.text)
@@ -2614,7 +2614,7 @@ class LocalDeliveryStoreTest {
             completedAt,
         )
         store.saveComposerDraft(
-            "mobile:test",
+            "akashic:test",
             "沿着这条回答继续",
             "assistant:turn",
             "server",
@@ -2629,8 +2629,8 @@ class LocalDeliveryStoreTest {
                 put("page_size", 10)
                 put("items", buildJsonArray {
                     add(buildJsonObject {
-                        put("id", "mobile:test:assistant:history-canonical")
-                        put("session_key", "mobile:test")
+                        put("id", "akashic:test:assistant:history-canonical")
+                        put("session_key", "akashic:test")
                         put("seq", 1)
                         put("role", "assistant")
                         put("content", "两段迁移回答")
@@ -2642,20 +2642,20 @@ class LocalDeliveryStoreTest {
             completedAt + 1,
         )
 
-        assertTrue(store.saveReadingPosition("mobile:test", "assistant:turn", -22, "server", completedAt + 2))
+        assertTrue(store.saveReadingPosition("akashic:test", "assistant:turn", -22, "server", completedAt + 2))
         val summary = database.conversations().observeSummaries("server").first().single()
-        assertEquals("mobile:test:assistant:history-canonical", summary.anchorMessageId)
+        assertEquals("akashic:test:assistant:history-canonical", summary.anchorMessageId)
         assertEquals(-22, summary.anchorOffsetPx)
         assertEquals(
-            "mobile:test:assistant:history-canonical",
-            database.composerDrafts().get("server", "mobile:test")?.replyToMessageId,
+            "akashic:test:assistant:history-canonical",
+            database.composerDrafts().get("server", "akashic:test")?.replyToMessageId,
         )
     }
 
     private fun transfer(state: String, offset: Long, id: String = "attachment") = AttachmentTransferEntity(
         attachmentId = id,
         serverId = "server",
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         filename = "image.png",
         contentType = "image/png",
         sizeBytes = 1_048_579,
@@ -2673,7 +2673,7 @@ class LocalDeliveryStoreTest {
     ) = MessageEntity(
         messageId = messageId,
         clientMessageId = clientMessageId,
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         role = "user",
         text = text,
         deliveryState = "pending",
@@ -2694,7 +2694,7 @@ class LocalDeliveryStoreTest {
     private fun mediaAttachment(id: String) = MediaAttachmentEntity(
         attachmentId = id,
         serverId = "server",
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         filename = "image.png",
         contentType = "image/png",
         sizeBytes = 1_048_579,
@@ -2709,7 +2709,7 @@ class LocalDeliveryStoreTest {
     private suspend fun enqueueRetryableMessage(commandId: String, createdAt: Long) {
         val payload = MessageSendPayload(
             clientMessageId = commandId,
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             text = "需要恢复的消息",
             mediaRefs = emptyList(),
             clientCreatedAt = "2026-07-16T08:00:00Z",
@@ -2720,11 +2720,11 @@ class LocalDeliveryStoreTest {
             type = "message.send",
             id = commandId,
             connectionEpoch = 1,
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             payload = ProtocolCodec.json().encodeToJsonElement(MessageSendPayload.serializer(), payload).jsonObject,
         )
         store.enqueueMessage(
-            ConversationEntity("mobile:test", "server", "test", 1),
+            ConversationEntity("akashic:test", "server", "test", 1),
             retryMessage("visual-message", commandId, createdAt, null, "pending"),
             OutboxCommandEntity(commandId, "server", ProtocolCodec.encode(envelope), "pending", 0, createdAt, null),
             emptyList(),
@@ -2740,7 +2740,7 @@ class LocalDeliveryStoreTest {
     ) = MessageEntity(
         messageId = messageId,
         clientMessageId = clientMessageId,
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         role = "user",
         text = messageId,
         deliveryState = state,
@@ -2761,7 +2761,7 @@ class LocalDeliveryStoreTest {
         id = "01J00000000000000000000000",
         connectionEpoch = 1,
         eventSeq = sequence,
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         turnId = turnId,
         payload = payload,
     )

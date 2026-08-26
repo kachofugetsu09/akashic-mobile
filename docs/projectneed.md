@@ -26,6 +26,10 @@ SessionDB 是核心长期状态。除非用户通过明确的删除或撤销操�
 
 一次同步中没有看到某个会话、消息或附件，不足以证明服务端事实已删除。移动端只能按核心协议的明确终态或显式用户操作处理删除语义。
 
+### MOB-CORE-003 Web 与 Mobile 共享 Core 分配的 Akashic 身份
+
+Web 与 Mobile 是同一 `akashic` Channel 的两个客户端 adapter。Session 与历史 Message 身份只由 Core 创建和迁移；Android 不生成 Session ID、不保存 old→new 映射，也不按客户端来源过滤会话目录。
+
 ## 3. 移动端持久化
 
 ### MOB-DATA-001 服务端投影与本地工作必须分层
@@ -45,6 +49,8 @@ Room 中从核心重新拉取的会话、消息、turn block 和附件元数据�
 - 尚未得到确定结果的 turn stop 请求。
 
 只有各自 owner 在协议确认、用户明确消费/放弃或已定义终态发生时，才能减少对应状态。
+
+维护者明确批准的一次性 breaking identity cutover 可以删除无法安全重放的旧 Session-bound 本地工作；该授权只属于名称明确的迁移，不得扩展成普通刷新、断线或 reset 的删除权。
 
 ### MOB-DATA-003 缓存驱逐不得改变事实语义
 

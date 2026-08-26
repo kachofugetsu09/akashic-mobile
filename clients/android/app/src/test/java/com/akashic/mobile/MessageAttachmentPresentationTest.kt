@@ -39,7 +39,7 @@ class MessageAttachmentPresentationTest {
         attachment = MediaAttachmentEntity(
             attachmentId = id,
             serverId = "server",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             filename = "$id.pdf",
             contentType = "application/pdf",
             sizeBytes = 100,

@@ -15,7 +15,7 @@ class TurnProjectionObserverTest {
         clientMessageId: String? = null,
     ) = MessageUi.AssistantTurn(
         id = id,
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         intro = null,
         blocks = blocks,
         answer = answer,
@@ -45,7 +45,7 @@ class TurnProjectionObserverTest {
     fun composerReadyFiresOnceAfterTerminalProjection() {
         val observer = TurnProjectionObserver()
         // 1. 流式中：只观测，不触发任何边沿
-        val streaming = active(observer, "mobile:test", "turn-a", streaming = true)
+        val streaming = active(observer, "akashic:test", "turn-a", streaming = true)
         assertEquals("turn-a", streaming.targetTurnId)
         assertEquals(true, streaming.streaming)
         assertFalse(streaming.canStopFalse)
@@ -54,7 +54,7 @@ class TurnProjectionObserverTest {
         // 2. 权威终态投影：canStop 回 false，composer_ready 恰好一次
         val closed = observer.observe(
             listOf(assistant("assistant:turn-a", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             null,
         )
         assertTrue(closed.canStopFalse)
@@ -63,7 +63,7 @@ class TurnProjectionObserverTest {
         // 3. 重复 emission 不再触发
         val repeat = observer.observe(
             listOf(assistant("assistant:turn-a", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             null,
         )
         assertFalse(repeat.canStopFalse)
@@ -74,14 +74,14 @@ class TurnProjectionObserverTest {
     fun terminalProjectionWhileActiveKeepsStreamingEdgeThenFiresOnceOnClose() {
         val observer = TurnProjectionObserver()
         // 1. 活动流式中：只观测
-        val streaming = active(observer, "mobile:test", "turn-a", streaming = true)
+        val streaming = active(observer, "akashic:test", "turn-a", streaming = true)
         assertFalse(streaming.canStopFalse)
         assertFalse(streaming.composerReady)
 
         // 2. active 仍非空但投影已终态：不得删除 sawStreaming，也不得提前产出
         val stillActive = observer.observe(
             listOf(assistant("assistant:turn-a", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             "turn-a",
         )
         assertFalse(stillActive.canStopFalse)
@@ -90,7 +90,7 @@ class TurnProjectionObserverTest {
         // 3. active 清空后的权威终态投影：同次产出 canStopFalse/composerReady 并清理
         val closed = observer.observe(
             listOf(assistant("assistant:turn-a", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             null,
         )
         assertTrue(closed.canStopFalse)
@@ -99,7 +99,7 @@ class TurnProjectionObserverTest {
         // 4. 重复 emission 恰好一次
         val repeat = observer.observe(
             listOf(assistant("assistant:turn-a", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             null,
         )
         assertFalse(repeat.canStopFalse)
@@ -113,7 +113,7 @@ class TurnProjectionObserverTest {
         // 1. 流式临时消息建立 turn 与客户端发件身份的关联
         active(
             observer,
-            "mobile:test",
+            "akashic:test",
             "turn-a",
             streaming = true,
             messages = listOf(
@@ -131,18 +131,18 @@ class TurnProjectionObserverTest {
             streaming = false,
             clientMessageId = clientMessageId,
         )
-        val stillActive = observer.observe(listOf(canonical), "mobile:test", "turn-a")
+        val stillActive = observer.observe(listOf(canonical), "akashic:test", "turn-a")
         assertEquals("message:canonical", stillActive.observed?.id)
         assertFalse(stillActive.canStopFalse)
 
         // 3. coordinator 清空 active 后仍定位同一 canonical 投影并触发一次闭包
-        val closed = observer.observe(listOf(canonical), "mobile:test", null)
+        val closed = observer.observe(listOf(canonical), "akashic:test", null)
         assertEquals("turn-a", closed.targetTurnId)
         assertEquals("message:canonical", closed.observed?.id)
         assertTrue(closed.canStopFalse)
         assertTrue(closed.composerReady)
 
-        val repeat = observer.observe(listOf(canonical), "mobile:test", null)
+        val repeat = observer.observe(listOf(canonical), "akashic:test", null)
         assertFalse(repeat.canStopFalse)
         assertFalse(repeat.composerReady)
     }
@@ -154,13 +154,13 @@ class TurnProjectionObserverTest {
             "assistant:turn-legacy",
             streaming = true,
         ).copy(controlTurnId = "turn-legacy")
-        observer.observe(listOf(streaming), "mobile:test", "turn-legacy")
+        observer.observe(listOf(streaming), "akashic:test", "turn-legacy")
 
         val canonical = streaming.copy(
             id = "message:canonical",
             status = AssistantTurnStatus.COMPLETE,
         )
-        val closed = observer.observe(listOf(canonical), "mobile:test", null)
+        val closed = observer.observe(listOf(canonical), "akashic:test", null)
 
         assertEquals("message:canonical", closed.observed?.id)
         assertTrue(closed.canStopFalse)
@@ -171,12 +171,12 @@ class TurnProjectionObserverTest {
     fun replacedActiveTurnDoesNotPolluteClosureWithOldStreaming() {
         val observer = TurnProjectionObserver()
         // 1. 旧 turn 曾流式
-        active(observer, "mobile:test", "turn-old", streaming = true)
+        active(observer, "akashic:test", "turn-old", streaming = true)
 
         // 2. active 直接换成新 turn，且新 turn 未流式即终态
         val replaced = observer.observe(
             listOf(assistant("assistant:turn-new", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             "turn-new",
         )
         assertFalse(replaced.composerReady)
@@ -184,7 +184,7 @@ class TurnProjectionObserverTest {
         // 3. 新 turn 关闭：旧 turn 的 streaming 边沿不得误触发 composer_ready
         val closed = observer.observe(
             listOf(assistant("assistant:turn-new", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             null,
         )
         assertTrue(closed.canStopFalse)
@@ -193,7 +193,7 @@ class TurnProjectionObserverTest {
         // 4. 清理后旧 turn 的边沿不会再次污染后续 turn
         val later = observer.observe(
             listOf(assistant("assistant:turn-later", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             "turn-later",
         )
         assertFalse(later.composerReady)
@@ -202,12 +202,12 @@ class TurnProjectionObserverTest {
     @Test
     fun replacedActiveTurnThatStreamsStillFiresComposerReadyOnClose() {
         val observer = TurnProjectionObserver()
-        active(observer, "mobile:test", "turn-old", streaming = true)
+        active(observer, "akashic:test", "turn-old", streaming = true)
 
         // 1. 新 turn 替换旧 turn 后确实流式：streaming 边沿归属新 turn
         val streaming = observer.observe(
             listOf(assistant("assistant:turn-new", streaming = true)),
-            "mobile:test",
+            "akashic:test",
             "turn-new",
         )
         assertFalse(streaming.composerReady)
@@ -215,7 +215,7 @@ class TurnProjectionObserverTest {
         // 2. 新 turn 关闭：按新 turn 自己的 streaming 边沿触发 composer_ready
         val closed = observer.observe(
             listOf(assistant("assistant:turn-new", streaming = false)),
-            "mobile:test",
+            "akashic:test",
             null,
         )
         assertTrue(closed.canStopFalse)
@@ -226,10 +226,10 @@ class TurnProjectionObserverTest {
     fun sessionSwitchDoesNotLeakStreamingEdge() {
         val observer = TurnProjectionObserver()
         // 1. 会话 A 正在流式
-        active(observer, "mobile:a", "turn-a1", streaming = true)
+        active(observer, "akashic:a", "turn-a1", streaming = true)
 
         // 2. 切到会话 B：B 无活动 turn，不得触发任何 A 的边沿
-        val onB = observer.observe(emptyList(), "mobile:b", null)
+        val onB = observer.observe(emptyList(), "akashic:b", null)
         assertNull(onB.targetTurnId)
         assertFalse(onB.canStopFalse)
         assertFalse(onB.composerReady)
@@ -237,7 +237,7 @@ class TurnProjectionObserverTest {
         // 3. 回到 A：A 已终态，只对 A 触发，B 不受影响
         val backOnA = observer.observe(
             listOf(assistant("assistant:turn-a1", streaming = false)),
-            "mobile:a",
+            "akashic:a",
             null,
         )
         assertTrue(backOnA.canStopFalse)
@@ -246,7 +246,7 @@ class TurnProjectionObserverTest {
         // 4. B 之后有新 turn 也不会因为 A 的 streaming 状态误触发
         val onB2 = observer.observe(
             listOf(assistant("assistant:turn-b1", streaming = true)),
-            "mobile:b",
+            "akashic:b",
             "turn-b1",
         )
         assertFalse(onB2.composerReady)
@@ -257,7 +257,7 @@ class TurnProjectionObserverTest {
         val observer = TurnProjectionObserver()
         val result = observer.observe(
             listOf(assistant("assistant:turn-c", streaming = true, blocks = listOf(thinking("  ")))),
-            "mobile:test",
+            "akashic:test",
             "turn-c",
         )
         assertEquals(true, result.streaming)
@@ -265,7 +265,7 @@ class TurnProjectionObserverTest {
 
         val visible = observer.observe(
             listOf(assistant("assistant:turn-c", streaming = true, blocks = listOf(thinking("先分析")))),
-            "mobile:test",
+            "akashic:test",
             "turn-c",
         )
         assertTrue(visible.hasThinking)
@@ -274,11 +274,11 @@ class TurnProjectionObserverTest {
     @Test
     fun lateClosedTurnOnlyObservedInItsSession() {
         val observer = TurnProjectionObserver()
-        active(observer, "mobile:a", "turn-a1", streaming = true)
+        active(observer, "akashic:a", "turn-a1", streaming = true)
         // 关闭发生在用户停留在其他会话时，回到 A 后仍能完成观测
         val back = observer.observe(
             listOf(assistant("assistant:turn-a1", streaming = false)),
-            "mobile:a",
+            "akashic:a",
             null,
         )
         assertTrue(back.composerReady)
@@ -291,7 +291,7 @@ class TurnProjectionObserverTest {
             assistant("assistant:old", streaming = false, answer = "旧"),
             assistant("assistant:new", streaming = true, answer = "新"),
         )
-        val result = observer.observe(messages, "mobile:test", "new")
+        val result = observer.observe(messages, "akashic:test", "new")
         assertEquals("assistant:new", result.observed?.id)
         assertEquals(true, result.streaming)
 

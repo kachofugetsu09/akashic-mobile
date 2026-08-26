@@ -295,18 +295,18 @@ internal val PreviewConversationState = ConversationUiState(
     connectionNotice = "网络不稳 · 消息已缓存，正在续传",
     errorNotice = "附件读取失败，请重新选择文件。",
     sessions = listOf(
-        SessionUi("mobile:preview-1", "Android 会话设计", "正在检查实时链路", 1_752_681_601_000, 0, true, true),
-        SessionUi("mobile:preview-2", "网络抖动恢复策略", "恢复窗口已经确认", 1_752_681_500_000, 2, false, true),
-        SessionUi("mobile:preview-3", "Material 3 交互细节", null, null, 0, false, true),
+        SessionUi("akashic:preview-1", "Android 会话设计", "正在检查实时链路", 1_752_681_601_000, 0, true, true),
+        SessionUi("akashic:preview-2", "网络抖动恢复策略", "恢复窗口已经确认", 1_752_681_500_000, 2, false, true),
+        SessionUi("akashic:preview-3", "Material 3 交互细节", null, null, 0, false, true),
     ),
-    selectedSessionId = "mobile:preview-1",
+    selectedSessionId = "akashic:preview-1",
     readingPosition = null,
     navigationTarget = null,
     projectionGeneration = 0,
     messages = listOf(
         MessageUi.User(
             id = "user-1",
-            sessionId = "mobile:preview-1",
+            sessionId = "akashic:preview-1",
             text = "帮我检查移动端实时链路，尤其是网络抖动后的恢复。",
             deliveryLabel = "已发送",
             replyable = true,
@@ -315,7 +315,7 @@ internal val PreviewConversationState = ConversationUiState(
         ),
         MessageUi.AssistantTurn(
             id = "assistant-1",
-            sessionId = "mobile:preview-1",
+            sessionId = "akashic:preview-1",
             intro = "我先沿着协议和恢复链路检查。",
             blocks = listOf(
                 ProcessBlockUi(

@@ -25,6 +25,49 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class IsolatedGatewayDeviceTest {
     @Test
+    fun freshEmptyCoreBecomesReadyAndCreatesFirstSession() = runBlocking<Unit> {
+        val offer = String(
+            Base64.decode(
+                requireNotNull(
+                    InstrumentationRegistry.getArguments().getString("pairingOfferBase64"),
+                ),
+                Base64.DEFAULT,
+            ),
+            Charsets.UTF_8,
+        )
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        val emptyReady = withTimeout(TIMEOUT_MILLIS) {
+            session.state.first {
+                it.hasProfile && it.connection.phase == ConnectionPhase.READY
+            }
+        }
+        assertEquals(null, emptyReady.currentSessionId)
+
+        session.createSession()
+        val created = withTimeout(TIMEOUT_MILLIS) {
+            session.state.first { state ->
+                state.currentSessionId?.matches(Regex("^akashic:[0-9a-f]{32}$")) == true
+            }
+        }
+        val sessionId = requireNotNull(created.currentSessionId)
+        assertEquals(sessionId, app.container.database.conversations().get(sessionId)?.sessionId)
+        val catalog = withTimeout(TIMEOUT_MILLIS) {
+            session.modelCatalog.state.first {
+                it.sessionId == sessionId &&
+                    !it.loading &&
+                    it.generationId != null &&
+                    it.errorMessage == null
+            }
+        }
+        assertTrue(catalog.runtimes.isNotEmpty())
+    }
+
+    @Test
     fun loadsAkashaRecallCardOverHttps() = runBlocking {
         val arguments = InstrumentationRegistry.getArguments()
         val offer = String(

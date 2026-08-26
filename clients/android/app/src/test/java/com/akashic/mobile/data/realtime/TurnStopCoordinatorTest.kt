@@ -20,16 +20,16 @@ class TurnStopCoordinatorTest {
             onPersist = persisted::add,
             onStateChanged = { changes += 1 },
         )
-        coordinator.onTurnStarted("mobile:one", "turn-1")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
 
-        val first = coordinator.requestStop("mobile:one")
-        val duplicate = coordinator.requestStop("mobile:one")
+        val first = coordinator.requestStop("akashic:one")
+        val duplicate = coordinator.requestStop("akashic:one")
         coordinator.onConnectionReady()
 
         assertEquals(first, duplicate)
         assertEquals(listOf(first, first), sent)
         assertEquals(listOf(first), persisted)
-        assertTrue(coordinator.isStopping("mobile:one"))
+        assertTrue(coordinator.isStopping("akashic:one"))
         assertTrue(changes >= 2)
     }
 
@@ -48,9 +48,9 @@ class TurnStopCoordinatorTest {
             onError = {},
             onStateChanged = {},
         )
-        coordinator.onTurnStarted("mobile:one", "turn-1")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
 
-        coordinator.requestStop("mobile:one")
+        coordinator.requestStop("akashic:one")
 
         assertEquals(listOf("persist", "send"), order)
     }
@@ -58,40 +58,40 @@ class TurnStopCoordinatorTest {
     @Test
     fun resumeUsesTurnIdsWhileUiKeepsSessionIds() = runBlocking {
         val coordinator = coordinator()
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        coordinator.onTurnStarted("mobile:two", "turn-2")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        coordinator.onTurnStarted("akashic:two", "turn-2")
 
-        assertEquals(setOf("mobile:one", "mobile:two"), coordinator.activeSessionIds())
+        assertEquals(setOf("akashic:one", "akashic:two"), coordinator.activeSessionIds())
         assertEquals(setOf("turn-1", "turn-2"), coordinator.activeTurnIds())
 
-        coordinator.onTurnTerminal("mobile:one", "turn-1")
-        assertEquals(setOf("mobile:two"), coordinator.activeSessionIds())
+        coordinator.onTurnTerminal("akashic:one", "turn-1")
+        assertEquals(setOf("akashic:two"), coordinator.activeSessionIds())
         assertEquals(setOf("turn-2"), coordinator.activeTurnIds())
     }
 
     @Test
     fun outputCompletedClearsOnTerminalAndNewTurn() = runBlocking {
         val coordinator = coordinator()
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        assertFalse(coordinator.isOutputCompleted("mobile:one"))
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        assertFalse(coordinator.isOutputCompleted("akashic:one"))
 
-        coordinator.onOutputCompleted("mobile:one", "turn-1")
-        assertTrue(coordinator.isOutputCompleted("mobile:one"))
+        coordinator.onOutputCompleted("akashic:one", "turn-1")
+        assertTrue(coordinator.isOutputCompleted("akashic:one"))
 
-        coordinator.onTurnTerminal("mobile:one", "turn-1")
-        assertFalse(coordinator.isOutputCompleted("mobile:one"))
+        coordinator.onTurnTerminal("akashic:one", "turn-1")
+        assertFalse(coordinator.isOutputCompleted("akashic:one"))
 
-        coordinator.onTurnStarted("mobile:one", "turn-2")
-        assertFalse(coordinator.isOutputCompleted("mobile:one"))
-        coordinator.onOutputCompleted("mobile:one", "turn-2")
-        assertTrue(coordinator.isOutputCompleted("mobile:one"))
+        coordinator.onTurnStarted("akashic:one", "turn-2")
+        assertFalse(coordinator.isOutputCompleted("akashic:one"))
+        coordinator.onOutputCompleted("akashic:one", "turn-2")
+        assertTrue(coordinator.isOutputCompleted("akashic:one"))
     }
 
     @Test
     fun outputCompletedForInactiveTurnFailsLoud() {
         val coordinator = coordinator()
         assertThrows(IllegalArgumentException::class.java) {
-            coordinator.onOutputCompleted("mobile:one", "turn-1")
+            coordinator.onOutputCompleted("akashic:one", "turn-1")
         }
     }
 
@@ -99,20 +99,20 @@ class TurnStopCoordinatorTest {
     fun processRestartRestoresAndReplaysPersistedStopIdentity() = runBlocking {
         val persisted = mutableListOf<TurnStopRequest>()
         val first = coordinator(onPersist = persisted::add)
-        first.onTurnStarted("mobile:one", "turn-1")
-        val request = first.requestStop("mobile:one")
+        first.onTurnStarted("akashic:one", "turn-1")
+        val request = first.requestStop("akashic:one")
 
         val replayed = mutableListOf<TurnStopRequest>()
         val restored = coordinator(
             sent = replayed,
             onRemovePersisted = { commandId -> persisted.removeAll { it.commandId == commandId } },
         )
-        restored.restore(mapOf("mobile:one" to "turn-1"), persisted.toList())
+        restored.restore(mapOf("akashic:one" to "turn-1"), persisted.toList())
         restored.onConnectionReady()
 
         assertEquals(listOf(request), replayed)
-        assertTrue(restored.isStopping("mobile:one"))
-        restored.onTurnTerminal("mobile:one", "turn-1")
+        assertTrue(restored.isStopping("akashic:one"))
+        restored.onTurnTerminal("akashic:one", "turn-1")
         assertTrue(persisted.isEmpty())
     }
 
@@ -125,27 +125,27 @@ class TurnStopCoordinatorTest {
             onPersist = persisted::add,
             onRemovePersisted = { commandId -> persisted.removeAll { it.commandId == commandId } },
         )
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
 
         assertTrue(coordinator.onReply(okReply(request)))
         coordinator.onConnectionReady()
 
         assertTrue(persisted.isEmpty())
         assertEquals(listOf(request), sent)
-        assertTrue(coordinator.isStopping("mobile:one"))
+        assertTrue(coordinator.isStopping("akashic:one"))
     }
 
     @Test
     fun restoreDeletesStopWhoseTurnAlreadyReachedTerminalState() = runBlocking {
-        val request = TurnStopRequest("stop-1", "mobile:one", "turn-1")
+        val request = TurnStopRequest("stop-1", "akashic:one", "turn-1")
         val removed = mutableListOf<String>()
         val coordinator = coordinator(onRemovePersisted = removed::add)
 
         coordinator.restore(emptyMap(), listOf(request))
 
         assertEquals(listOf("stop-1"), removed)
-        assertFalse(coordinator.isStopping("mobile:one"))
+        assertFalse(coordinator.isStopping("akashic:one"))
     }
 
     @Test
@@ -159,8 +159,8 @@ class TurnStopCoordinatorTest {
             onRemovePersisted = { commandId -> persisted.removeAll { it.commandId == commandId } },
             onError = errors::add,
         )
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
 
         assertTrue(
             coordinator.onReply(
@@ -175,7 +175,7 @@ class TurnStopCoordinatorTest {
                 ),
             ),
         )
-        assertFalse(coordinator.isStopping("mobile:one"))
+        assertFalse(coordinator.isStopping("akashic:one"))
         assertTrue(persisted.isEmpty())
         assertEquals(listOf("目标 turn 已结束"), errors)
     }
@@ -191,13 +191,13 @@ class TurnStopCoordinatorTest {
             onAuthoritativeTerminal = reconciled::add,
             onError = errors::add,
         )
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
 
         assertTrue(coordinator.onReply(errorReply(request, code = "turn_not_active")))
 
         assertTrue(reconciled.isEmpty())
-        assertEquals("turn-1", coordinator.activeTurnId("mobile:one"))
+        assertEquals("turn-1", coordinator.activeTurnId("akashic:one"))
         assertTrue(persisted.isEmpty())
         assertEquals(listOf("当前会话没有正在生成的内容"), errors)
     }
@@ -206,8 +206,8 @@ class TurnStopCoordinatorTest {
     fun alreadyTerminalNonCompletedOkHealsStaleActiveProjection() = runBlocking {
         val reconciled = mutableListOf<TurnStopRequest>()
         val coordinator = coordinator(onAuthoritativeTerminal = reconciled::add)
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
 
         assertTrue(
             coordinator.onReply(
@@ -220,15 +220,15 @@ class TurnStopCoordinatorTest {
         )
 
         assertEquals(listOf(request), reconciled)
-        assertEquals(null, coordinator.activeTurnId("mobile:one"))
+        assertEquals(null, coordinator.activeTurnId("akashic:one"))
     }
 
     @Test
     fun alreadyCompletedOkWaitsForCanonicalFinalProjection() = runBlocking {
         val reconciled = mutableListOf<TurnStopRequest>()
         val coordinator = coordinator(onAuthoritativeTerminal = reconciled::add)
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
 
         assertTrue(
             coordinator.onReply(
@@ -241,24 +241,24 @@ class TurnStopCoordinatorTest {
         )
 
         assertTrue(reconciled.isEmpty())
-        assertEquals("turn-1", coordinator.activeTurnId("mobile:one"))
+        assertEquals("turn-1", coordinator.activeTurnId("akashic:one"))
 
-        coordinator.onTurnTerminal("mobile:one", "turn-1")
+        coordinator.onTurnTerminal("akashic:one", "turn-1")
 
-        assertEquals(null, coordinator.activeTurnId("mobile:one"))
+        assertEquals(null, coordinator.activeTurnId("akashic:one"))
     }
 
     @Test
     fun terminalThenReplyAllowsStoppingNextTurn() = runBlocking {
         val sent = mutableListOf<TurnStopRequest>()
         val coordinator = coordinator(sent = sent)
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
 
-        coordinator.onTurnTerminal("mobile:one", "turn-1")
+        coordinator.onTurnTerminal("akashic:one", "turn-1")
 
-        assertEquals(null, coordinator.activeTurnId("mobile:one"))
-        assertFalse(coordinator.isStopping("mobile:one"))
+        assertEquals(null, coordinator.activeTurnId("akashic:one"))
+        assertFalse(coordinator.isStopping("akashic:one"))
         assertTrue(
             coordinator.onReply(
                 WireEnvelope(
@@ -272,9 +272,9 @@ class TurnStopCoordinatorTest {
                 ),
             ),
         )
-        coordinator.onTurnStarted("mobile:one", "turn-2")
+        coordinator.onTurnStarted("akashic:one", "turn-2")
 
-        val next = coordinator.requestStop("mobile:one")
+        val next = coordinator.requestStop("akashic:one")
 
         assertEquals("turn-2", next.turnId)
     }
@@ -282,28 +282,28 @@ class TurnStopCoordinatorTest {
     @Test
     fun replyThenTerminalAllowsStoppingNextTurn() = runBlocking {
         val coordinator = coordinator()
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
         assertTrue(coordinator.onReply(okReply(request)))
 
-        coordinator.onTurnTerminal("mobile:one", "turn-1")
-        coordinator.onTurnStarted("mobile:one", "turn-2")
+        coordinator.onTurnTerminal("akashic:one", "turn-1")
+        coordinator.onTurnStarted("akashic:one", "turn-2")
 
-        assertEquals("turn-2", coordinator.requestStop("mobile:one").turnId)
+        assertEquals("turn-2", coordinator.requestStop("akashic:one").turnId)
     }
 
     @Test
     fun terminalThenErrorAllowsStoppingNextTurn() = runBlocking {
         val errors = mutableListOf<String>()
         val coordinator = coordinator(onError = errors::add)
-        coordinator.onTurnStarted("mobile:one", "turn-1")
-        val request = coordinator.requestStop("mobile:one")
-        coordinator.onTurnTerminal("mobile:one", "turn-1")
+        coordinator.onTurnStarted("akashic:one", "turn-1")
+        val request = coordinator.requestStop("akashic:one")
+        coordinator.onTurnTerminal("akashic:one", "turn-1")
 
         assertTrue(coordinator.onReply(errorReply(request)))
-        coordinator.onTurnStarted("mobile:one", "turn-2")
+        coordinator.onTurnStarted("akashic:one", "turn-2")
 
-        assertEquals("turn-2", coordinator.requestStop("mobile:one").turnId)
+        assertEquals("turn-2", coordinator.requestStop("akashic:one").turnId)
         assertTrue(errors.isEmpty())
     }
 
@@ -340,7 +340,7 @@ class TurnStopCoordinatorTest {
 
     @Test
     fun authoritativeTerminalStatusKeepsCompletedOnItsOwnPath() {
-        val request = TurnStopRequest("stop-completed", "mobile:one", "turn-1")
+        val request = TurnStopRequest("stop-completed", "akashic:one", "turn-1")
         // completed 不进 interruptedTerminalStatus 白名单，仍由 already_terminal 权威路径核对
         assertEquals(
             null,

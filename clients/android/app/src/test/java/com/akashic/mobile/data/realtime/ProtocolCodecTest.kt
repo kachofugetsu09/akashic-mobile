@@ -19,8 +19,8 @@ class ProtocolCodecTest {
             """
             {
               "items": [{
-                "id": "mobile:test:1",
-                "session_key": "mobile:test",
+                "id": "akashic:test:1",
+                "session_key": "akashic:test",
                 "seq": 1,
                 "role": "assistant",
                 "content": "正文仍然可用",
@@ -82,7 +82,7 @@ class ProtocolCodecTest {
               "id": "01J00000000000000000000002",
               "connection_epoch": 7,
               "event_seq": 1842,
-              "session_id": "mobile:session",
+              "session_id": "akashic:session",
               "turn_id": "turn-1",
               "payload": {"delta": "你好"}
             }
@@ -106,7 +106,7 @@ class ProtocolCodecTest {
               "id": "01J00000000000000000000003",
               "connection_epoch": 7,
               "event_seq": 1843,
-              "session_id": "mobile:session",
+              "session_id": "akashic:session",
               "turn_id": "turn-1",
               "payload": {"client_message_id": "cmid-1"}
             }
@@ -140,7 +140,7 @@ class ProtocolCodecTest {
             type = "turn.stop",
             id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             connectionEpoch = 7,
-            sessionId = "mobile:one",
+            sessionId = "akashic:one",
             turnId = "turn-1",
             payload = buildJsonObject {},
         )
@@ -156,8 +156,8 @@ class ProtocolCodecTest {
             type = "model.catalog.get",
             id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             connectionEpoch = 7,
-            sessionId = "mobile:one",
-            payload = buildJsonObject { put("session_id", "mobile:one") },
+            sessionId = "akashic:one",
+            payload = buildJsonObject { put("session_id", "akashic:one") },
         )
 
         assertEquals(envelope, ProtocolCodec.decode(ProtocolCodec.encode(envelope)))
@@ -211,7 +211,7 @@ class ProtocolCodecTest {
     fun `round trips slash command text unchanged`() {
         val payload = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            sessionId = "mobile:one",
+            sessionId = "akashic:one",
             text = "/undo",
             mediaRefs = emptyList(),
             clientCreatedAt = "2026-07-18T00:00:00Z",
@@ -236,7 +236,7 @@ class ProtocolCodecTest {
     fun `round trips explicit model selection while old payload omits it`() {
         val selected = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            sessionId = "mobile:one",
+            sessionId = "akashic:one",
             text = "继续",
             mediaRefs = emptyList(),
             clientCreatedAt = "2026-08-08T00:00:00Z",
@@ -264,7 +264,7 @@ class ProtocolCodecTest {
     fun `round trips proactive delivery reply identity`() {
         val payload = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            sessionId = "mobile:one",
+            sessionId = "akashic:one",
             text = "继续说",
             mediaRefs = emptyList(),
             clientCreatedAt = "2026-07-20T00:00:00Z",
@@ -376,7 +376,7 @@ class ProtocolCodecTest {
             type = "plugin.ui.query.prepare",
             id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             connectionEpoch = 7,
-            sessionId = "mobile:one",
+            sessionId = "akashic:one",
             payload = buildJsonObject {
                 put("owner_id", "turn:akasha")
                 put("plugin_id", "akasha")
@@ -393,7 +393,7 @@ class ProtocolCodecTest {
               "type": "plugin.ui.query.ready",
               "id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
               "connection_epoch": 7,
-              "session_id": "mobile:one",
+              "session_id": "akashic:one",
               "payload": {
                 "path": "/mobile/plugin-ui/v1/query",
                 "ticket": "signed-ticket",

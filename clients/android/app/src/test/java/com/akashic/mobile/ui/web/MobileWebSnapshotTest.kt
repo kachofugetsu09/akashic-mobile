@@ -32,7 +32,7 @@ class MobileWebSnapshotTest {
     @Test
     fun defersHistoryGrowthUntilResyncBecomesReady() {
         val delivered = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             projectionGeneration = 7,
             messages = listOf(userMessage("message-1")),
             isResyncing = true,
@@ -50,7 +50,7 @@ class MobileWebSnapshotTest {
     fun createsPatchForAppendOnlyStreamingAnswer() {
         val beforeMessage = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = emptyList(),
             answer = "正在",
@@ -61,14 +61,14 @@ class MobileWebSnapshotTest {
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             projectionGeneration = 7,
             messages = listOf(beforeMessage),
             isStreaming = true,
         )
         val after = before.copy(
             sessions = listOf(
-                SessionUi("mobile:test", "会话", "正在分析", 1_200, 0, true, true),
+                SessionUi("akashic:test", "会话", "正在分析", 1_200, 0, true, true),
             ),
             messages = listOf(
                 beforeMessage.copy(
@@ -100,7 +100,7 @@ class MobileWebSnapshotTest {
         )
         val beforeMessage = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = listOf(thinking),
             answer = "",
@@ -110,7 +110,7 @@ class MobileWebSnapshotTest {
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             messages = listOf(beforeMessage),
             isStreaming = true,
         )
@@ -144,7 +144,7 @@ class MobileWebSnapshotTest {
     fun rejectsStreamPatchWithInvalidClientMessageId() {
         val beforeMessage = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = emptyList(),
             answer = "正在",
@@ -154,7 +154,7 @@ class MobileWebSnapshotTest {
             clientMessageId = "not-a-frame-id",
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             messages = listOf(beforeMessage),
             isStreaming = true,
         )
@@ -185,7 +185,7 @@ class MobileWebSnapshotTest {
         )
         val message = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = listOf(thinking),
             answer = "",
@@ -194,7 +194,7 @@ class MobileWebSnapshotTest {
             createdAtMillis = 1_000,
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             messages = listOf(message),
             isStreaming = true,
         )
@@ -225,7 +225,7 @@ class MobileWebSnapshotTest {
         val history = List(400) { index ->
             MessageUi.User(
                 id = "user:$index",
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 text = "历史消息-$index-${"内容".repeat(150)}",
                 deliveryLabel = "已发送",
                 replyable = true,
@@ -235,7 +235,7 @@ class MobileWebSnapshotTest {
         }
         val streaming = MessageUi.AssistantTurn(
             id = "assistant:streaming",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = emptyList(),
             answer = "正在",
@@ -244,7 +244,7 @@ class MobileWebSnapshotTest {
             createdAtMillis = 1_000,
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             projectionGeneration = 9,
             messages = history + streaming,
             isStreaming = true,
@@ -267,7 +267,7 @@ class MobileWebSnapshotTest {
         val history = List(400) { index ->
             MessageUi.User(
                 id = "user:$index",
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 text = "历史消息-$index-${"内容".repeat(150)}",
                 deliveryLabel = "已发送",
                 replyable = true,
@@ -277,7 +277,7 @@ class MobileWebSnapshotTest {
         }
         val streaming = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = emptyList(),
             answer = "正在检查调用链",
@@ -287,14 +287,14 @@ class MobileWebSnapshotTest {
             updatedAtMillis = 1_200,
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             projectionGeneration = 9,
             messages = history + streaming,
             isStreaming = true,
         )
         val after = before.copy(
             sessions = listOf(
-                SessionUi("mobile:test", "会话", "检查完成", 1_300, 0, false, true),
+                SessionUi("akashic:test", "会话", "检查完成", 1_300, 0, false, true),
             ),
             messages = history + streaming.copy(
                 id = "message:canonical",
@@ -323,7 +323,7 @@ class MobileWebSnapshotTest {
         val clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         val user = MessageUi.User(
             id = "user:$clientMessageId",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             text = "问题",
             deliveryLabel = "已发送",
             replyable = true,
@@ -333,7 +333,7 @@ class MobileWebSnapshotTest {
         )
         val streaming = MessageUi.AssistantTurn(
             id = "assistant:turn-1",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = emptyList(),
             answer = "回答",
@@ -344,7 +344,7 @@ class MobileWebSnapshotTest {
             controlTurnId = "turn-1",
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             projectionGeneration = 9,
             messages = listOf(user, streaming),
             isStreaming = true,
@@ -362,7 +362,7 @@ class MobileWebSnapshotTest {
 
         assertEquals(null, after.toMobileWebStreamPatch(before))
         assertEquals(
-            MobileWebTerminalTransition("mobile:test", "turn-1", clientMessageId),
+            MobileWebTerminalTransition("akashic:test", "turn-1", clientMessageId),
             after.terminalTransitionFrom(before),
         )
     }
@@ -371,7 +371,7 @@ class MobileWebSnapshotTest {
     fun controlTurnIdIdentifiesLegacyTerminalWithoutClientIdentity() {
         val streaming = MessageUi.AssistantTurn(
             id = "assistant:turn-legacy",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             intro = null,
             blocks = emptyList(),
             answer = "回答",
@@ -380,7 +380,7 @@ class MobileWebSnapshotTest {
             createdAtMillis = 1_000,
         )
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             messages = listOf(streaming),
             isStreaming = true,
         )
@@ -396,7 +396,7 @@ class MobileWebSnapshotTest {
         )
 
         assertEquals(
-            MobileWebTerminalTransition("mobile:test", "turn-legacy", null),
+            MobileWebTerminalTransition("akashic:test", "turn-legacy", null),
             after.terminalTransitionFrom(before),
         )
     }
@@ -406,7 +406,7 @@ class MobileWebSnapshotTest {
         val history = List(400) { index ->
             MessageUi.User(
                 id = "user:$index",
-                sessionId = "mobile:test",
+                sessionId = "akashic:test",
                 text = "历史消息-$index-${"内容".repeat(150)}",
                 deliveryLabel = "已发送",
                 replyable = true,
@@ -415,7 +415,7 @@ class MobileWebSnapshotTest {
             )
         }
         val before = EmptyConversationState.copy(
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             projectionGeneration = 9,
             messages = history,
         )
@@ -438,7 +438,7 @@ class MobileWebSnapshotTest {
             errorNotice = null,
             sessions = listOf(
                 SessionUi(
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     title = "正在执行",
                     lastMessagePreview = "后台任务仍在处理",
                     lastMessageAtMillis = 1_752_681_601_000,
@@ -447,14 +447,14 @@ class MobileWebSnapshotTest {
                     isAvailable = false,
                 ),
             ),
-            selectedSessionId = "mobile:test",
+            selectedSessionId = "akashic:test",
             readingPosition = ReadingPositionUi("message-1", -18),
-            navigationTarget = NavigationTargetUi("mobile:test", "message-2"),
+            navigationTarget = NavigationTargetUi("akashic:test", "message-2"),
             projectionGeneration = 7,
             messages = listOf(
                 MessageUi.User(
                     id = "message-1",
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     text = "你好",
                     deliveryLabel = "发送失败",
                     replyable = false,
@@ -465,7 +465,7 @@ class MobileWebSnapshotTest {
                 ),
                 MessageUi.AssistantTurn(
                     id = "message-2",
-                    sessionId = "mobile:test",
+                    sessionId = "akashic:test",
                     intro = null,
                     blocks = listOf(
                         ProcessBlockUi(
@@ -519,7 +519,7 @@ class MobileWebSnapshotTest {
             listOf(1_752_681_600_100, 1_752_681_601_200),
             snapshot.messages.map { it.searchRevision },
         )
-        assertEquals(listOf("mobile:test", "mobile:test"), snapshot.messages.map { it.sessionId })
+        assertEquals(listOf("akashic:test", "akashic:test"), snapshot.messages.map { it.sessionId })
         assertTrue(!snapshot.messages.first().replyable)
         assertEquals(MobileWebDeliveryAction.RETRY, snapshot.messages.first().deliveryAction)
         assertTrue(!snapshot.messages.last().replyable)
@@ -548,7 +548,7 @@ class MobileWebSnapshotTest {
 
 private fun userMessage(id: String) = MessageUi.User(
     id = id,
-    sessionId = "mobile:test",
+    sessionId = "akashic:test",
     text = id,
     deliveryLabel = "已发送",
     replyable = true,

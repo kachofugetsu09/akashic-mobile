@@ -35,6 +35,7 @@ class AppDatabaseMigrationTest {
             DATABASE_12_13,
             DATABASE_13_14,
             DATABASE_14_15,
+            DATABASE_15_16,
         )
             .forEach(context::deleteDatabase)
     }
@@ -49,11 +50,11 @@ class AppDatabaseMigrationTest {
                 )
                 """.trimIndent(),
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2)")
             execSQL(
                 """
                 INSERT INTO messages VALUES(
-                    'old-message', NULL, 'mobile:test', 'assistant', '旧消息', 'complete', 3, 3
+                    'old-message', NULL, 'akashic:test', 'assistant', '旧消息', 'complete', 3, 3
                 )
                 """.trimIndent(),
             )
@@ -83,9 +84,9 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2)")
             execSQL(
-                "INSERT INTO messages VALUES('old-message', NULL, 'mobile:test', 'assistant', '旧消息', 'complete', 3, 4)",
+                "INSERT INTO messages VALUES('old-message', NULL, 'akashic:test', 'assistant', '旧消息', 'complete', 3, 4)",
             )
             close()
         }
@@ -112,7 +113,7 @@ class AppDatabaseMigrationTest {
                 INSERT INTO messages(
                     messageId, clientMessageId, sessionId, role, text, deliveryState,
                     createdAt, updatedAt, serverSeq
-                ) VALUES ('message-1', NULL, 'mobile:test', 'assistant', '保留我', 'complete', 1, 1, 1)
+                ) VALUES ('message-1', NULL, 'akashic:test', 'assistant', '保留我', 'complete', 1, 1, 1)
                 """.trimIndent(),
             )
             close()
@@ -142,7 +143,7 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2)")
             close()
         }
 
@@ -153,7 +154,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_4_5,
         ).use { database ->
             database.execSQL(
-                "INSERT INTO conversation_read_states VALUES('mobile:test', 3, 'message-1', -12, 4)",
+                "INSERT INTO conversation_read_states VALUES('akashic:test', 3, 'message-1', -12, 4)",
             )
             database.query(
                 "SELECT lastReadAt, anchorMessageId, anchorOffsetPx FROM conversation_read_states",
@@ -172,17 +173,17 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:remote', 'server', '远端会话', 2)")
-            execSQL("INSERT INTO conversations VALUES('mobile:live', 'server', '实时会话', 3)")
-            execSQL("INSERT INTO conversations VALUES('mobile:local', 'server', '本机会话', 3)")
-            execSQL("INSERT INTO conversations VALUES('mobile:failed', 'server', '失败草稿', 3)")
+            execSQL("INSERT INTO conversations VALUES('akashic:remote', 'server', '远端会话', 2)")
+            execSQL("INSERT INTO conversations VALUES('akashic:live', 'server', '实时会话', 3)")
+            execSQL("INSERT INTO conversations VALUES('akashic:local', 'server', '本机会话', 3)")
+            execSQL("INSERT INTO conversations VALUES('akashic:failed', 'server', '失败草稿', 3)")
             execSQL(
                 """
                 INSERT INTO messages(
                     messageId, clientMessageId, sessionId, role, text, deliveryState,
                     createdAt, updatedAt, serverSeq, replyToMessageId, replyRole, replyPreview
                 ) VALUES(
-                    'remote-message', NULL, 'mobile:remote', 'assistant', '旧消息', 'complete',
+                    'remote-message', NULL, 'akashic:remote', 'assistant', '旧消息', 'complete',
                     4, 4, 1, NULL, NULL, NULL
                 )
                 """.trimIndent(),
@@ -193,7 +194,7 @@ class AppDatabaseMigrationTest {
                     messageId, clientMessageId, sessionId, role, text, deliveryState,
                     createdAt, updatedAt, serverSeq, replyToMessageId, replyRole, replyPreview
                 ) VALUES(
-                    'live-final', NULL, 'mobile:live', 'assistant', '刚完成的回答', 'complete',
+                    'live-final', NULL, 'akashic:live', 'assistant', '刚完成的回答', 'complete',
                     5, 5, NULL, NULL, NULL, NULL
                 )
                 """.trimIndent(),
@@ -204,7 +205,7 @@ class AppDatabaseMigrationTest {
                     messageId, clientMessageId, sessionId, role, text, deliveryState,
                     createdAt, updatedAt, serverSeq, replyToMessageId, replyRole, replyPreview
                 ) VALUES(
-                    'local-pending', 'local-client', 'mobile:local', 'user', '还没发送', 'pending',
+                    'local-pending', 'local-client', 'akashic:local', 'user', '还没发送', 'pending',
                     6, 6, NULL, NULL, NULL, NULL
                 )
                 """.trimIndent(),
@@ -215,7 +216,7 @@ class AppDatabaseMigrationTest {
                     messageId, clientMessageId, sessionId, role, text, deliveryState,
                     createdAt, updatedAt, serverSeq, replyToMessageId, replyRole, replyPreview
                 ) VALUES(
-                    'failed-assistant', NULL, 'mobile:failed', 'assistant', '', 'failed',
+                    'failed-assistant', NULL, 'akashic:failed', 'assistant', '', 'failed',
                     7, 7, NULL, NULL, NULL, NULL
                 )
                 """.trimIndent(),
@@ -231,16 +232,16 @@ class AppDatabaseMigrationTest {
         ).use { database ->
             database.query("SELECT sessionId, remoteKnown FROM conversations ORDER BY sessionId").use { cursor ->
                 check(cursor.moveToFirst())
-                assertEquals("mobile:failed", cursor.getString(0))
+                assertEquals("akashic:failed", cursor.getString(0))
                 assertEquals(0, cursor.getInt(1))
                 check(cursor.moveToNext())
-                assertEquals("mobile:live", cursor.getString(0))
+                assertEquals("akashic:live", cursor.getString(0))
                 assertEquals(1, cursor.getInt(1))
                 check(cursor.moveToNext())
-                assertEquals("mobile:local", cursor.getString(0))
+                assertEquals("akashic:local", cursor.getString(0))
                 assertEquals(0, cursor.getInt(1))
                 check(cursor.moveToNext())
-                assertEquals("mobile:remote", cursor.getString(0))
+                assertEquals("akashic:remote", cursor.getString(0))
                 assertEquals(1, cursor.getInt(1))
             }
         }
@@ -252,7 +253,7 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
             close()
         }
 
@@ -266,11 +267,11 @@ class AppDatabaseMigrationTest {
                 """
                 INSERT INTO composer_drafts(
                     sessionId, serverId, text, replyToMessageId, updatedAt
-                ) VALUES('mobile:test', 'server', '保留草稿', 'missing-message', 3)
+                ) VALUES('akashic:test', 'server', '保留草稿', 'missing-message', 3)
                 """.trimIndent(),
             )
             database.query(
-                "SELECT text, replyToMessageId, updatedAt FROM composer_drafts WHERE sessionId = 'mobile:test'",
+                "SELECT text, replyToMessageId, updatedAt FROM composer_drafts WHERE sessionId = 'akashic:test'",
             ).use { cursor ->
                 check(cursor.moveToFirst())
                 assertEquals("保留草稿", cursor.getString(0))
@@ -287,9 +288,9 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('message-1', NULL, 'mobile:test', 'assistant', '完成', 'complete', 3, 3, NULL, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('message-1', NULL, 'akashic:test', 'assistant', '完成', 'complete', 3, 3, NULL, NULL, NULL, NULL)",
             )
             close()
         }
@@ -301,7 +302,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_7_8,
         ).use { database ->
             database.execSQL(
-                "INSERT INTO pending_message_notifications VALUES('message-1', 'server', 'mobile:test', '完成', 0, 'COMPLETE', 4)",
+                "INSERT INTO pending_message_notifications VALUES('message-1', 'server', 'akashic:test', '完成', 0, 'COMPLETE', 4)",
             )
             database.query(
                 "SELECT content, attention FROM pending_message_notifications WHERE messageId = 'message-1'",
@@ -319,12 +320,12 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('message-1', NULL, 'mobile:test', 'assistant', '完成', 'complete', 3, 3, NULL, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('message-1', NULL, 'akashic:test', 'assistant', '完成', 'complete', 3, 3, NULL, NULL, NULL, NULL)",
             )
             execSQL(
-                "INSERT INTO pending_message_notifications VALUES('message-1', 'server', 'mobile:test', '完成', 0, 'COMPLETE', 4)",
+                "INSERT INTO pending_message_notifications VALUES('message-1', 'server', 'akashic:test', '完成', 0, 'COMPLETE', 4)",
             )
             close()
         }
@@ -351,9 +352,9 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('assistant:turn-1', NULL, 'mobile:test', 'assistant', '生成中', 'streaming', 3, 3, NULL, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('assistant:turn-1', NULL, 'akashic:test', 'assistant', '生成中', 'streaming', 3, 3, NULL, NULL, NULL, NULL)",
             )
             close()
         }
@@ -365,7 +366,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_9_10,
         ).use { database ->
             database.execSQL(
-                "INSERT INTO pending_turn_stops VALUES('stop-1', 'server', 'mobile:test', 'turn-1', 4)",
+                "INSERT INTO pending_turn_stops VALUES('stop-1', 'server', 'akashic:test', 'turn-1', 4)",
             )
             database.query("SELECT text FROM messages WHERE messageId = 'assistant:turn-1'").use { cursor ->
                 check(cursor.moveToFirst()) { "迁移后 streaming 消息丢失" }
@@ -384,12 +385,12 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('assistant:turn-old', NULL, 'mobile:test', 'assistant', '旧回答', 'streaming', 3, 8, NULL, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('assistant:turn-old', NULL, 'akashic:test', 'assistant', '旧回答', 'streaming', 3, 8, NULL, NULL, NULL, NULL)",
             )
             execSQL(
-                "INSERT INTO messages VALUES('assistant:turn-new', NULL, 'mobile:test', 'assistant', '新回答', 'streaming', 4, 4, NULL, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('assistant:turn-new', NULL, 'akashic:test', 'assistant', '新回答', 'streaming', 4, 4, NULL, NULL, NULL, NULL)",
             )
             execSQL(
                 "INSERT INTO turn_blocks VALUES('block-old', 'assistant:turn-old', 'turn-old', 0, 'thinking', 'running', '保留思考', 8)",
@@ -429,9 +430,9 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('assistant:long', NULL, 'mobile:test', 'assistant', '正文预览', 'complete', 3, 8, 7, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('assistant:long', NULL, 'akashic:test', 'assistant', '正文预览', 'complete', 3, 8, 7, NULL, NULL, NULL)",
             )
             close()
         }
@@ -443,7 +444,7 @@ class AppDatabaseMigrationTest {
             AppDatabase.MIGRATION_11_12,
         ).use { database ->
             database.execSQL(
-                "INSERT INTO message_content_transfers VALUES('assistant:long', 'server', 'mobile:test', 400000, '${"a".repeat(64)}', 262144, 'downloading', 9)",
+                "INSERT INTO message_content_transfers VALUES('assistant:long', 'server', 'akashic:test', 400000, '${"a".repeat(64)}', 262144, 'downloading', 9)",
             )
             database.query("SELECT text FROM messages WHERE messageId = 'assistant:long'").use { cursor ->
                 check(cursor.moveToFirst())
@@ -465,12 +466,12 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:legacy', 'server', '迁移会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:legacy', 'server', '迁移会话', 2, 1)")
             execSQL(
-                "INSERT INTO messages VALUES('legacy-message', NULL, 'mobile:legacy', 'assistant', '迁移正文', 'complete', 3, 4, 7, NULL, NULL, NULL)",
+                "INSERT INTO messages VALUES('legacy-message', NULL, 'akashic:legacy', 'assistant', '迁移正文', 'complete', 3, 4, 7, NULL, NULL, NULL)",
             )
             execSQL(
-                "INSERT INTO message_content_transfers VALUES('legacy-message', 'server', 'mobile:legacy', 400000, '${"a".repeat(64)}', 262144, 'downloading', 5)",
+                "INSERT INTO message_content_transfers VALUES('legacy-message', 'server', 'akashic:legacy', 400000, '${"a".repeat(64)}', 262144, 'downloading', 5)",
             )
             close()
         }
@@ -498,7 +499,7 @@ class AppDatabaseMigrationTest {
                 assertEquals(1L, cursor.getLong(8))
             }
             database.query(
-                "SELECT title, remoteKnown FROM conversations WHERE sessionId = 'mobile:legacy'",
+                "SELECT title, remoteKnown FROM conversations WHERE sessionId = 'akashic:legacy'",
             ).use { cursor ->
                 check(cursor.moveToFirst()) { "迁移丢失 conversation" }
                 assertEquals("迁移会话", cursor.getString(0))
@@ -555,19 +556,19 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:legacy', 'server', '迁移会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:legacy', 'server', '迁移会话', 2, 1)")
             execSQL(
                 "INSERT INTO messages VALUES('legacy-message', '01ARZ3NDEKTSV4RRFFQ69G5FAV', " +
-                    "'mobile:legacy', 'assistant', " +
+                    "'akashic:legacy', 'assistant', " +
                     "'流式正文', 'streaming', 3, 4, NULL, NULL, NULL, NULL)",
             )
             execSQL(
                 "INSERT INTO messages VALUES('legacy-user', '01ARZ3NDEKTSV4RRFFQ69G5FAW', " +
-                    "'mobile:legacy', 'user', '问题', 'sent', 2, 2, NULL, NULL, NULL, NULL)",
+                    "'akashic:legacy', 'user', '问题', 'sent', 2, 2, NULL, NULL, NULL, NULL)",
             )
             execSQL(
                 "INSERT INTO messages VALUES('legacy-complete', '01ARZ3NDEKTSV4RRFFQ69G5FAX', " +
-                    "'mobile:legacy', 'assistant', '旧回答', 'complete', 1, 1, NULL, NULL, NULL, NULL)",
+                    "'akashic:legacy', 'assistant', '旧回答', 'complete', 1, 1, NULL, NULL, NULL, NULL)",
             )
             close()
         }
@@ -613,19 +614,19 @@ class AppDatabaseMigrationTest {
             execSQL(
                 "INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
             )
-            execSQL("INSERT INTO conversations VALUES('mobile:legacy', 'server', '迁移会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:legacy', 'server', '迁移会话', 2, 1)")
             execSQL(
                 "INSERT INTO messages(" +
                     "messageId, clientMessageId, sessionId, role, text, deliveryState, createdAt, updatedAt, " +
                     "replyToMessageId, replyRole, replyPreview, turnClientMessageId" +
-                    ") VALUES('assistant:legacy-turn', NULL, 'mobile:legacy', 'assistant', '流式正文', " +
+                    ") VALUES('assistant:legacy-turn', NULL, 'akashic:legacy', 'assistant', '流式正文', " +
                     "'streaming', 3, 4, NULL, NULL, NULL, '01ARZ3NDEKTSV4RRFFQ69G5FAV')",
             )
             execSQL(
                 "INSERT INTO messages(" +
                     "messageId, clientMessageId, sessionId, role, text, deliveryState, createdAt, updatedAt, " +
                     "replyToMessageId, replyRole, replyPreview, turnClientMessageId" +
-                    ") VALUES('canonical-complete', NULL, 'mobile:legacy', 'assistant', '旧回答', " +
+                    ") VALUES('canonical-complete', NULL, 'akashic:legacy', 'assistant', '旧回答', " +
                     "'complete', 2, 2, NULL, NULL, NULL, '01ARZ3NDEKTSV4RRFFQ69G5FAX')",
             )
             close()
@@ -654,6 +655,108 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate15To16DropsOldSessionProjectionAndKeepsPairingCursor() {
+        helper.createDatabase(DATABASE_15_16, 15).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES(" +
+                    "'server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('mobile:legacy-device', 'server', '旧会话', 2, 1)")
+            execSQL(
+                "INSERT INTO messages(" +
+                    "messageId, clientMessageId, sessionId, role, text, deliveryState, " +
+                    "createdAt, updatedAt) VALUES(" +
+                    "'mobile:legacy-device:0', NULL, 'mobile:legacy-device', 'assistant', '旧消息', " +
+                    "'complete', 3, 3)",
+            )
+            execSQL(
+                "INSERT INTO outbox_commands VALUES(" +
+                    "'command', 'server', '{}', 'pending', 0, 4, NULL)",
+            )
+            execSQL(
+                "INSERT INTO attachment_transfers VALUES(" +
+                    "'attachment', 'server', 'mobile:legacy-device', 'a.txt', 'text/plain', " +
+                    "1, 'a', 0, 'pending', 5)",
+            )
+            execSQL(
+                "INSERT INTO turn_blocks VALUES(" +
+                    "'block', 'mobile:legacy-device:0', 'turn', 0, 'thinking', " +
+                    "'running', '旧思考', 6)",
+            )
+            execSQL(
+                "INSERT INTO media_attachments VALUES(" +
+                    "'media', 'server', 'mobile:legacy-device', 'a.txt', 'text/plain', " +
+                    "1, 'a', 1, 'cached', '/tmp/a.txt', 7, 7)",
+            )
+            execSQL(
+                "INSERT INTO message_attachments VALUES(" +
+                    "'mobile:legacy-device:0', 'media', 0)",
+            )
+            execSQL(
+                "INSERT INTO conversation_read_states VALUES(" +
+                    "'mobile:legacy-device', 8, 'mobile:legacy-device:0', 4, 8)",
+            )
+            execSQL(
+                "INSERT INTO composer_drafts VALUES(" +
+                    "'mobile:legacy-device', 'server', '旧草稿', NULL, 9)",
+            )
+            execSQL(
+                "INSERT INTO pending_message_notifications VALUES(" +
+                    "'notification', 'server', 'mobile:legacy-device', '旧通知', 0, 'normal', 10)",
+            )
+            execSQL(
+                "INSERT INTO pending_turn_stops VALUES(" +
+                    "'stop', 'server', 'mobile:legacy-device', 'turn', 11)",
+            )
+            execSQL(
+                "INSERT INTO message_content_transfers VALUES(" +
+                    "'mobile:legacy-device:0', 'server', 'mobile:legacy-device', " +
+                    "10, 'b', 2, 'pending', 12)",
+            )
+            execSQL("INSERT INTO realtime_cursors VALUES('device', 'server', 42, 7, 6)")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_15_16,
+            16,
+            true,
+            AppDatabase.MIGRATION_15_16,
+        ).use { database ->
+            listOf(
+                "conversations",
+                "messages",
+                "outbox_commands",
+                "attachment_transfers",
+                "turn_blocks",
+                "media_attachments",
+                "message_attachments",
+                "conversation_read_states",
+                "composer_drafts",
+                "pending_message_notifications",
+                "pending_turn_stops",
+                "message_content_transfers",
+            ).forEach { table ->
+                database.query("SELECT COUNT(*) FROM `$table`").use { cursor ->
+                    check(cursor.moveToFirst())
+                    assertEquals("$table must be rebuilt", 0, cursor.getInt(0))
+                }
+            }
+            database.query("SELECT keyAlias FROM server_profiles").use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals("alias", cursor.getString(0))
+            }
+            database.query(
+                "SELECT lastAcknowledgedEventSeq, connectionEpoch FROM realtime_cursors",
+            ).use { cursor ->
+                check(cursor.moveToFirst())
+                assertEquals(42, cursor.getLong(0))
+                assertEquals(7, cursor.getLong(1))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -669,5 +772,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_12_13 = "migration-12-13"
         const val DATABASE_13_14 = "migration-13-14"
         const val DATABASE_14_15 = "migration-14-15"
+        const val DATABASE_15_16 = "migration-15-16"
     }
 }

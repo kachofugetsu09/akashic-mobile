@@ -124,9 +124,9 @@ class NotificationNavigationTest {
     )
 
     private companion object {
-        const val SESSION_A = "mobile:00000000-0000-0000-0000-000000000001"
-        const val SESSION_B = "mobile:00000000-0000-0000-0000-000000000002"
-        const val SESSION_OTHER_SERVER = "mobile:00000000-0000-0000-0000-000000000003"
+        const val SESSION_A = "akashic:00000000-0000-0000-0000-000000000001"
+        const val SESSION_B = "akashic:00000000-0000-0000-0000-000000000002"
+        const val SESSION_OTHER_SERVER = "akashic:00000000-0000-0000-0000-000000000003"
         const val MESSAGE_A = "message-a"
         const val MESSAGE_B = "message-b"
     }

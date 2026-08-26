@@ -28,7 +28,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MobileWebUiBlobEntity::class,
         MobileWebUiRejectEntity::class,
     ],
-    version = 15,
+    version = 16,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -78,6 +78,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_12_13,
             MIGRATION_13_14,
             MIGRATION_14_15,
+            MIGRATION_15_16,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -512,6 +513,24 @@ abstract class AppDatabase : RoomDatabase() {
                         "WHERE `role` = 'assistant' AND `deliveryState` = 'streaming' " +
                         "AND `messageId` LIKE 'assistant:%'",
                 )
+            }
+        }
+
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 不依赖 migration 连接的 FK 状态，按依赖顺序显式清掉 Session 图。
+                db.execSQL("DELETE FROM `message_attachments`")
+                db.execSQL("DELETE FROM `turn_blocks`")
+                db.execSQL("DELETE FROM `message_content_transfers`")
+                db.execSQL("DELETE FROM `media_attachments`")
+                db.execSQL("DELETE FROM `conversation_read_states`")
+                db.execSQL("DELETE FROM `composer_drafts`")
+                db.execSQL("DELETE FROM `messages`")
+                db.execSQL("DELETE FROM `outbox_commands`")
+                db.execSQL("DELETE FROM `attachment_transfers`")
+                db.execSQL("DELETE FROM `pending_message_notifications`")
+                db.execSQL("DELETE FROM `pending_turn_stops`")
+                db.execSQL("DELETE FROM `conversations`")
             }
         }
     }

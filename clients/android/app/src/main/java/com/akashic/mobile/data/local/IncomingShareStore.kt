@@ -125,7 +125,9 @@ class IncomingShareStore(
     suspend fun load(): List<PersistedIncomingShare> = locked {
         // 1. 为旧队列补齐稳定附件 ID，再向 UI 暴露可恢复记录
         val original = readRecords()
-        val records = original.map { it.withStableAttachmentIds() }
+        val records = original.map {
+            it.withStableAttachmentIds().clearLegacySessionTarget()
+        }
         if (records != original) writeRecords(records)
         cleanupUnownedDirectories(records)
         records.map { it.toPublic() }
@@ -266,6 +268,18 @@ class IncomingShareStore(
             attachmentIds = files.indices.map { index ->
                 Ulid.next(System.currentTimeMillis() + index)
             },
+        )
+    }
+
+    private fun StoredShare.clearLegacySessionTarget(): StoredShare {
+        if (targetSessionId?.startsWith("mobile:") != true) return this
+        return copy(
+            targetSessionId = null,
+            preparedText = null,
+            preparedReplyToMessageId = null,
+            preparedBaseText = null,
+            preparedBaseReplyToMessageId = null,
+            preparedBaseUpdatedAt = null,
         )
     }
 

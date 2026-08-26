@@ -8,6 +8,25 @@ import org.junit.Test
 
 class ModelCatalogCoordinatorTest {
     @Test
+    fun emptyCoreWaitsForFirstSessionBeforeLoadingCatalog() {
+        val sent = mutableListOf<Pair<String, String>>()
+        val coordinator = ModelCatalogCoordinator { type, sessionId ->
+            sent += type to sessionId
+            "request-${sent.size}"
+        }
+
+        coordinator.onConnectionReady("server-1", null)
+        assertEquals("server-1", coordinator.state.value.serverId)
+        assertTrue(sent.isEmpty())
+
+        coordinator.onSessionSelected("akashic:" + "a".repeat(32))
+        assertEquals(
+            "model.catalog.get" to ("akashic:" + "a".repeat(32)),
+            sent.single(),
+        )
+    }
+
+    @Test
     fun projectsCatalogAndKeepsValidatedLocalSelection() {
         val sent = mutableListOf<Pair<String, String>>()
         val coordinator = ModelCatalogCoordinator { type, sessionId ->
@@ -15,14 +34,14 @@ class ModelCatalogCoordinatorTest {
             "request-${sent.size}"
         }
 
-        coordinator.onConnectionReady("server-1", "mobile:first")
-        assertEquals("model.catalog.get" to "mobile:first", sent.single())
+        coordinator.onConnectionReady("server-1", "akashic:first")
+        assertEquals("model.catalog.get" to "akashic:first", sent.single())
         assertTrue(coordinator.state.value.loading)
 
-        coordinator.onReply(reply("request-1", "mobile:first"))
+        coordinator.onReply(reply("request-1", "akashic:first"))
         coordinator.select("model-a", "high")
 
-        assertEquals(ModelSelection("model-a", "high"), coordinator.selectionFor("mobile:first"))
+        assertEquals(ModelSelection("model-a", "high"), coordinator.selectionFor("akashic:first"))
         assertEquals("model-a", coordinator.state.value.selectedRuntimeId)
         assertEquals("high", coordinator.state.value.selectedReasoningEffort)
     }
@@ -35,18 +54,18 @@ class ModelCatalogCoordinatorTest {
             "request-${sent.size}"
         }
 
-        coordinator.onConnectionReady("server-1", "mobile:first")
-        coordinator.onSessionSelected("mobile:second")
-        coordinator.onReply(reply("request-1", "mobile:first"))
+        coordinator.onConnectionReady("server-1", "akashic:first")
+        coordinator.onSessionSelected("akashic:second")
+        coordinator.onReply(reply("request-1", "akashic:first"))
 
         assertEquals(
             listOf(
-                "model.catalog.get" to "mobile:first",
-                "model.catalog.get" to "mobile:second",
+                "model.catalog.get" to "akashic:first",
+                "model.catalog.get" to "akashic:second",
             ),
             sent,
         )
-        assertEquals("mobile:second", coordinator.state.value.sessionId)
+        assertEquals("akashic:second", coordinator.state.value.sessionId)
         assertTrue(coordinator.state.value.loading)
     }
 
