@@ -90,7 +90,7 @@ class MediaCacheStoreTest {
         val draft = AttachmentTransferEntity(
             attachmentId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             serverId = "server",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             filename = "photo.png",
             contentType = "image/png",
             sizeBytes = content.size.toLong(),
@@ -117,7 +117,7 @@ class MediaCacheStoreTest {
     ) = MediaAttachmentEntity(
         attachmentId = id,
         serverId = "server",
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         filename = "file.bin",
         contentType = "application/octet-stream",
         sizeBytes = content.size.toLong(),

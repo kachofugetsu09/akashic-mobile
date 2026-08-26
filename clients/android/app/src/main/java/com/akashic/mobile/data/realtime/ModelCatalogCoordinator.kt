@@ -30,12 +30,12 @@ class ModelCatalogCoordinator(
     private var desiredSessionId: String? = null
     private var localSelectionSessionId: String? = null
 
-    fun onConnectionReady(serverId: String, sessionId: String) {
+    fun onConnectionReady(serverId: String, sessionId: String?) {
         if (mutableState.value.serverId != serverId) {
             mutableState.value = ModelCatalogState(serverId = serverId)
             localSelectionSessionId = null
         }
-        refresh(sessionId)
+        if (sessionId != null) refresh(sessionId)
     }
 
     fun onSessionSelected(sessionId: String) {

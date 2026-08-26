@@ -64,7 +64,7 @@ class MainViewModelTest {
                 attachmentIds = emptyList(),
                 sourceFingerprint = "persisted-fingerprint",
             ),
-            targetSessionId = "mobile:target",
+            targetSessionId = "akashic:target",
             preparedText = "已有草稿\n共享文字",
             preparedReplyToMessageId = "reply-message",
             preparedBaseText = "已有草稿",
@@ -79,7 +79,7 @@ class MainViewModelTest {
         assertSame(accepted, replayed)
         with(accepted.single()) {
             assertEquals(persisted.content.id, content.id)
-            assertEquals("mobile:target", targetSessionId)
+            assertEquals("akashic:target", targetSessionId)
             assertEquals("已有草稿\n共享文字", preparedText)
             assertEquals("reply-message", preparedReplyToMessageId)
             assertEquals("已有草稿", preparedBaseText)
@@ -144,7 +144,7 @@ class MainViewModelTest {
     @Test
     fun remoteMissingBlocksSendingWhileLocalWorkOnlyBlocksRemoval() {
         val remote = ConversationSummary(
-            sessionId = "mobile:remote",
+            sessionId = "akashic:remote",
             title = "旧会话",
             lastMessagePreview = "历史",
             lastMessageAt = 1,
@@ -155,11 +155,11 @@ class MainViewModelTest {
             remoteKnown = true,
             hasLocalWork = false,
         )
-        val local = remote.copy(sessionId = "mobile:local", remoteKnown = false)
-        val pending = remote.copy(sessionId = "mobile:pending", hasLocalWork = true)
+        val local = remote.copy(sessionId = "akashic:local", remoteKnown = false)
+        val pending = remote.copy(sessionId = "akashic:pending", hasLocalWork = true)
 
         assertEquals(false, remote.isRemoteMissingIn(null))
-        assertEquals(false, remote.isRemoteMissingIn(setOf("mobile:remote")))
+        assertEquals(false, remote.isRemoteMissingIn(setOf("akashic:remote")))
         assertEquals(true, remote.isRemoteMissingIn(emptySet()))
         assertEquals(false, local.isRemoteMissingIn(emptySet()))
         assertEquals(true, pending.isRemoteMissingIn(emptySet()))

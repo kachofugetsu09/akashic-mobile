@@ -32,9 +32,9 @@ interface ConversationDao {
     fun observeForServer(serverId: String): Flow<List<ConversationEntity>>
 
     @Query(
-        "SELECT * FROM conversations WHERE serverId = :serverId AND sessionId LIKE 'mobile:%' ORDER BY updatedAt DESC LIMIT 1",
+        "SELECT * FROM conversations WHERE serverId = :serverId AND sessionId LIKE 'akashic:%' ORDER BY updatedAt DESC LIMIT 1",
     )
-    suspend fun latestMobileForServer(serverId: String): ConversationEntity?
+    suspend fun latestForServer(serverId: String): ConversationEntity?
 
     @Query(
         """

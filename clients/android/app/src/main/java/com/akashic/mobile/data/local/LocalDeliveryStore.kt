@@ -13,8 +13,9 @@ import com.akashic.mobile.data.realtime.WireKind
 import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
 import com.akashic.mobile.data.realtime.FinalMessageEvent
 import com.akashic.mobile.data.realtime.proactiveMessageId
-import java.time.Instant
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.format.DateTimeParseException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -78,6 +79,13 @@ internal fun decodeStoredToolBlock(content: String): StoredToolBlock {
 private fun encodeStoredToolBlock(content: StoredToolBlock): String =
     TOOL_BLOCK_V1_PREFIX + ProtocolCodec.json().encodeToString(content)
 
+internal fun parseServerInstant(value: String, field: String): Long =
+    try {
+        Instant.parse(value).toEpochMilli()
+    } catch (error: DateTimeParseException) {
+        throw IllegalArgumentException("$field must be an RFC 3339 UTC instant", error)
+    }
+
 class LocalDeliveryStore(
     private val database: AppDatabase,
     private val mediaCache: MediaCacheStore,
@@ -118,7 +126,7 @@ class LocalDeliveryStore(
         }
 
         // 2. 否则只从当前电脑的持久会话中选择最近一项
-        return database.conversations().latestMobileForServer(serverId)?.sessionId
+        return database.conversations().latestForServer(serverId)?.sessionId
     }
 
     /** 核对系统通知指向当前电脑拥有的本地会话与消息投影。 */
@@ -663,12 +671,13 @@ class LocalDeliveryStore(
     private suspend fun applySessionList(serverId: String, envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
         payload.items.forEach { item ->
+            val title = requireSessionTitle(item.title, "Session list")
             database.conversations().upsert(
                 ConversationEntity(
                     sessionId = item.sessionId,
                     serverId = serverId,
-                    title = item.title,
-                    updatedAt = Instant.parse(item.updatedAt).toEpochMilli(),
+                    title = title,
+                    updatedAt = parseServerInstant(item.updatedAt, "session.list.updated_at"),
                     remoteKnown = true,
                 ),
             )
@@ -681,18 +690,25 @@ class LocalDeliveryStore(
     ) {
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        if (database.conversations().get(sessionId) == null) {
+        val current = database.conversations().get(sessionId)
+        val title = payload.title?.let { requireSessionTitle(it, "History page") }
+        if (current == null) {
             database.conversations().upsert(
                 ConversationEntity(
                     sessionId,
                     serverId,
-                    "新对话",
+                    title ?: "新对话",
                     System.currentTimeMillis(),
                     remoteKnown = true,
                 ),
             )
         } else {
-            check(database.conversations().markRemoteKnown(sessionId) == 1)
+            require(current.serverId == serverId) { "History session belongs to another server" }
+            if (title != null && current.title != title) {
+                database.conversations().upsert(current.copy(title = title, remoteKnown = true))
+            } else {
+                check(database.conversations().markRemoteKnown(sessionId) == 1)
+            }
         }
         payload.items.forEach { remote ->
             require(remote.sessionKey == sessionId) { "History item session mismatch" }
@@ -700,7 +716,7 @@ class LocalDeliveryStore(
             require((remote.content == null) != (remote.contentRef == null)) {
                 "History item must carry exactly one of content or content_ref"
             }
-            val completedAt = Instant.parse(remote.ts).toEpochMilli()
+            val completedAt = parseServerInstant(remote.ts, "history.page.ts")
             val duration = remote.extra["turn_duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
             require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
             remote.clientMessageId?.let(::requireFrameId)
@@ -843,6 +859,12 @@ class LocalDeliveryStore(
                 database.messages().completeRunningBlocks(messageId, completedAt)
             }
         }
+    }
+
+    private fun requireSessionTitle(title: String, source: String): String {
+        val codePoints = title.codePointCount(0, title.length)
+        require(title.isNotBlank() && codePoints <= 32) { "$source title is invalid" }
+        return title
     }
 
     /** 把摘要一致的完整正文与恢复任务在一个 Room 事务中提交。 */

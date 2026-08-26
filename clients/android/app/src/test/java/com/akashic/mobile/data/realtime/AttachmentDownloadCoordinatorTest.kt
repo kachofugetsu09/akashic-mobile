@@ -165,7 +165,7 @@ class AttachmentDownloadCoordinatorTest {
         return MediaAttachmentEntity(
             attachmentId = id,
             serverId = "server",
-            sessionId = "mobile:test",
+            sessionId = "akashic:test",
             filename = "result.bin",
             contentType = "application/octet-stream",
             sizeBytes = content.size.toLong(),

@@ -16,7 +16,7 @@ import org.junit.Test
 
 class MessageNotificationPolicyTest {
     private val event = FinalMessageEvent(
-        sessionId = "mobile:session-a",
+        sessionId = "akashic:session-a",
         messageId = "message-1",
         content = "最终回答第一行\n不会进入通知预览",
         hasAttachments = false,
@@ -45,7 +45,7 @@ class MessageNotificationPolicyTest {
         assertTrue(
             MessageNotificationPolicy.shouldNotify(
                 appVisible = true,
-                currentSessionId = "mobile:session-b",
+                currentSessionId = "akashic:session-b",
                 event = event,
             ),
         )
@@ -66,11 +66,11 @@ class MessageNotificationPolicyTest {
 
     @Test
     fun notificationTapIdentitySeparatesMessagesInTheSameSession() {
-        val first = notificationIntentData("mobile:session-a", "message-1")
-        val second = notificationIntentData("mobile:session-a", "message-2")
+        val first = notificationIntentData("akashic:session-a", "message-1")
+        val second = notificationIntentData("akashic:session-a", "message-2")
 
         assertNotEquals(first, second)
-        assertEquals(first, notificationIntentData("mobile:session-a", "message-1"))
+        assertEquals(first, notificationIntentData("akashic:session-a", "message-1"))
     }
 
     @Test
@@ -81,7 +81,7 @@ class MessageNotificationPolicyTest {
                 kind = WireKind.EVENT,
                 type = "message.proactive",
                 id = "event-42",
-                sessionId = "mobile:session-a",
+                sessionId = "akashic:session-a",
                 payload = JsonObject(
                     mapOf(
                         "content" to JsonPrimitive("后台任务完成"),
@@ -104,7 +104,7 @@ class MessageNotificationPolicyTest {
                 kind = WireKind.EVENT,
                 type = "message.proactive",
                 id = "event-42",
-                sessionId = "mobile:session-a",
+                sessionId = "akashic:session-a",
                 payload = JsonObject(
                     mapOf(
                         "content" to JsonPrimitive("后台任务完成"),
@@ -121,7 +121,7 @@ class MessageNotificationPolicyTest {
     @Test
     fun proactiveReplyUsesCoreDeliveryIdentityBeforeHistorySync() {
         val proactive = messageReplyReference("proactive:delivery-42", null)
-        val canonical = messageReplyReference("mobile:session-a:42", null)
+        val canonical = messageReplyReference("akashic:session-a:42", null)
         val optimistic = messageReplyReference(
             "user:01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
@@ -129,7 +129,7 @@ class MessageNotificationPolicyTest {
 
         assertEquals("delivery-42", proactive.deliveryId)
         assertEquals(null, proactive.messageId)
-        assertEquals("mobile:session-a:42", canonical.messageId)
+        assertEquals("akashic:session-a:42", canonical.messageId)
         assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", optimistic.clientMessageId)
     }
 }

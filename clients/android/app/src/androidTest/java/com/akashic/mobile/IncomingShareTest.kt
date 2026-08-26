@@ -23,6 +23,35 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class IncomingShareTest {
     @Test
+    fun clearsLegacySessionTargetButKeepsOriginalShare() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val root = File(context.filesDir, "incoming-share-identity-cutover")
+        root.deleteRecursively()
+        context.getSharedPreferences("incoming_shares", android.content.Context.MODE_PRIVATE)
+            .edit().clear().commit()
+        val store = IncomingShareStore(context, root)
+        val shareId = "20d28dd8-9f6f-48d4-9130-eae7a3fcc4b5"
+        store.enqueue(IncomingShare(shareId, "原始分享", emptyList()))
+        store.claimTarget(shareId, "mobile:legacy")
+        store.prepareText(
+            shareId,
+            "旧会话草稿\n原始分享",
+            "mobile:legacy:0",
+            "旧会话草稿",
+            "mobile:legacy:0",
+            1L,
+        )
+
+        val restored = IncomingShareStore(context, root).load().single()
+
+        assertEquals("原始分享", restored.content.text)
+        assertNull(restored.targetSessionId)
+        assertNull(restored.preparedText)
+        assertNull(restored.preparedReplyToMessageId)
+        assertNull(restored.preparedBaseReplyToMessageId)
+    }
+
+    @Test
     fun combinesSubjectWithSharedUrl() {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
@@ -141,11 +170,11 @@ class IncomingShareTest {
         assertEquals(accepted.content.attachmentIds, repeated.content.attachmentIds)
         assertEquals(shareId, replayed.content.id)
         assertEquals(1, store.load().size)
-        store.claimTarget(shareId, "mobile:durable-target")
+        store.claimTarget(shareId, "akashic:durable-target")
 
         val restored = IncomingShareStore(context, root).load().single()
         assertEquals("共享文字", restored.content.text)
-        assertEquals("mobile:durable-target", restored.targetSessionId)
+        assertEquals("akashic:durable-target", restored.targetSessionId)
         val attachmentIds = requireNotNull(restored.content.attachmentIds)
         assertEquals(1, attachmentIds.size)
         assertEquals("durable share fixture", context.contentResolver.openInputStream(

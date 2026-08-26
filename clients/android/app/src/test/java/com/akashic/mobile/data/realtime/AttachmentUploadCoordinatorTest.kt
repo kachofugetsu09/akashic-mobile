@@ -219,7 +219,7 @@ class AttachmentUploadCoordinatorTest {
         type = "attachment.begin.ok",
         id = id,
         connectionEpoch = 1,
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         payload = buildJsonObject {
             put("attachment_id", attachmentId)
             put("filename", "image.png")
@@ -238,14 +238,14 @@ class AttachmentUploadCoordinatorTest {
         type = "attachment.finish.ok",
         id = id,
         connectionEpoch = 1,
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         payload = buildJsonObject { put("attachment_id", attachmentId); put("state", "ready") },
     )
 
     private fun transfer(id: String, offset: Long, state: String) = AttachmentTransferEntity(
         attachmentId = id,
         serverId = "server",
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         filename = "image.png",
         contentType = "image/png",
         sizeBytes = 1024 * 1024L + 3,

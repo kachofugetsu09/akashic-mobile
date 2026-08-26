@@ -26,10 +26,10 @@ class ComposerDraftDaoTest {
         database.serverProfiles().upsert(profile("server-a"))
         database.serverProfiles().upsert(profile("server-b"))
         database.conversations().upsert(
-            ConversationEntity("mobile:a", "server-a", "会话 A", 1),
+            ConversationEntity("akashic:a", "server-a", "会话 A", 1),
         )
         database.conversations().upsert(
-            ConversationEntity("mobile:b", "server-b", "会话 B", 1),
+            ConversationEntity("akashic:b", "server-b", "会话 B", 1),
         )
     }
 
@@ -38,9 +38,9 @@ class ComposerDraftDaoTest {
 
     @Test
     fun observeGetUpsertAndDeleteKeepSessionIsolation() = runBlocking {
-        assertNull(dao.observe("server-a", "mobile:a").first())
+        assertNull(dao.observe("server-a", "akashic:a").first())
         val original = ComposerDraftEntity(
-            sessionId = "mobile:a",
+            sessionId = "akashic:a",
             serverId = "server-a",
             text = "第一版",
             replyToMessageId = "missing-message",
@@ -49,56 +49,56 @@ class ComposerDraftDaoTest {
 
         dao.upsert(original)
 
-        assertEquals(original, dao.observe("server-a", "mobile:a").first())
-        assertNull(dao.get("server-b", "mobile:a"))
-        assertEquals(0, dao.delete("server-b", "mobile:a"))
-        assertEquals(original, dao.get("server-a", "mobile:a"))
+        assertEquals(original, dao.observe("server-a", "akashic:a").first())
+        assertNull(dao.get("server-b", "akashic:a"))
+        assertEquals(0, dao.delete("server-b", "akashic:a"))
+        assertEquals(original, dao.get("server-a", "akashic:a"))
 
         val updated = original.copy(text = "第二版", replyToMessageId = null, updatedAt = 3)
         dao.upsert(updated)
 
-        assertEquals(updated, dao.get("server-a", "mobile:a"))
-        assertEquals(1, dao.delete("server-a", "mobile:a"))
-        assertNull(dao.get("server-a", "mobile:a"))
+        assertEquals(updated, dao.get("server-a", "akashic:a"))
+        assertEquals(1, dao.delete("server-a", "akashic:a"))
+        assertNull(dao.get("server-a", "akashic:a"))
     }
 
     @Test
     fun conversationDeletionCascadesOnlyToTargetDraft() = runBlocking {
-        dao.upsert(ComposerDraftEntity("mobile:a", "server-a", "A", null, 2))
-        dao.upsert(ComposerDraftEntity("mobile:b", "server-b", "B", null, 2))
+        dao.upsert(ComposerDraftEntity("akashic:a", "server-a", "A", null, 2))
+        dao.upsert(ComposerDraftEntity("akashic:b", "server-b", "B", null, 2))
 
-        assertEquals(1, database.conversations().delete("server-a", "mobile:a"))
-        assertNull(dao.get("server-a", "mobile:a"))
-        assertEquals("B", dao.get("server-b", "mobile:b")?.text)
+        assertEquals(1, database.conversations().delete("server-a", "akashic:a"))
+        assertNull(dao.get("server-a", "akashic:a"))
+        assertEquals("B", dao.get("server-b", "akashic:b")?.text)
     }
 
     @Test
     fun canonicalMergeMovesOnlyMatchingReplyTarget() = runBlocking {
         dao.upsert(
-            ComposerDraftEntity("mobile:a", "server-a", "继续回复", "optimistic", 2),
+            ComposerDraftEntity("akashic:a", "server-a", "继续回复", "optimistic", 2),
         )
 
-        assertEquals(0, dao.moveReplyTarget("mobile:a", "other", "canonical"))
-        assertEquals("optimistic", dao.get("server-a", "mobile:a")?.replyToMessageId)
+        assertEquals(0, dao.moveReplyTarget("akashic:a", "other", "canonical"))
+        assertEquals("optimistic", dao.get("server-a", "akashic:a")?.replyToMessageId)
 
-        assertEquals(1, dao.moveReplyTarget("mobile:a", "optimistic", "canonical"))
-        val migrated = requireNotNull(dao.get("server-a", "mobile:a"))
+        assertEquals(1, dao.moveReplyTarget("akashic:a", "optimistic", "canonical"))
+        val migrated = requireNotNull(dao.get("server-a", "akashic:a"))
         assertEquals("canonical", migrated.replyToMessageId)
         assertEquals(2L, migrated.updatedAt)
     }
 
     @Test
     fun composerDraftCountsAsLocalWorkAndProtectsEmptyProjection() = runBlocking {
-        dao.upsert(ComposerDraftEntity("mobile:a", "server-a", "未发送", null, 2))
+        dao.upsert(ComposerDraftEntity("akashic:a", "server-a", "未发送", null, 2))
 
         val summary = database.conversations().observeSummaries("server-a").first().single()
         assertEquals(true, summary.hasLocalWork)
         assertEquals(0, database.conversations().deleteEmptyProjection("server-a", null))
-        assertEquals("会话 A", database.conversations().get("mobile:a")?.title)
+        assertEquals("会话 A", database.conversations().get("akashic:a")?.title)
 
-        assertEquals(1, dao.delete("server-a", "mobile:a"))
+        assertEquals(1, dao.delete("server-a", "akashic:a"))
         assertEquals(1, database.conversations().deleteEmptyProjection("server-a", null))
-        assertNull(database.conversations().get("mobile:a"))
+        assertNull(database.conversations().get("akashic:a"))
     }
 
     private fun profile(serverId: String) = ServerProfileEntity(

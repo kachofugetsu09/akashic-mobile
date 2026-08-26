@@ -101,9 +101,9 @@ class MessageContentDownloadCoordinatorTest {
     }
 
     private fun transfer(content: ByteArray) = MessageContentTransferEntity(
-        messageId = "mobile:test:4",
+        messageId = "akashic:test:4",
         serverId = "server",
-        sessionId = "mobile:test",
+        sessionId = "akashic:test",
         byteLength = content.size.toLong(),
         sha256 = sha256(content),
         transferredBytes = 0,

@@ -548,6 +548,7 @@ data class RemoteSessionSummary(
 @Serializable
 data class HistoryPagePayload(
     val items: List<RemoteHistoryMessage>,
+    val title: String? = null,
     val total: Int,
     val page: Int? = null,
     @SerialName("page_size") val pageSize: Int,
