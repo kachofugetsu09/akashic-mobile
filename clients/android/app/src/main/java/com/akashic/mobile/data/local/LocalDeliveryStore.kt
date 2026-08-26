@@ -13,8 +13,9 @@ import com.akashic.mobile.data.realtime.WireKind
 import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
 import com.akashic.mobile.data.realtime.FinalMessageEvent
 import com.akashic.mobile.data.realtime.proactiveMessageId
-import java.time.Instant
 import java.security.MessageDigest
+import java.time.Instant
+import java.time.format.DateTimeParseException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -77,6 +78,13 @@ internal fun decodeStoredToolBlock(content: String): StoredToolBlock {
 
 private fun encodeStoredToolBlock(content: StoredToolBlock): String =
     TOOL_BLOCK_V1_PREFIX + ProtocolCodec.json().encodeToString(content)
+
+internal fun parseServerInstant(value: String, field: String): Long =
+    try {
+        Instant.parse(value).toEpochMilli()
+    } catch (error: DateTimeParseException) {
+        throw IllegalArgumentException("$field must be an RFC 3339 UTC instant", error)
+    }
 
 class LocalDeliveryStore(
     private val database: AppDatabase,
@@ -668,7 +676,7 @@ class LocalDeliveryStore(
                     sessionId = item.sessionId,
                     serverId = serverId,
                     title = item.title,
-                    updatedAt = Instant.parse(item.updatedAt).toEpochMilli(),
+                    updatedAt = parseServerInstant(item.updatedAt, "session.list.updated_at"),
                     remoteKnown = true,
                 ),
             )
@@ -700,7 +708,7 @@ class LocalDeliveryStore(
             require((remote.content == null) != (remote.contentRef == null)) {
                 "History item must carry exactly one of content or content_ref"
             }
-            val completedAt = Instant.parse(remote.ts).toEpochMilli()
+            val completedAt = parseServerInstant(remote.ts, "history.page.ts")
             val duration = remote.extra["turn_duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
             require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
             remote.clientMessageId?.let(::requireFrameId)
