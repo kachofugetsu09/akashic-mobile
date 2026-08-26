@@ -619,6 +619,37 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun historyRepairsConversationTitleFromCoreProjection() = runBlocking {
+        database.conversations().upsert(
+            ConversationEntity("akashic:test", "server", "新对话", 1, remoteKnown = true),
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("title", "迁移后的标题")
+                put("total", 1)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "akashic:test:title")
+                        put("session_key", "akashic:test")
+                        put("seq", 1)
+                        put("role", "user")
+                        put("content", "迁移后的标题")
+                        put("extra", buildJsonObject {})
+                        put("ts", "2026-08-27T00:00:00Z")
+                    })
+                })
+            }),
+            2,
+        )
+
+        assertEquals("迁移后的标题", database.conversations().get("akashic:test")!!.title)
+    }
+
+    @Test
     fun tallMessageReadingAnchorPreservesLargeNegativeOffset() = runBlocking {
         database.messages().upsert(
             MessageEntity("tall-message", null, "akashic:test", "assistant", "长回复", "complete", 1, 1),

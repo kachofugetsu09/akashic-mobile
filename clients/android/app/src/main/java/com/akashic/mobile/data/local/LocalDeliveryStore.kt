@@ -689,18 +689,27 @@ class LocalDeliveryStore(
     ) {
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        if (database.conversations().get(sessionId) == null) {
+        val current = database.conversations().get(sessionId)
+        val title = payload.title?.also {
+            require(it.isNotBlank() && it.length <= 32) { "History page title is invalid" }
+        }
+        if (current == null) {
             database.conversations().upsert(
                 ConversationEntity(
                     sessionId,
                     serverId,
-                    "新对话",
+                    title ?: "新对话",
                     System.currentTimeMillis(),
                     remoteKnown = true,
                 ),
             )
         } else {
-            check(database.conversations().markRemoteKnown(sessionId) == 1)
+            require(current.serverId == serverId) { "History session belongs to another server" }
+            if (title != null && current.title != title) {
+                database.conversations().upsert(current.copy(title = title, remoteKnown = true))
+            } else {
+                check(database.conversations().markRemoteKnown(sessionId) == 1)
+            }
         }
         payload.items.forEach { remote ->
             require(remote.sessionKey == sessionId) { "History item session mismatch" }
