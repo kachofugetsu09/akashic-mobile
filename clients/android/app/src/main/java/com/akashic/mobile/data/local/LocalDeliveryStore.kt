@@ -671,11 +671,12 @@ class LocalDeliveryStore(
     private suspend fun applySessionList(serverId: String, envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
         payload.items.forEach { item ->
+            val title = requireSessionTitle(item.title, "Session list")
             database.conversations().upsert(
                 ConversationEntity(
                     sessionId = item.sessionId,
                     serverId = serverId,
-                    title = item.title,
+                    title = title,
                     updatedAt = parseServerInstant(item.updatedAt, "session.list.updated_at"),
                     remoteKnown = true,
                 ),
@@ -690,9 +691,7 @@ class LocalDeliveryStore(
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
         val current = database.conversations().get(sessionId)
-        val title = payload.title?.also {
-            require(it.isNotBlank() && it.length <= 32) { "History page title is invalid" }
-        }
+        val title = payload.title?.let { requireSessionTitle(it, "History page") }
         if (current == null) {
             database.conversations().upsert(
                 ConversationEntity(
@@ -860,6 +859,12 @@ class LocalDeliveryStore(
                 database.messages().completeRunningBlocks(messageId, completedAt)
             }
         }
+    }
+
+    private fun requireSessionTitle(title: String, source: String): String {
+        val codePoints = title.codePointCount(0, title.length)
+        require(title.isNotBlank() && codePoints <= 32) { "$source title is invalid" }
+        return title
     }
 
     /** 把摘要一致的完整正文与恢复任务在一个 Room 事务中提交。 */

@@ -650,6 +650,25 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun historyAcceptsTitleMeasuredAsUnicodeCodePoints() = runBlocking {
+        val title = "🚀".repeat(17)
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "history.page", buildJsonObject {
+                put("title", title)
+                put("total", 0)
+                put("page", 1)
+                put("page_size", 10)
+                put("items", buildJsonArray {})
+            }),
+            2,
+        )
+
+        assertEquals(title, database.conversations().get("akashic:test")!!.title)
+    }
+
+    @Test
     fun tallMessageReadingAnchorPreservesLargeNegativeOffset() = runBlocking {
         database.messages().upsert(
             MessageEntity("tall-message", null, "akashic:test", "assistant", "长回复", "complete", 1, 1),
