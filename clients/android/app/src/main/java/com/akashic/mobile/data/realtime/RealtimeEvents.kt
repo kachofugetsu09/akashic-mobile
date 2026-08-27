@@ -12,22 +12,11 @@ data class FinalMessageEvent(
     val attention: FinalMessageAttention = FinalMessageAttention.COMPLETE,
 )
 
-internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String = when (envelope.type) {
-    "message.final" -> envelope.payload["message_id"]?.jsonPrimitive?.content
-        // TODO(deprecated): 服务端 final 始终携带 message_id；frame 前缀身份只在极旧服务端数据出现，滚动出窗口后删除
-        ?: "ephemeral:${requireNotNull(envelope.id) { "Final event has no frame id" }}"
-    "message.proactive" -> envelope.payload["delivery_id"]?.jsonPrimitive?.content
-        ?.let(::proactiveMessageId)
-        ?: proactiveMessageId(requireNotNull(envelope.id) { "Proactive event has no frame id" })
-    else -> error("Unsupported delivered message type: ${envelope.type}")
-}
-
-/** TODO(deprecated): 临时投递身份命名空间；历史 canonical 化后由服务端 message ID 取代，MOB-XREPO-003 旧数据窗口结束后删除前缀。 */
-internal fun proactiveMessageId(deliveryId: String): String {
-    require(deliveryId.isNotBlank() && deliveryId.length <= 128) {
-        "Proactive delivery id is invalid"
+internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String {
+    require(envelope.type == "message.final") { "Unsupported delivered message type: ${envelope.type}" }
+    return requireNotNull(envelope.payload["message_id"]?.jsonPrimitive?.content) {
+        "Final event has no canonical message_id"
     }
-    return "proactive:$deliveryId"
 }
 
 internal fun messageReplyReference(
@@ -35,20 +24,11 @@ internal fun messageReplyReference(
     clientMessageId: String?,
 ): MessageReplyReference = when {
     clientMessageId != null -> MessageReplyReference(clientMessageId = clientMessageId)
-    messageId.startsWith(PROACTIVE_MESSAGE_PREFIX) -> MessageReplyReference(
-        deliveryId = messageId.removePrefix(PROACTIVE_MESSAGE_PREFIX).also(::validateDeliveryId),
-    )
     else -> MessageReplyReference(messageId = messageId)
 }
 
-private fun validateDeliveryId(deliveryId: String) {
-    require(deliveryId.isNotBlank() && deliveryId.length <= 128) {
-        "Proactive delivery id is invalid"
-    }
-}
-
 internal fun deliveredFinalMessageEvent(envelope: WireEnvelope): FinalMessageEvent {
-    require(envelope.type == "message.final" || envelope.type == "message.proactive") {
+    require(envelope.type == "message.final") {
         "Unsupported final message event: ${envelope.type}"
     }
     return FinalMessageEvent(
@@ -81,5 +61,3 @@ internal fun finalMessageAttention(payload: JsonObject): FinalMessageAttention {
         else -> error("最终消息 mobile_attention 无效")
     }
 }
-
-private const val PROACTIVE_MESSAGE_PREFIX = "proactive:"

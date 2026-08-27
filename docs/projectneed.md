@@ -122,9 +122,9 @@ HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system t
 
 跨仓库接口从同步改为异步、确认改为接受、返回值改为事件或终态发生变化时，必须视为语义变化，而不是普通实现细节；生产者与移动端消费者需要在同一固定组合上通过场景验收。
 
-### MOB-XREPO-003 主动消息的实时与历史投影共享身份
+### MOB-XREPO-003 Session seq 是主动消息的唯一历史进度
 
-核心为同一条主动消息的实时事件和发送成功后的历史消息提供同一个稳定投递身份。移动端必须优先按该身份合并为一条本地消息；内容与时间匹配只兼容没有稳定身份的旧协议数据，候选不唯一时不得猜测或删除。历史投影尚未到达时，移动端使用该投递身份引用主动消息；历史完成 canonical 化后继续使用服务端 message ID，不把本地临时 ID 发送给核心。
+核心必须先把 Akashic 主动消息提交到 SessionDB，再以 canonical `message_id` 和 `head_seq` 通知移动端。移动端不接收第二份主动正文，不生成 `proactive:*` 或 `ephemeral:*` assistant identity，也不按正文与时间猜测历史对应项。Room 中连续最大 `serverSeq` 是本地历史进度；客户端把它与 Session list 的 `snapshot_max_seq` 比较，并用已有 `history.get(after_seq)` 只拉取缺尾。不得新增服务端或客户端 history cursor；Realtime ACK cursor 只负责传输重放。
 
 ### MOB-XREPO-004 WebUI 发布只消费固定 Core schema
 

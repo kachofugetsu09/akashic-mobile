@@ -288,50 +288,6 @@ interface MessageDao {
     /** TODO(deprecated): 旧协议数据无稳定身份时的时间窗兜底，权威字段滚动出窗口后删除。 */
     @Query(
         """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'user'
-          AND text = :text
-          AND messageId LIKE 'user:%'
-          AND clientMessageId IS NOT NULL
-          AND deliveryState IN ('sent', 'complete')
-          AND createdAt BETWEEN :earliestCreatedAt AND :latestCreatedAt
-        ORDER BY createdAt, messageId
-        """,
-    )
-    suspend fun findLegacyOptimisticUsers(
-        sessionId: String,
-        text: String,
-        earliestCreatedAt: Long,
-        latestCreatedAt: Long,
-    ): List<MessageEntity>
-
-    /** TODO(deprecated): 旧协议数据无稳定身份时的时间窗兜底，权威字段滚动出窗口后删除。 */
-    @Query(
-        """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'assistant'
-          AND text = :text
-          AND (
-            messageId LIKE 'ephemeral:%'
-            OR (:includeProactive = 1 AND messageId LIKE 'proactive:%')
-          )
-          AND deliveryState = 'complete'
-          AND updatedAt BETWEEN :earliestUpdatedAt AND :latestUpdatedAt
-        ORDER BY createdAt, messageId
-        """,
-    )
-    suspend fun findTransientAssistants(
-        sessionId: String,
-        text: String,
-        earliestUpdatedAt: Long,
-        latestUpdatedAt: Long,
-        includeProactive: Boolean,
-    ): List<MessageEntity>
-
-    @Query(
-        """
         SELECT messages.* FROM messages
         INNER JOIN conversations ON conversations.sessionId = messages.sessionId
         WHERE conversations.serverId = :serverId

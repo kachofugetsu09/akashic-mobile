@@ -1982,11 +1982,11 @@ class RealtimeSession(
                     "attachment.progress" -> uploads.onProgress(
                         ProtocolCodec.decodePayload(envelope.payload),
                     )
-                    "message.proactive" -> {
+                    "session.updated" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
-                        downloads.resumeIfIdle(currentProfile.serverId)
+                        requestSessionList()
                     }
-                    "session.created", "session.updated" ->
+                    "session.created" ->
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
                     "connection.degraded" -> mutableState.value = mutableState.value.copy(
                         connection = mutableState.value.connection.copy(phase = ConnectionPhase.DEGRADED),

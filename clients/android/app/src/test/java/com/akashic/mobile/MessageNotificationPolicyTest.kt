@@ -74,62 +74,59 @@ class MessageNotificationPolicyTest {
     }
 
     @Test
-    fun proactiveNotificationUsesThePersistedLocalMessageIdentity() {
+    fun finalNotificationRequiresTheCanonicalMessageIdentity() {
         val event = deliveredFinalMessageEvent(
             WireEnvelope(
                 v = 1,
                 kind = WireKind.EVENT,
-                type = "message.proactive",
+                type = "message.final",
                 id = "event-42",
                 sessionId = "akashic:session-a",
                 payload = JsonObject(
                     mapOf(
                         "content" to JsonPrimitive("后台任务完成"),
                         "attachments" to JsonArray(emptyList()),
+                        "message_id" to JsonPrimitive("mobile:session-a:42"),
                     ),
                 ),
             ),
         )
 
-        assertEquals("proactive:event-42", event.messageId)
+        assertEquals("mobile:session-a:42", event.messageId)
         assertEquals("后台任务完成", event.content)
         assertFalse(event.hasAttachments)
     }
 
     @Test
-    fun proactiveNotificationPrefersCoreDeliveryIdentity() {
-        val event = deliveredFinalMessageEvent(
+    fun finalNotificationRejectsMissingCanonicalIdentity() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            deliveredFinalMessageEvent(
             WireEnvelope(
                 v = 1,
                 kind = WireKind.EVENT,
-                type = "message.proactive",
+                type = "message.final",
                 id = "event-42",
                 sessionId = "akashic:session-a",
                 payload = JsonObject(
                     mapOf(
                         "content" to JsonPrimitive("后台任务完成"),
                         "attachments" to JsonArray(emptyList()),
-                        "delivery_id" to JsonPrimitive("delivery-42"),
                     ),
                 ),
             ),
-        )
-
-        assertEquals("proactive:delivery-42", event.messageId)
+            )
+        }
     }
 
     @Test
-    fun proactiveReplyUsesCoreDeliveryIdentityBeforeHistorySync() {
-        val proactive = messageReplyReference("proactive:delivery-42", null)
-        val canonical = messageReplyReference("akashic:session-a:42", null)
+    fun repliesUseCanonicalOrOptimisticMessageIdentity() {
+        val canonical = messageReplyReference("mobile:session-a:42", null)
         val optimistic = messageReplyReference(
             "user:01ARZ3NDEKTSV4RRFFQ69G5FAV",
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
         )
 
-        assertEquals("delivery-42", proactive.deliveryId)
-        assertEquals(null, proactive.messageId)
-        assertEquals("akashic:session-a:42", canonical.messageId)
+        assertEquals("mobile:session-a:42", canonical.messageId)
         assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", optimistic.clientMessageId)
     }
 }

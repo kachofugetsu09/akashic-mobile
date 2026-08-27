@@ -12,7 +12,6 @@ import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
 import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
 import com.akashic.mobile.data.realtime.FinalMessageEvent
-import com.akashic.mobile.data.realtime.proactiveMessageId
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -51,12 +50,6 @@ internal enum class NotificationTargetProjection {
 }
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
-/**
- * TODO(deprecated): 0034 之前旧协议数据没有稳定身份，只能按时间窗兜底匹配。
- * 新数据走 client_message_id → delivery_id → control_turn_id 权威链；
- * 旧数据滚动出保留窗口后删除本常量、transientLocalSourceId 与对应 DAO 查询。
- */
-private const val LEGACY_IDENTITY_LOOKBACK_MS = 60 * 60 * 1_000L
 /** TODO(deprecated): 进程内 canonical 别名表只服务 UI 持有旧临时 ID 的短暂窗口，未来收紧临时 ID 生命周期后删除。 */
 private const val MAX_CANONICAL_MESSAGE_ALIASES = 256
 
@@ -620,7 +613,6 @@ class LocalDeliveryStore(
             "answer.delta" -> appendAnswer(envelope, updatedAt)
             "message.final" -> finalizeMessage(envelope, requireNotNull(delivered), updatedAt)
             "turn.interrupted" -> interruptTurn(envelope, updatedAt)
-            "message.proactive" -> insertProactive(envelope, requireNotNull(delivered), updatedAt)
             "attachment.progress" -> applyAttachmentProgress(envelope, updatedAt)
             "attachment.ready" -> applyAttachmentReady(envelope, updatedAt)
             else -> Unit
@@ -791,12 +783,6 @@ class LocalDeliveryStore(
                 remote.clientMessageId?.takeIf { remote.role == "user" }?.let {
                     database.messages().getByClientMessageId(it)?.messageId
                 }
-                    ?: deliveryId?.let(::proactiveMessageId)
-                    ?: if (remote.content != null) {
-                        transientLocalSourceId(canonical, proactive)
-                    } else {
-                        null
-                    }
             }
             val canonicalWithTurnIdentity = if (
                 remote.role == "assistant" &&
@@ -947,42 +933,6 @@ class LocalDeliveryStore(
                 updatedAt = updatedAt,
             ),
         )
-    }
-
-    /** 仅在唯一匹配时把本地临时消息迁移到服务端 canonical identity。 */
-    /**
-     * 旧协议数据兜底：按正文加时间窗匹配本地临时消息。
-     *
-     * TODO(deprecated): 0034 之后服务端为 assistant 消息提供 control_turn_id，权威链
-     * client_message_id → delivery_id → control_turn_id 命中后不再到达这里；
-     * 旧协议数据滚动出保留窗口后删除本函数与对应 DAO 查询。
-     */
-    private suspend fun transientLocalSourceId(
-        canonical: MessageEntity,
-        includeProactive: Boolean,
-    ): String? {
-        if (canonical.role == "assistant") {
-            val candidates = database.messages().findTransientAssistants(
-                canonical.sessionId,
-                canonical.text,
-                canonical.updatedAt - LEGACY_IDENTITY_LOOKBACK_MS,
-                canonical.updatedAt + LEGACY_IDENTITY_LOOKBACK_MS,
-                includeProactive,
-            )
-            val closestDistance = candidates.minOfOrNull {
-                kotlin.math.abs(it.updatedAt - canonical.updatedAt)
-            } ?: return null
-            return candidates.singleOrNull {
-                kotlin.math.abs(it.updatedAt - canonical.updatedAt) == closestDistance
-            }?.messageId
-        }
-        if (canonical.role != "user" || canonical.clientMessageId != null) return null
-        return database.messages().findLegacyOptimisticUsers(
-            canonical.sessionId,
-            canonical.text,
-            canonical.createdAt - LEGACY_IDENTITY_LOOKBACK_MS,
-            canonical.updatedAt,
-        ).singleOrNull()?.messageId
     }
 
     private fun historyBlocks(
@@ -1401,40 +1351,6 @@ class LocalDeliveryStore(
         database.messages().completeRunningBlocks(current.messageId, updatedAt)
     }
 
-    private suspend fun insertProactive(
-        envelope: WireEnvelope,
-        delivered: FinalMessageEvent,
-        updatedAt: Long,
-    ) {
-        val sessionId = delivered.sessionId
-        val messageId = delivered.messageId
-        val controlTurnId = payloadText(envelope, "control_turn_id")
-        controlTurnId?.let(::requireControlTurnId)
-        database.messages().upsert(
-            MessageEntity(
-                messageId = messageId,
-                clientMessageId = null,
-                sessionId = sessionId,
-                role = "assistant",
-                text = delivered.content,
-                deliveryState = "complete",
-                createdAt = updatedAt,
-                updatedAt = updatedAt,
-                controlTurnId = controlTurnId,
-            ),
-        )
-        val serverId = requireNotNull(database.conversations().get(sessionId)).serverId
-        upsertMessageAttachments(
-            serverId = serverId,
-            sessionId = sessionId,
-            messageId = messageId,
-            descriptors = envelope.payload["attachments"]?.let {
-                ProtocolCodec.json().decodeFromJsonElement(it)
-            } ?: emptyList(),
-            updatedAt = updatedAt,
-        )
-    }
-
     /** 持久化附件元数据并幂等关联消息。 */
     private suspend fun upsertMessageAttachments(
         serverId: String,
@@ -1531,9 +1447,8 @@ class LocalDeliveryStore(
             "session.updated",
             "history.page",
             "turn.started",
-            "message.proactive",
         )
-        val DELIVERED_MESSAGE_EVENTS = setOf("message.final", "message.proactive")
+        val DELIVERED_MESSAGE_EVENTS = setOf("message.final")
         val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val SHA256 = Regex("^[0-9a-f]{64}$")
     }
