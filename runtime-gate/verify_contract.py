@@ -82,8 +82,8 @@ def load_contract(mobile_root: Path) -> tuple[dict[str, object], list[str]]:
             character not in "0123456789abcdef" for character in value
         ):
             raise ValueError(f"{key} 必须是完整的小写 Git SHA")
-    if _required_text(lock, "relationship") != "tested_backward_compatible":
-        raise ValueError("runtime relationship 必须是 tested_backward_compatible")
+    if _required_text(lock, "relationship") != "tested_breaking_removal":
+        raise ValueError("runtime relationship 必须是 tested_breaking_removal")
 
     # 2. 校验场景目录不可脱离锁文件漂移。
     catalog_path = mobile_root / _required_text(lock, "scenario_catalog")

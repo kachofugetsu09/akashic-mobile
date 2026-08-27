@@ -669,7 +669,6 @@ object ProtocolCodec {
             "turn.output.completed",
             "message.final",
             "turn.interrupted",
-            "message.proactive",
             "attachment.progress",
             "attachment.ready",
             "connection.degraded",

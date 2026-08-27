@@ -123,34 +123,16 @@
       "consumer_test": "reconcile commits valid final left before database update"
     },
     {
-      "id": "passive-message-queue-is-durable",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_sender_uses_mobile_event_path",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "persistsMoreThanOneInMemoryQueueOfProactiveNotifications"
+      "id": "akashic-direct-message-commits-before-notify",
+      "provider_test": "tests/test_core_channel_adapter.py::test_akashic_direct_push_commits_session_before_client_notification",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ConnectionRecoveryPolicyTest.kt",
+      "consumer_test": "history resumes from the first incomplete page"
     },
     {
-      "id": "passive-notification-consumption-is-durable",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_sender_uses_mobile_event_path",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "pendingNotificationSurvivesMessageProjectionCleanup"
-    },
-    {
-      "id": "proactive-live-and-history-share-delivery-identity",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_proactive_metadata_sender_forwards_delivery_id",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "historyCanonicalizesProactiveProjectionByDeliveryIdentity"
-    },
-    {
-      "id": "proactive-reply-before-history-sync",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_resolves_reply_into_agent_context_and_metadata",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/MessageNotificationPolicyTest.kt",
-      "consumer_test": "proactiveReplyUsesCoreDeliveryIdentityBeforeHistorySync"
-    },
-    {
-      "id": "proactive-distinct-deliveries-remain-distinct",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_mobile_history_projects_proactive_delivery_identity",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "identicalProactiveTextWithDifferentDeliveryIdsRemainsDistinct"
+      "id": "session-seq-detects-stale-projection",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ConnectionRecoveryPolicyTest.kt",
+      "consumer_test": "versioned history snapshot accepts sparse seq and detects stale projection"
     },
     {
       "id": "turn-stop-survives-client-process-restart",
