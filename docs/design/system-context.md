@@ -117,7 +117,7 @@ embedded baseline 没有远端 generation，`generationRef=null` 本身就是它
 
 ## 主动消息投影身份
 
-核心拥有主动消息的 `delivery_id`。`message.proactive` 实时事件与 `history.page` 中发送成功后的 assistant 消息携带同一个值；Android 先保存实时投影，历史到达后把它迁移到 SessionDB message ID。历史到达前，引用命令携带 `reply_to.delivery_id`；迁移后携带 `reply_to.message_id`。旧核心没有该字段时，客户端只对明确标记为 proactive 的唯一文本与时间候选执行兼容迁移。
+核心先把主动 assistant 消息提交到 SessionDB，再发送只含 canonical `message_id` 与 `head_seq` 的更新通知。Android 不保存第二份实时正文；它比较 Room 中连续最大 `serverSeq` 与 Session snapshot，并通过 `history.get(after_seq)` 拉取缺少的尾部。引用始终使用 canonical `reply_to.message_id`，不保留 delivery ID、临时消息身份或按正文与时间猜测的兼容路径。
 
 ## 未定义而不得猜测
 
