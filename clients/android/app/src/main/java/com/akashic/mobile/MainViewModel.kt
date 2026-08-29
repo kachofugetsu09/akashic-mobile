@@ -58,7 +58,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -302,10 +305,29 @@ class MainViewModel(
     private val conversationProjection = sessionState.flatMapLatest { state ->
         val serverId = state.serverId
         val sessionId = state.currentSessionId
-        val graph = sessionId
-            ?.let(container.database.messages()::observeMessageGraph)
-            ?.distinctUntilChanged()
-            ?: flowOf(emptyList())
+        val graph = when {
+            sessionId == null -> flowOf(emptyList())
+            state.activeTurnId == null -> container.database.messages()
+                .observeMessageGraph(sessionId)
+                .distinctUntilChanged()
+            else -> flow {
+                val initial = container.database.messages().observeMessageGraph(sessionId).first()
+                val activeIndex = initial.indexOfFirst {
+                    it.message.controlTurnId == state.activeTurnId
+                }
+                check(activeIndex >= 0) {
+                    "活动 turn ${state.activeTurnId} 缺少已持久化的助手投影"
+                }
+                val activeCreatedAt = initial[activeIndex].message.createdAt
+                val frozenPrefix = initial.take(activeIndex)
+                emitAll(
+                    container.database.messages()
+                        .observeMessageGraphFrom(sessionId, activeCreatedAt, state.activeTurnId)
+                        .map { liveTail -> mergeStreamingTail(frozenPrefix, liveTail) }
+                        .distinctUntilChanged(),
+                )
+            }
+        }
         val messages = graph.map { currentGraph ->
             projectMessages(sessionId, currentGraph)
         }
@@ -1001,6 +1023,15 @@ class MainViewModel(
             preview = requireNotNull(replyPreview) { "引用消息缺少预览: $messageId" },
         )
     }
+}
+
+/** 流式输出时冻结已完成历史，只合并 Room 重载的活动尾部。 */
+internal fun mergeStreamingTail(
+    frozenPrefix: List<MessageWithBlocks>,
+    liveTail: List<MessageWithBlocks>,
+): List<MessageWithBlocks> {
+    val liveIds = liveTail.mapTo(hashSetOf()) { it.message.messageId }
+    return frozenPrefix.filterNot { it.message.messageId in liveIds } + liveTail
 }
 
 internal fun canReloadServerProjection(session: MobileSessionState): Boolean =

@@ -254,6 +254,59 @@ interface MessageDao {
 
     @Query(
         """
+        UPDATE turn_blocks
+        SET content = content || :delta, status = 'running', updatedAt = :updatedAt
+        WHERE blockId = :blockId
+          AND messageId = :messageId
+          AND turnId = :turnId
+          AND ordinal = :ordinal
+          AND kind = 'thinking'
+          AND EXISTS (
+            SELECT 1 FROM messages
+            WHERE messages.messageId = :messageId
+              AND messages.sessionId = :sessionId
+              AND messages.role = 'assistant'
+              AND messages.deliveryState = 'streaming'
+              AND (:controlTurnId IS NULL OR messages.controlTurnId = :controlTurnId)
+              AND (:clientMessageId IS NULL OR messages.turnClientMessageId = :clientMessageId)
+          )
+        """,
+    )
+    suspend fun appendThinkingDelta(
+        blockId: String,
+        messageId: String,
+        sessionId: String,
+        turnId: String,
+        ordinal: Int,
+        controlTurnId: String?,
+        clientMessageId: String?,
+        delta: String,
+        updatedAt: Long,
+    ): Int
+
+    @Query(
+        """
+        UPDATE messages
+        SET text = text || :delta, deliveryState = 'streaming', updatedAt = :updatedAt
+        WHERE messageId = :messageId
+          AND sessionId = :sessionId
+          AND role = 'assistant'
+          AND deliveryState = 'streaming'
+          AND (:controlTurnId IS NULL OR controlTurnId = :controlTurnId)
+          AND (:clientMessageId IS NULL OR turnClientMessageId = :clientMessageId)
+        """,
+    )
+    suspend fun appendAnswerDelta(
+        messageId: String,
+        sessionId: String,
+        controlTurnId: String?,
+        clientMessageId: String?,
+        delta: String,
+        updatedAt: Long,
+    ): Int
+
+    @Query(
+        """
         SELECT * FROM messages AS local
         WHERE local.sessionId = :sessionId
         ORDER BY
@@ -437,6 +490,36 @@ interface MessageDao {
         """,
     )
     fun observeMessageGraph(sessionId: String): Flow<List<MessageWithBlocks>>
+
+    @Transaction
+    @Query(
+        """
+        SELECT * FROM messages AS local
+        WHERE local.sessionId = :sessionId
+          AND (
+            local.createdAt >= :createdAt
+            OR local.controlTurnId = :activeTurnId
+          )
+        ORDER BY
+          CASE WHEN local.serverSeq IS NOT NULL THEN local.serverSeq ELSE COALESCE(
+            (
+              SELECT MIN(remote.serverSeq) FROM messages AS remote
+              WHERE remote.sessionId = local.sessionId
+                AND remote.serverSeq IS NOT NULL
+                AND remote.createdAt >= local.createdAt
+            ),
+            9223372036854775807
+          ) END,
+          CASE WHEN local.serverSeq IS NULL THEN 0 ELSE 1 END,
+          local.createdAt,
+          local.messageId
+        """,
+    )
+    fun observeMessageGraphFrom(
+        sessionId: String,
+        createdAt: Long,
+        activeTurnId: String,
+    ): Flow<List<MessageWithBlocks>>
 }
 
 @Dao
