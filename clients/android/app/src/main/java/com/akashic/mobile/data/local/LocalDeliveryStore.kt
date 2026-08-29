@@ -1053,96 +1053,146 @@ class LocalDeliveryStore(
         ensureAssistantTurn(envelope, updatedAt)
     }
 
-    private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
+    private data class AssistantTurnTarget(
+        val sessionId: String,
+        val turnId: String,
+        val messageId: String,
+        val controlTurnId: String?,
+        val clientMessageId: String?,
+    )
+
+    /** 提取并校验流式事件指向的唯一 assistant turn 身份。 */
+    private fun assistantTurnTarget(envelope: WireEnvelope): AssistantTurnTarget {
         val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
         val turnId = requireNotNull(envelope.turnId) { "Turn event has no turn_id" }
-        val payloadControlTurnId = payloadText(envelope, "control_turn_id")
-        payloadControlTurnId?.let(::requireControlTurnId)
+        val controlTurnId = payloadText(envelope, "control_turn_id")
+        controlTurnId?.let(::requireControlTurnId)
         // 1. 显式 client_message_id 绑定 turn 关联列；用户 outbox 身份继续独占 clientMessageId
-        val payloadClientMessageId = payloadText(envelope, "client_message_id")
-        payloadClientMessageId?.let(::requireFrameId)
+        val clientMessageId = payloadText(envelope, "client_message_id")
+        clientMessageId?.let(::requireFrameId)
         // TODO(deprecated): 流式阶段的本地临时 ID 命名空间，final/history 到达后原子迁移
         // 为服务端 message_id；未来以服务端下发的稳定身份取代前缀拼接。
-        val messageId = "assistant:$turnId"
-        val existing = database.messages().get(messageId)
+        return AssistantTurnTarget(
+            sessionId = sessionId,
+            turnId = turnId,
+            messageId = "assistant:$turnId",
+            controlTurnId = controlTurnId,
+            clientMessageId = clientMessageId,
+        )
+    }
+
+    private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
+        val target = assistantTurnTarget(envelope)
+        val existing = database.messages().get(target.messageId)
         if (existing != null) {
             // 2. 只有显式 wire 身份才能补写或校验；旧增量缺字段不产生第二套本地事实
-            if (payloadControlTurnId != null && existing.controlTurnId == null) {
-                check(database.messages().bindControlTurnId(messageId, payloadControlTurnId) == 1) {
-                    "Control turn id 补写失败: $payloadControlTurnId"
+            if (target.controlTurnId != null && existing.controlTurnId == null) {
+                check(database.messages().bindControlTurnId(target.messageId, target.controlTurnId) == 1) {
+                    "Control turn id 补写失败: ${target.controlTurnId}"
                 }
-            } else if (payloadControlTurnId != null) {
-                require(existing.controlTurnId == payloadControlTurnId) {
-                    "Control turn id 在重放中变化: $payloadControlTurnId"
-                }
-            }
-            if (payloadClientMessageId != null && existing.turnClientMessageId == null) {
-                check(database.messages().bindTurnClientMessageId(messageId, payloadClientMessageId) == 1) {
-                    "Turn client_message_id 补写失败: $turnId"
+            } else if (target.controlTurnId != null) {
+                require(existing.controlTurnId == target.controlTurnId) {
+                    "Control turn id 在重放中变化: ${target.controlTurnId}"
                 }
             }
-            if (payloadClientMessageId != null) {
+            if (target.clientMessageId != null && existing.turnClientMessageId == null) {
+                check(database.messages().bindTurnClientMessageId(target.messageId, target.clientMessageId) == 1) {
+                    "Turn client_message_id 补写失败: ${target.turnId}"
+                }
+            }
+            if (target.clientMessageId != null) {
                 require(
                     existing.turnClientMessageId == null ||
-                        existing.turnClientMessageId == payloadClientMessageId,
+                        existing.turnClientMessageId == target.clientMessageId,
                 ) {
-                    "Turn client_message_id 在重放中变化: $turnId"
+                    "Turn client_message_id 在重放中变化: ${target.turnId}"
                 }
             }
             return existing.copy(
-                turnClientMessageId = payloadClientMessageId ?: existing.turnClientMessageId,
-                controlTurnId = payloadControlTurnId ?: existing.controlTurnId,
+                turnClientMessageId = target.clientMessageId ?: existing.turnClientMessageId,
+                controlTurnId = target.controlTurnId ?: existing.controlTurnId,
             )
         }
-        val active = database.messages().activeAssistantTurn(sessionId)
+        val active = database.messages().activeAssistantTurn(target.sessionId)
         if (active != null) {
             throw IllegalArgumentException(
-                "同一会话出现重叠 turn: ${active.messageId.removePrefix("assistant:")} -> $turnId",
+                "同一会话出现重叠 turn: ${active.messageId.removePrefix("assistant:")} -> ${target.turnId}",
             )
         }
         // 3. 没有 turn.started 的 legacy 恢复流才以 attempt 身份创建首个本地投影
-        val controlTurnId = payloadControlTurnId ?: turnId
+        val controlTurnId = target.controlTurnId ?: target.turnId
         requireControlTurnId(controlTurnId)
         val message = MessageEntity(
-            messageId = messageId,
+            messageId = target.messageId,
             clientMessageId = null,
-            sessionId = sessionId,
+            sessionId = target.sessionId,
             role = "assistant",
             text = "",
             deliveryState = "streaming",
             createdAt = updatedAt,
             updatedAt = updatedAt,
-            turnClientMessageId = payloadClientMessageId,
+            turnClientMessageId = target.clientMessageId,
             controlTurnId = controlTurnId,
         )
         database.messages().upsert(message)
         return message
     }
 
+    /** 已建立的 thinking 块走单次 UPDATE；首段与 legacy 补绑走完整校验。 */
     private suspend fun appendThinking(envelope: WireEnvelope, updatedAt: Long) {
-        val message = ensureAssistantTurn(envelope, updatedAt)
-        val turnId = requireNotNull(envelope.turnId)
+        val target = assistantTurnTarget(envelope)
         val blockId = requireNotNull(payloadText(envelope, "block_id")) {
             "Thinking delta has no block_id"
         }
         val ordinal = requireNotNull(payloadLong(envelope, "ordinal")) {
             "Thinking delta has no ordinal"
         }.toInt()
-        val previous = database.messages().getBlock(blockId)
-        database.messages().upsertBlocks(
-            listOf(
-                TurnBlockEntity(
-                    blockId = blockId,
-                    messageId = message.messageId,
-                    turnId = turnId,
-                    ordinal = previous?.ordinal ?: ordinal,
-                    kind = "thinking",
-                    status = "running",
-                    content = (previous?.content ?: "") + requireNotNull(payloadText(envelope, "delta")),
-                    updatedAt = updatedAt,
-                ),
-            ),
+        val delta = requireNotNull(payloadText(envelope, "delta"))
+        // 1. 正常增量不读回不断增长的整块正文。
+        val changed = database.messages().appendThinkingDelta(
+            blockId = blockId,
+            messageId = target.messageId,
+            sessionId = target.sessionId,
+            turnId = target.turnId,
+            ordinal = ordinal,
+            controlTurnId = target.controlTurnId,
+            clientMessageId = target.clientMessageId,
+            delta = delta,
+            updatedAt = updatedAt,
         )
+        if (changed == 0) {
+            // 2. 首段建立块；legacy 迟到身份先补绑，再重试同一条受约束 UPDATE。
+            val message = ensureAssistantTurn(envelope, updatedAt)
+            val retried = database.messages().appendThinkingDelta(
+                blockId = blockId,
+                messageId = target.messageId,
+                sessionId = target.sessionId,
+                turnId = target.turnId,
+                ordinal = ordinal,
+                controlTurnId = target.controlTurnId,
+                clientMessageId = target.clientMessageId,
+                delta = delta,
+                updatedAt = updatedAt,
+            )
+            if (retried == 1) return
+            check(database.messages().getBlock(blockId) == null) {
+                "Thinking delta block identity mismatch after turn binding: $blockId"
+            }
+            database.messages().upsertBlocks(
+                listOf(
+                    TurnBlockEntity(
+                        blockId = blockId,
+                        messageId = message.messageId,
+                        turnId = target.turnId,
+                        ordinal = ordinal,
+                        kind = "thinking",
+                        status = "running",
+                        content = delta,
+                        updatedAt = updatedAt,
+                    ),
+                ),
+            )
+        }
     }
 
     private suspend fun startTool(envelope: WireEnvelope, updatedAt: Long) {
@@ -1233,15 +1283,33 @@ class LocalDeliveryStore(
         )
     }
 
+    /** 已建立的 answer 走单次 UPDATE；缺失投影或 legacy 补绑再走恢复路径。 */
     private suspend fun appendAnswer(envelope: WireEnvelope, updatedAt: Long) {
-        val current = ensureAssistantTurn(envelope, updatedAt)
-        database.messages().upsert(
-            current.copy(
-                text = current.text + requireNotNull(payloadText(envelope, "delta")),
-                deliveryState = "streaming",
-                updatedAt = updatedAt,
-            ),
+        val target = assistantTurnTarget(envelope)
+        val delta = requireNotNull(payloadText(envelope, "delta"))
+        // 1. 正常增量由 SQLite 原子追加，不把完整旧正文搬回 Kotlin。
+        val changed = database.messages().appendAnswerDelta(
+            messageId = target.messageId,
+            sessionId = target.sessionId,
+            controlTurnId = target.controlTurnId,
+            clientMessageId = target.clientMessageId,
+            delta = delta,
+            updatedAt = updatedAt,
         )
+        if (changed == 0) {
+            // 2. 只有缺失 turn 或迟到身份才读取、校验并重试。
+            val current = ensureAssistantTurn(envelope, updatedAt)
+            check(
+                database.messages().appendAnswerDelta(
+                    messageId = current.messageId,
+                    sessionId = current.sessionId,
+                    controlTurnId = target.controlTurnId,
+                    clientMessageId = target.clientMessageId,
+                    delta = delta,
+                    updatedAt = updatedAt,
+                ) == 1,
+            ) { "Answer delta target is not the active assistant message: ${current.messageId}" }
+        }
     }
 
     private suspend fun finalizeMessage(

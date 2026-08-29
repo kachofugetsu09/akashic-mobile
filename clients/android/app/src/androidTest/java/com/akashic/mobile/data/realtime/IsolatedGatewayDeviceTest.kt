@@ -3,17 +3,24 @@ package com.akashic.mobile.data.realtime
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.akashic.mobile.App
+import com.akashic.mobile.MainActivity
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.domain.model.ConnectionPhase
 import java.io.File
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -24,6 +31,62 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class IsolatedGatewayDeviceTest {
+    @Test
+    fun streamsLongTurnThroughVisibleWebView() = runBlocking<Unit> {
+        val arguments = InstrumentationRegistry.getArguments()
+        val offer = String(
+            Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT),
+            Charsets.UTF_8,
+        )
+        val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        withTimeout(TIMEOUT_MILLIS) {
+            session.state.first { it.hasProfile && it.connection.phase == ConnectionPhase.READY }
+        }
+        session.selectSession(sessionId)
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.currentSessionId == sessionId } }
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            awaitWebViewReady(scenario)
+            installFrameRecorder(scenario)
+            val startedAt = SystemClock.elapsedRealtime()
+            session.sendMessage("Android 流式性能基准")
+            withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId != null } }
+            withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId == null } }
+            val completedGraph = graph(app, sessionId) { messages ->
+                messages.count { message ->
+                    message.message.role == "assistant" &&
+                        message.message.deliveryState == "complete" &&
+                        message.message.text.length == 1_237
+                } == 1
+            }
+            val completed = completedGraph.single { message ->
+                message.message.role == "assistant" &&
+                    message.message.deliveryState == "complete" &&
+                    message.message.text.length == 1_237
+            }
+            val completionMillis = SystemClock.elapsedRealtime() - startedAt
+            val frameSummary = readFrameSummary(scenario)
+
+            assertEquals(8_213, completed.blocks.filter { it.kind == "thinking" }.sumOf { it.content.length })
+            assertEquals(6, completed.blocks.count { it.kind == "tool" && it.status == "completed" })
+            assertTrue("流式 turn 应在 25 秒内完成，实际 ${completionMillis}ms", completionMillis < 25_000)
+            assertTrue("可见文字更新不足: ${frameSummary.renderCount}", frameSummary.renderCount >= 40)
+            assertTrue("可见文字更新 p50 过慢: ${frameSummary.renderP50}ms", frameSummary.renderP50 <= 100.0)
+            assertTrue("可见文字更新 p95 过慢: ${frameSummary.renderP95}ms", frameSummary.renderP95 <= 175.0)
+            assertTrue("页面帧 p95 过慢: ${frameSummary.frameP95}ms", frameSummary.frameP95 <= 75.0)
+            Log.i(
+                "AkashicStreamPerf",
+                "stage=frame_summary completion_ms=$completionMillis json=${frameSummary.rawJson}",
+            )
+        }
+    }
+
     @Test
     fun freshEmptyCoreBecomesReadyAndCreatesFirstSession() = runBlocking<Unit> {
         val offer = String(
@@ -255,6 +318,118 @@ class IsolatedGatewayDeviceTest {
         app.container.database.messages().observeMessageGraph(sessionId).first(predicate)
     }
 
+    private suspend fun awaitWebViewReady(scenario: ActivityScenario<MainActivity>) {
+        withTimeout(TIMEOUT_MILLIS) {
+            while (true) {
+                var ready = false
+                scenario.onActivity { activity ->
+                    ready = activity.window.decorView.findWebView()?.progress == 100
+                }
+                if (ready) return@withTimeout
+                kotlinx.coroutines.delay(50)
+            }
+        }
+    }
+
+    private suspend fun installFrameRecorder(scenario: ActivityScenario<MainActivity>) {
+        evaluateJavascript(
+            scenario,
+            """
+            (() => {
+              const state = { last: 0, gaps: [], renderTimes: [], lastText: "", messageId: null };
+              window.__akashicFramePerf = state;
+              const tick = (now) => {
+                if (state.last > 0) state.gaps.push(now - state.last);
+                state.last = now;
+                requestAnimationFrame(tick);
+              };
+              const recordVisibleText = () => {
+                let message = state.messageId === null
+                  ? document.querySelector('[data-message-id^="assistant:"].streaming')
+                  : document.querySelector('[data-message-id="' + CSS.escape(state.messageId) + '"]');
+                if (!message) return;
+                state.messageId ??= message.getAttribute("data-message-id");
+                const text = message.textContent ?? "";
+                if (text === state.lastText) return;
+                state.lastText = text;
+                state.renderTimes.push(performance.now());
+              };
+              new MutationObserver(recordVisibleText).observe(document.body, {
+                attributes: true,
+                childList: true,
+                characterData: true,
+                subtree: true,
+              });
+              requestAnimationFrame(tick);
+              return true;
+            })()
+            """.trimIndent(),
+        )
+    }
+
+    private suspend fun readFrameSummary(
+        scenario: ActivityScenario<MainActivity>,
+    ): FrameSummary {
+        val encoded = evaluateJavascript(
+            scenario,
+            """
+        (() => {
+          const values = [...(window.__akashicFramePerf?.gaps ?? [])].sort((a, b) => a - b);
+          const renderTimes = window.__akashicFramePerf?.renderTimes ?? [];
+          const renderGaps = renderTimes.slice(1).map((value, index) => value - renderTimes[index]).sort((a, b) => a - b);
+          const percentile = (p) => values.length === 0 ? -1 : values[Math.floor((values.length - 1) * p)];
+          const renderPercentile = (p) => renderGaps.length === 0 ? -1 : renderGaps[Math.floor((renderGaps.length - 1) * p)];
+          return JSON.stringify({
+            count: values.length,
+            p50: percentile(0.50),
+            p95: percentile(0.95),
+            p99: percentile(0.99),
+            max: percentile(1),
+            over16: values.filter((value) => value > 16.7).length,
+            over33: values.filter((value) => value > 33.3).length,
+            over50: values.filter((value) => value > 50).length,
+            renderCount: renderTimes.length,
+            renderP50: renderPercentile(0.50),
+            renderP95: renderPercentile(0.95),
+            renderP99: renderPercentile(0.99),
+            renderMax: renderPercentile(1),
+          });
+        })()
+        """.trimIndent(),
+        )
+        val rawJson = Json.parseToJsonElement(encoded).jsonPrimitive.content
+        val value = Json.parseToJsonElement(rawJson).jsonObject
+        return FrameSummary(
+            frameP95 = requireNotNull(value["p95"]).jsonPrimitive.double,
+            renderCount = requireNotNull(value["renderCount"]).jsonPrimitive.double.toInt(),
+            renderP50 = requireNotNull(value["renderP50"]).jsonPrimitive.double,
+            renderP95 = requireNotNull(value["renderP95"]).jsonPrimitive.double,
+            rawJson = rawJson,
+        )
+    }
+
+    private suspend fun evaluateJavascript(
+        scenario: ActivityScenario<MainActivity>,
+        script: String,
+    ): String {
+        val result = CompletableDeferred<String>()
+        scenario.onActivity { activity ->
+            requireNotNull(activity.window.decorView.findWebView()).evaluateJavascript(script) {
+                result.complete(it)
+            }
+        }
+        return withTimeout(TIMEOUT_MILLIS) { result.await() }
+    }
+
+    private fun View.findWebView(): WebView? {
+        if (this is WebView) return this
+        if (this !is ViewGroup) return null
+        for (index in 0 until childCount) {
+            getChildAt(index).findWebView()?.let { return it }
+        }
+        return null
+    }
+
     private companion object {
         const val ISOLATED_REPLY_PREFIX = "## WebUI 试点"
         const val TIMEOUT_MILLIS = 60_000L
@@ -273,5 +448,13 @@ class IsolatedGatewayDeviceTest {
         val kind: String,
         val status: String,
         val content: String,
+    )
+
+    private data class FrameSummary(
+        val frameP95: Double,
+        val renderCount: Int,
+        val renderP50: Double,
+        val renderP95: Double,
+        val rawJson: String,
     )
 }

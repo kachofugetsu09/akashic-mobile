@@ -513,6 +513,49 @@ class LocalDeliveryStoreTest {
         assertEquals("一致绑定", database.messages().get("assistant:flow-turn")!!.text)
     }
 
+    /** legacy thinking 首段建立投影后，后续显式身份先补绑再继续原块。 */
+    @Test
+    fun thinkingDeltaBindsLateClientMessageIdBeforeFastAppend() = runBlocking {
+        val blockId = "thinking:legacy-flow-turn:0"
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "react.thinking.delta",
+                buildJsonObject {
+                    put("block_id", blockId)
+                    put("ordinal", 0)
+                    put("delta", "先")
+                },
+                turnId = "legacy-flow-turn",
+            ),
+            2,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "react.thinking.delta",
+                buildJsonObject {
+                    put("block_id", blockId)
+                    put("ordinal", 0)
+                    put("delta", "继续")
+                    put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                },
+                turnId = "legacy-flow-turn",
+            ),
+            3,
+        )
+
+        assertEquals("先继续", database.messages().getBlock(blockId)!!.content)
+        assertEquals(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            database.messages().get("assistant:legacy-flow-turn")!!.turnClientMessageId,
+        )
+    }
+
     /** final 丢失时 seq 行计数与远端不相等，历史请求不会跳过，heal 路径可达。 */
     @Test
     fun finalLostHistoryNotSkippedBecauseSeqRowsCountOnly() = runBlocking {
@@ -2267,7 +2310,13 @@ class LocalDeliveryStoreTest {
 
     @Test
     fun canonicalHistoryReplacesCompletedTurnWhoseFinalEventWasLost() = runBlocking {
-        store.applyEvent("server", "device", event(1, "turn.started", buildJsonObject {}), 2)
+        val activeCreatedAt = Instant.parse("2026-07-14T16:00:06Z").toEpochMilli()
+        store.applyEvent(
+            "server",
+            "device",
+            event(1, "turn.started", buildJsonObject {}),
+            activeCreatedAt,
+        )
         database.messages().upsert(
             MessageEntity(
                 messageId = "user:history-owner",
@@ -2331,6 +2380,14 @@ class LocalDeliveryStoreTest {
         )
         assertTrue(database.messages().getBlocks(canonical.messageId).all { it.status == "completed" })
         assertTrue(database.messages().activeAssistantTurns("server").isEmpty())
+        assertEquals(
+            canonical.messageId,
+            database.messages()
+                .observeMessageGraphFrom("akashic:test", activeCreatedAt, "turn")
+                .first()
+                .single { it.message.controlTurnId == "turn" }
+                .message.messageId,
+        )
     }
 
     @Test

@@ -1,6 +1,8 @@
 package com.akashic.mobile
 
 import com.akashic.mobile.data.local.ConversationSummary
+import com.akashic.mobile.data.local.MessageEntity
+import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.canRemoveFrom
 import com.akashic.mobile.data.local.isRemoteMissingIn
@@ -15,6 +17,23 @@ import org.junit.Assert.assertSame
 import org.junit.Test
 
 class MainViewModelTest {
+    @Test
+    fun streamingTailReplacesLiveRowsWithoutRebuildingSettledHistory() {
+        val settled = messageGraph("settled", createdAt = 1, text = "old")
+        val activeBefore = messageGraph("active", createdAt = 2, text = "a")
+        val activeAfter = messageGraph("active", createdAt = 2, text = "ab")
+        val sameTurnInput = messageGraph("input", createdAt = 3, text = "继续")
+
+        val merged = mergeStreamingTail(
+            frozenPrefix = listOf(settled, activeBefore),
+            liveTail = listOf(activeAfter, sameTurnInput),
+        )
+
+        assertSame(settled, merged[0])
+        assertSame(activeAfter, merged[1])
+        assertSame(sameTurnInput, merged[2])
+    }
+
     @Test
     fun historyReloadRemainsAvailableDuringProtocolReconnect() {
         val degraded = MobileSessionState(
@@ -167,3 +186,22 @@ class MainViewModelTest {
         assertEquals(false, pending.canRemoveFrom(emptySet()))
     }
 }
+
+private fun messageGraph(
+    id: String,
+    createdAt: Long,
+    text: String,
+): MessageWithBlocks = MessageWithBlocks(
+    message = MessageEntity(
+        messageId = id,
+        clientMessageId = null,
+        sessionId = "akashic:test",
+        role = "assistant",
+        text = text,
+        deliveryState = "streaming",
+        createdAt = createdAt,
+        updatedAt = createdAt,
+    ),
+    blocks = emptyList(),
+    attachmentLinks = emptyList(),
+)
