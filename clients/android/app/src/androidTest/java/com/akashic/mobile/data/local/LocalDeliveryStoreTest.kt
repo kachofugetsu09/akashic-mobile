@@ -126,6 +126,33 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun remoteTurnStartedProjectsUserWithoutCreatingOutboxWork() = runBlocking {
+        val clientId = "01945f4c-2000-7000-8000-000000000001"
+
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject {
+                    put("client_message_id", clientId)
+                    put("content", "Web 发出的消息")
+                },
+            ),
+            2,
+        )
+
+        val user = requireNotNull(database.messages().get("user:$clientId"))
+        assertEquals("user", user.role)
+        assertEquals("Web 发出的消息", user.text)
+        assertEquals("complete", user.deliveryState)
+        assertEquals(clientId, user.clientMessageId)
+        assertEquals(emptyList<OutboxCommandEntity>(), database.outbox().pending("server"))
+        assertEquals(clientId, database.messages().get("assistant:turn")!!.turnClientMessageId)
+    }
+
+    @Test
     fun turnStartedRejectsInvalidClientMessageId() = runBlocking {
         assertThrows(IllegalArgumentException::class.java) {
             runBlocking {

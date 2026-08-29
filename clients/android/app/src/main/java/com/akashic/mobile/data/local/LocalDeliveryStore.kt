@@ -606,7 +606,7 @@ class LocalDeliveryStore(
             "session.list" -> applySessionList(serverId, envelope)
             "session.created", "session.updated" -> upsertConversation(serverId, envelope, updatedAt)
             "history.page" -> applyHistoryPage(serverId, envelope)
-            "turn.started" -> ensureAssistantTurn(envelope, updatedAt)
+            "turn.started" -> applyTurnStarted(envelope, updatedAt)
             "react.thinking.delta" -> appendThinking(envelope, updatedAt)
             "react.tool.started" -> startTool(envelope, updatedAt)
             "react.tool.completed" -> completeTool(envelope, updatedAt)
@@ -1020,6 +1020,37 @@ class LocalDeliveryStore(
         if (!current.remoteKnown) {
             check(database.conversations().markRemoteKnown(sessionId) == 1)
         }
+    }
+
+    /** 把远端 Turn 的用户输入与 assistant 流投影到同一条消息链。 */
+    private suspend fun applyTurnStarted(envelope: WireEnvelope, updatedAt: Long) {
+        val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
+        val clientMessageId = payloadText(envelope, "client_message_id")
+        val content = payloadText(envelope, "content")
+        if (clientMessageId != null) {
+            requireFrameId(clientMessageId)
+            val userContent = content ?: ""
+            val existing = database.messages().getByClientMessageId(clientMessageId)
+            if (existing == null) {
+                database.messages().upsert(
+                    MessageEntity(
+                        messageId = "user:$clientMessageId",
+                        clientMessageId = clientMessageId,
+                        sessionId = sessionId,
+                        role = "user",
+                        text = userContent,
+                        deliveryState = "complete",
+                        createdAt = (updatedAt - 1).coerceAtLeast(0),
+                        updatedAt = updatedAt,
+                    ),
+                )
+            } else {
+                require(existing.sessionId == sessionId && existing.role == "user") {
+                    "Turn client_message_id 已属于其他消息: $clientMessageId"
+                }
+            }
+        }
+        ensureAssistantTurn(envelope, updatedAt)
     }
 
     private data class AssistantTurnTarget(
