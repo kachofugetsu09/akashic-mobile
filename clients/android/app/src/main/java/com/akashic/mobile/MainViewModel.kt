@@ -312,9 +312,7 @@ class MainViewModel(
                 .distinctUntilChanged()
             else -> flow {
                 val initial = container.database.messages().observeMessageGraph(sessionId).first()
-                val activeIndex = initial.indexOfFirst {
-                    it.message.controlTurnId == state.activeTurnId
-                }
+                val activeIndex = activeTurnIndex(initial, state.activeTurnId)
                 check(activeIndex >= 0) {
                     "活动 turn ${state.activeTurnId} 缺少已持久化的助手投影"
                 }
@@ -1033,6 +1031,10 @@ internal fun mergeStreamingTail(
     val liveIds = liveTail.mapTo(hashSetOf()) { it.message.messageId }
     return frozenPrefix.filterNot { it.message.messageId in liveIds } + liveTail
 }
+
+/** 按 streaming 投影的持久主键定位活动 turn。 */
+internal fun activeTurnIndex(messages: List<MessageWithBlocks>, turnId: String): Int =
+    messages.indexOfFirst { it.message.messageId == "assistant:$turnId" }
 
 internal fun canReloadServerProjection(session: MobileSessionState): Boolean =
     session.hasProfile &&
