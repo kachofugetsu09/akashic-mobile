@@ -30,6 +30,27 @@ import org.junit.Test
 
 class MobileWebSnapshotTest {
     @Test
+    fun assistantProjectionCarriesCoreControlTurnId() {
+        val assistant = MessageUi.AssistantTurn(
+            id = "message:assistant:canonical",
+            sessionId = "akashic:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "回答",
+            status = AssistantTurnStatus.COMPLETE,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+            controlTurnId = "turn:logical",
+        )
+
+        val projected = assistant.toMobileWebMessage()
+        val encoded = Json.parseToJsonElement(Json.encodeToString(projected)).jsonObject
+
+        assertEquals("turn:logical", projected.controlTurnId)
+        assertEquals("turn:logical", encoded["controlTurnId"]?.jsonPrimitive?.content)
+    }
+
+    @Test
     fun defersHistoryGrowthUntilResyncBecomesReady() {
         val delivered = EmptyConversationState.copy(
             selectedSessionId = "akashic:test",
