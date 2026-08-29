@@ -18,6 +18,19 @@ import org.junit.Test
 
 class MainViewModelTest {
     @Test
+    fun activeTurnUsesPersistedStreamingMessageIdentity() {
+        val settled = messageGraph("message:settled", createdAt = 1, text = "old")
+        val legacyActive = messageGraph(
+            "assistant:turn:legacy",
+            createdAt = 2,
+            text = "",
+        )
+
+        assertEquals(1, activeTurnIndex(listOf(settled, legacyActive), "turn:legacy"))
+        assertEquals(-1, activeTurnIndex(listOf(settled), "turn:legacy"))
+    }
+
+    @Test
     fun streamingTailReplacesLiveRowsWithoutRebuildingSettledHistory() {
         val settled = messageGraph("settled", createdAt = 1, text = "old")
         val activeBefore = messageGraph("active", createdAt = 2, text = "a")
