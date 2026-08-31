@@ -490,7 +490,7 @@ class LocalDeliveryStore(
                 }
                 check(database.attachmentTransfers().markSent(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
             }
-            check(database.outbox().deleteAcknowledged(commandId) == 1) { "Outbox command disappeared: $commandId" }
+            check(database.outbox().markAccepted(commandId) == 1) { "Outbox command disappeared: $commandId" }
             payload.mediaRefs
         }
 
@@ -559,7 +559,11 @@ class LocalDeliveryStore(
                 check(database.messages().updateDelivery(clientMessageId, "pending", updatedAt) == 1)
             } else {
                 require(command.state == "failed_retryable") { "Message is not retryable: ${command.state}" }
-                val retryPayload = payload.copy(clientMessageId = newCommandId)
+                val retryPayload = payload.copy(
+                    clientMessageId = newCommandId,
+                    retryOfClientMessageId = payload.retryOfClientMessageId
+                        ?: payload.clientMessageId,
+                )
                 val retryEnvelope = envelope.copy(
                     id = newCommandId,
                     payload = ProtocolCodec.json().encodeToJsonElement(
@@ -1377,6 +1381,12 @@ class LocalDeliveryStore(
         check(database.messages().updateDelivery(clientMessageId, "complete", updatedAt) == 1) {
             "Optimistic user message disappeared"
         }
+        database.outbox().get(clientMessageId)?.let { command ->
+            check(command.state == "accepted") { "Terminal user outbox is not accepted: ${command.state}" }
+            check(database.outbox().deleteAcknowledged(clientMessageId) == 1) {
+                "Terminal user outbox disappeared: $clientMessageId"
+            }
+        }
     }
 
     /** 把流式或 optimistic 消息原子迁移到服务端 canonical identity。 */
@@ -1445,9 +1455,54 @@ class LocalDeliveryStore(
     }
 
     private suspend fun interruptTurn(envelope: WireEnvelope, updatedAt: Long) {
+        val terminalStatus = requireNotNull(payloadText(envelope, "status")) {
+            "turn.interrupted 缺少 status"
+        }
+        require(terminalStatus in setOf("failed", "cancelled", "interrupted")) {
+            "turn.interrupted status 不受支持: $terminalStatus"
+        }
+        settleInterruptedOptimisticUser(envelope, terminalStatus, updatedAt)
         val current = ensureAssistantTurn(envelope, updatedAt)
-        database.messages().upsert(current.copy(deliveryState = "interrupted", updatedAt = updatedAt))
+        database.messages().upsert(current.copy(deliveryState = terminalStatus, updatedAt = updatedAt))
         database.messages().completeRunningBlocks(current.messageId, updatedAt)
+    }
+
+    /** Provider 终态负责释放 ACK 后保留的 outbox，并只为明确可重试失败恢复入口。 */
+    private suspend fun settleInterruptedOptimisticUser(
+        envelope: WireEnvelope,
+        terminalStatus: String,
+        updatedAt: Long,
+    ) {
+        val clientMessageId = payloadText(envelope, "client_message_id") ?: return
+        requireFrameId(clientMessageId)
+        val source = database.messages().getByClientMessageId(clientMessageId) ?: return
+        if (source.role != "user" || source.deliveryState !in setOf("pending", "sent")) return
+        val command = database.outbox().get(clientMessageId)
+        if (command != null) require(command.state == "accepted") {
+            "Terminal user outbox is not accepted: ${command.state}"
+        }
+        if (terminalStatus != "failed") {
+            check(database.messages().updateDelivery(clientMessageId, "complete", updatedAt) == 1)
+            if (command != null) check(database.outbox().deleteAcknowledged(clientMessageId) == 1)
+            return
+        }
+
+        val retryable = envelope.payload["retryable"]?.jsonPrimitive?.booleanOrNull
+            ?: error("failed terminal 缺少 retryable")
+        val state = if (retryable) "failed_retryable" else "failed"
+        check(database.messages().updateDelivery(clientMessageId, state, updatedAt) == 1)
+        if (command == null) return
+        val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(
+            ProtocolCodec.decode(command.envelopeJson).payload,
+        )
+        if (payload.mediaRefs.isNotEmpty()) {
+            check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+        }
+        if (retryable) {
+            check(database.outbox().markAcceptedFailed(clientMessageId, state) == 1)
+        } else {
+            check(database.outbox().deleteAcknowledged(clientMessageId) == 1)
+        }
     }
 
     /** 持久化附件元数据并幂等关联消息。 */

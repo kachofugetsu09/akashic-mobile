@@ -1915,6 +1915,7 @@ class LocalDeliveryStoreTest {
             store.acknowledgeOutbox(command.id, 3),
         )
         assertEquals("sent", database.attachmentTransfers().get("attachment")!!.state)
+        assertEquals("accepted", database.outbox().get(command.id)!!.state)
         assertTrue(database.conversations().get("akashic:test")!!.remoteKnown)
         assertEquals(
             listOf("attachment"),
@@ -1939,9 +1940,52 @@ class LocalDeliveryStoreTest {
         assertEquals(newCommandId, message.clientMessageId)
         assertEquals("pending", message.deliveryState)
         assertEquals(newCommandId, payload.clientMessageId)
+        assertEquals(oldCommandId, payload.retryOfClientMessageId)
         assertEquals(2_000, command.createdAt)
         assertEquals(null, database.outbox().get(oldCommandId))
         assertEquals(1, database.messages().countForSession("akashic:test"))
+    }
+
+    @Test
+    fun providerFailureKeepsOneUserMessageAndRestoresExplicitRetry() = runBlocking {
+        val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        enqueueRetryableMessage(commandId, createdAt = 2_000)
+        store.markOutboxAttempt(commandId, attemptedAt = 2_100)
+        store.acknowledgeOutbox(commandId, updatedAt = 2_200)
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject {
+                    put("client_message_id", commandId)
+                    put("control_turn_id", "turn")
+                },
+            ),
+            2_300,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "turn.interrupted",
+                buildJsonObject {
+                    put("status", "failed")
+                    put("message", "provider offline")
+                    put("retryable", true)
+                    put("client_message_id", commandId)
+                    put("control_turn_id", "turn")
+                },
+            ),
+            2_400,
+        )
+
+        assertEquals("failed_retryable", database.messages().get("visual-message")!!.deliveryState)
+        assertEquals("failed", database.messages().get("assistant:turn")!!.deliveryState)
+        assertEquals("failed_retryable", database.outbox().get(commandId)!!.state)
+        assertEquals(2, database.messages().countForSession("akashic:test"))
     }
 
     @Test

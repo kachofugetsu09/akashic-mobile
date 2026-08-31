@@ -233,6 +233,26 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `round trips explicit failed message retry identity`() {
+        val payload = MessageSendPayload(
+            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAW",
+            retryOfClientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            sessionId = "akashic:one",
+            text = "重试",
+            mediaRefs = emptyList(),
+            clientCreatedAt = "2026-08-31T00:00:00Z",
+        )
+
+        val encoded = ProtocolCodec.json().encodeToJsonElement(
+            MessageSendPayload.serializer(),
+            payload,
+        ).jsonObject
+        val decoded = ProtocolCodec.decodePayload<MessageSendPayload>(encoded)
+
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", decoded.retryOfClientMessageId)
+    }
+
+    @Test
     fun `round trips explicit model selection while old payload omits it`() {
         val selected = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",

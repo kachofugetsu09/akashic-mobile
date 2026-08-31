@@ -134,6 +134,10 @@ WebUI `ReleaseView`、Target、manifest、短期 ticket 和 HTTPS 资源协议�
 
 `Turn` 是用户可理解的逻辑工作单元，`Attempt` 是其内部一次可中断、可重放的执行。Mobile 实时事件的 `turn_id` 标识 Attempt，`control_turn_id` 标识逻辑 Turn；客户端必须用 Attempt 维持流式生命周期，用逻辑 Turn 与 canonical history 合并，不得要求跨 Attempt 的两个身份相等，也不得在任一身份内部接受漂移。缺少 `control_turn_id` 的旧协议事件继续把 `turn_id` 作为逻辑身份兼容。
 
+### MOB-XREPO-006 失败终态与显式重试保持原语义
+
+`failed`、`cancelled` 与 `interrupted` 必须作为三个终态写入 Room 并原样投影到 WebUI。`message.send.ok` 只表示 Core 已接受命令；客户端保留该 outbox owner，直到 `message.final` 或 `turn.interrupted` 才删除或转为失败状态。只有带 `retryable=true` 的 failed 终态提供重试；显式重试复用原视觉 user message 和稳定来源 identity，同时生成新的命令 identity 与 Attempt。普通再次发送始终创建新 user message，不按正文、时间或相邻位置猜测重试。
+
 ## 7. 仓库与安全边界
 
 ### MOB-REPO-001 移动端仓库可独立构建

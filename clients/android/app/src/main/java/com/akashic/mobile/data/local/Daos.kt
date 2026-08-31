@@ -612,8 +612,14 @@ interface OutboxDao {
     @Query("UPDATE outbox_commands SET state = 'retry' WHERE commandId = :commandId AND state = 'in_flight'")
     suspend fun markForRetry(commandId: String): Int
 
+    @Query("UPDATE outbox_commands SET state = 'accepted' WHERE commandId = :commandId AND state = 'in_flight'")
+    suspend fun markAccepted(commandId: String): Int
+
     @Query("UPDATE outbox_commands SET state = :failureState WHERE commandId = :commandId AND state = 'in_flight'")
     suspend fun markFailed(commandId: String, failureState: String): Int
+
+    @Query("UPDATE outbox_commands SET state = :failureState WHERE commandId = :commandId AND state = 'accepted'")
+    suspend fun markAcceptedFailed(commandId: String, failureState: String): Int
 
     @Query(
         """

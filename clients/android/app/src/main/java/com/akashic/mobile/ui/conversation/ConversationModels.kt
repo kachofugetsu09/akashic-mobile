@@ -223,6 +223,8 @@ enum class AssistantTurnStatus {
     STREAMING,
     COMPLETE,
     INTERRUPTED,
+    CANCELLED,
+    FAILED,
 }
 
 data class MessageAttachmentUi(
