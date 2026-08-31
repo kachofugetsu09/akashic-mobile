@@ -340,6 +340,27 @@ class MobileWebSnapshotTest {
     }
 
     @Test
+    fun failedTerminalKeepsExactStatusInWebSnapshot() {
+        val failed = MessageUi.AssistantTurn(
+            id = "assistant:failed",
+            sessionId = "akashic:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "provider offline",
+            status = AssistantTurnStatus.FAILED,
+            durationSeconds = 2,
+            createdAtMillis = 1_000,
+        )
+
+        val json = Json.encodeToString(
+            EmptyConversationState.copy(messages = listOf(failed)).toMobileWebSnapshot(),
+        )
+
+        assertTrue(json.contains("\"terminalStatus\":\"failed\""))
+        assertTrue(!json.contains("\"interrupted\":true"))
+    }
+
+    @Test
     fun fullSnapshotStillIdentifiesCanonicalTerminalTransition() {
         val clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         val user = MessageUi.User(

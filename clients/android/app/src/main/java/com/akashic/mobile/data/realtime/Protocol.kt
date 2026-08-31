@@ -188,6 +188,8 @@ data class MessageReplyReference(
 data class MessageSendPayload(
     @SerialName("client_message_id")
     val clientMessageId: String,
+    @SerialName("retry_of_client_message_id")
+    val retryOfClientMessageId: String? = null,
     @SerialName("session_id")
     val sessionId: String,
     val text: String,

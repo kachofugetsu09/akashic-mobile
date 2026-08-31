@@ -167,9 +167,17 @@ data class MobileWebMessage(
     val blocks: List<MobileWebProcessBlock> = emptyList(),
     val streaming: Boolean = false,
     val interrupted: Boolean = false,
+    val terminalStatus: MobileWebTerminalStatus? = null,
     val durationSeconds: Int? = null,
     val attachments: List<MobileWebAttachment> = emptyList(),
 )
+
+@Serializable
+enum class MobileWebTerminalStatus {
+    @SerialName("failed") FAILED,
+    @SerialName("cancelled") CANCELLED,
+    @SerialName("interrupted") INTERRUPTED,
+}
 
 @Serializable
 enum class MobileWebDeliveryAction {
@@ -685,6 +693,12 @@ internal fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
         blocks = blocks.map(ProcessBlockUi::toMobileWebProcessBlock),
         streaming = status == AssistantTurnStatus.STREAMING,
         interrupted = status == AssistantTurnStatus.INTERRUPTED,
+        terminalStatus = when (status) {
+            AssistantTurnStatus.FAILED -> MobileWebTerminalStatus.FAILED
+            AssistantTurnStatus.CANCELLED -> MobileWebTerminalStatus.CANCELLED
+            AssistantTurnStatus.INTERRUPTED -> MobileWebTerminalStatus.INTERRUPTED
+            AssistantTurnStatus.STREAMING, AssistantTurnStatus.COMPLETE -> null
+        },
         durationSeconds = durationSeconds,
         attachments = attachments.map(MessageAttachmentUi::toMobileWebAttachment),
     )

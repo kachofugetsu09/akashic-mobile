@@ -1915,6 +1915,7 @@ class LocalDeliveryStoreTest {
             store.acknowledgeOutbox(command.id, 3),
         )
         assertEquals("sent", database.attachmentTransfers().get("attachment")!!.state)
+        assertEquals("accepted", database.outbox().get(command.id)!!.state)
         assertTrue(database.conversations().get("akashic:test")!!.remoteKnown)
         assertEquals(
             listOf("attachment"),
@@ -1939,9 +1940,172 @@ class LocalDeliveryStoreTest {
         assertEquals(newCommandId, message.clientMessageId)
         assertEquals("pending", message.deliveryState)
         assertEquals(newCommandId, payload.clientMessageId)
+        assertEquals(oldCommandId, payload.retryOfClientMessageId)
         assertEquals(2_000, command.createdAt)
         assertEquals(null, database.outbox().get(oldCommandId))
         assertEquals(1, database.messages().countForSession("akashic:test"))
+    }
+
+    @Test
+    fun providerFailureKeepsOneUserMessageAndRestoresExplicitRetry() = runBlocking {
+        val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        enqueueRetryableMessage(commandId, createdAt = 2_000)
+        store.markOutboxAttempt(commandId, attemptedAt = 2_100)
+        store.acknowledgeOutbox(commandId, updatedAt = 2_200)
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                1,
+                "turn.started",
+                buildJsonObject {
+                    put("client_message_id", commandId)
+                    put("control_turn_id", "turn")
+                },
+            ),
+            2_300,
+        )
+        store.applyEvent(
+            "server",
+            "device",
+            event(
+                2,
+                "turn.interrupted",
+                buildJsonObject {
+                    put("status", "failed")
+                    put("message", "provider offline")
+                    put("retryable", true)
+                    put("client_message_id", commandId)
+                    put("control_turn_id", "turn")
+                },
+            ),
+            2_400,
+        )
+
+        assertEquals("failed_retryable", database.messages().get("visual-message")!!.deliveryState)
+        assertEquals("failed", database.messages().get("assistant:turn")!!.deliveryState)
+        assertEquals("failed_retryable", database.outbox().get(commandId)!!.state)
+        assertEquals(2, database.messages().countForSession("akashic:test"))
+    }
+
+    @Test
+    fun acceptedFailureSurvivesRoomReopenAndRepeatedRetryKeepsOriginalSource() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val databaseName = "retry-recovery-${System.nanoTime()}.db"
+        context.deleteDatabase(databaseName)
+        var fileDatabase: AppDatabase? = null
+        try {
+            val firstDatabase = Room.databaseBuilder(context, AppDatabase::class.java, databaseName).build()
+            fileDatabase = firstDatabase
+            val firstStore = LocalDeliveryStore(
+                firstDatabase,
+                MediaCacheStore(context.cacheDir.resolve("media-recovery-${System.nanoTime()}"), firstDatabase.mediaAttachments()),
+                MessageContentStore(
+                    context.cacheDir.resolve("content-recovery-${System.nanoTime()}"),
+                    firstDatabase.messageContentTransfers(),
+                ),
+            )
+            firstStore.savePairedProfile(
+                ServerProfileEntity("server", "server", "device", "alias", "pin", "[]", "[]", "[]", 1),
+                RealtimeCursorEntity("device", "server", 0, 0, 1),
+            )
+            firstDatabase.conversations().upsert(ConversationEntity("akashic:test", "server", "test", 1))
+
+            val sourceId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+            val payload = MessageSendPayload(
+                clientMessageId = sourceId,
+                sessionId = "akashic:test",
+                text = "需要恢复的消息",
+                mediaRefs = listOf("attachment"),
+                clientCreatedAt = "2026-07-16T08:00:00Z",
+            )
+            val command = WireEnvelope(
+                v = 1,
+                kind = WireKind.COMMAND,
+                type = "message.send",
+                id = sourceId,
+                connectionEpoch = 1,
+                sessionId = "akashic:test",
+                payload = ProtocolCodec.json().encodeToJsonElement(
+                    MessageSendPayload.serializer(),
+                    payload,
+                ).jsonObject,
+            )
+            firstStore.enqueueMessage(
+                ConversationEntity("akashic:test", "server", "test", 1),
+                retryMessage("visual-message", sourceId, 2_000, null, "pending"),
+                OutboxCommandEntity(sourceId, "server", ProtocolCodec.encode(command), "pending", 0, 2_000, null),
+                listOf(mediaAttachment("attachment")),
+            )
+            firstStore.markOutboxAttempt(sourceId, 2_100)
+            firstStore.acknowledgeOutbox(sourceId, 2_200)
+            assertEquals("accepted", firstDatabase.outbox().get(sourceId)!!.state)
+            firstDatabase.close()
+            fileDatabase = null
+
+            val secondDatabase = Room.databaseBuilder(context, AppDatabase::class.java, databaseName).build()
+            fileDatabase = secondDatabase
+            val secondStore = LocalDeliveryStore(
+                secondDatabase,
+                MediaCacheStore(context.cacheDir.resolve("media-reopened-${System.nanoTime()}"), secondDatabase.mediaAttachments()),
+                MessageContentStore(
+                    context.cacheDir.resolve("content-reopened-${System.nanoTime()}"),
+                    secondDatabase.messageContentTransfers(),
+                ),
+            )
+            secondStore.applyEvent(
+                "server",
+                "device",
+                event(
+                    1,
+                    "turn.interrupted",
+                    buildJsonObject {
+                        put("status", "failed")
+                        put("message", "provider offline")
+                        put("retryable", true)
+                        put("client_message_id", sourceId)
+                        put("control_turn_id", "turn-1")
+                    },
+                    turnId = "turn-1",
+                ),
+                2_300,
+            )
+            assertEquals("failed_retryable", secondDatabase.outbox().get(sourceId)!!.state)
+            assertEquals("ready", secondDatabase.attachmentTransfers().get("attachment")!!.state)
+
+            val retry2 = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+            assertTrue(secondStore.retryFailedMessage("visual-message", retry2, 2_400))
+            secondStore.markOutboxAttempt(retry2, 2_500)
+            secondStore.acknowledgeOutbox(retry2, 2_600)
+            secondStore.applyEvent(
+                "server",
+                "device",
+                event(
+                    2,
+                    "turn.interrupted",
+                    buildJsonObject {
+                        put("status", "failed")
+                        put("message", "provider offline again")
+                        put("retryable", true)
+                        put("client_message_id", retry2)
+                        put("control_turn_id", "turn-2")
+                    },
+                    turnId = "turn-2",
+                ),
+                2_700,
+            )
+            val retry3 = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+            assertTrue(secondStore.retryFailedMessage("visual-message", retry3, 2_800))
+            val retryPayload = ProtocolCodec.decodePayload<MessageSendPayload>(
+                ProtocolCodec.decode(secondDatabase.outbox().get(retry3)!!.envelopeJson).payload,
+            )
+            assertEquals(sourceId, retryPayload.retryOfClientMessageId)
+            assertEquals(1, secondDatabase.messages().countForSession("akashic:test"))
+            assertEquals("ready", secondDatabase.attachmentTransfers().get("attachment")!!.state)
+        } finally {
+            fileDatabase?.close()
+            context.deleteDatabase(databaseName)
+        }
     }
 
     @Test

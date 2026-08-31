@@ -253,6 +253,12 @@
       "provider_test": "tests/mobile_webui/test_gateway_runtime.py::test_revoke_device_commits_offline_and_notifies_active_connection",
       "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/realtime/RealtimeWebSocketClientRevocationTest.kt",
       "consumer_test": "controlRevokeClosesCurrentRaceBeforeLateFramesCanUseIt"
+    },
+    {
+      "id": "failed-turn-explicit-retry-reuses-user-message",
+      "provider_test": "tests/control/test_channel_adapter.py::test_explicit_retry_reuses_user_message_and_starts_new_attempt",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
+      "consumer_test": "providerFailureKeepsOneUserMessageAndRestoresExplicitRetry"
     }
   ]
 }

@@ -997,12 +997,14 @@ class MainViewModel(
                 "streaming" -> AssistantTurnStatus.STREAMING
                 "complete" -> AssistantTurnStatus.COMPLETE
                 "interrupted" -> AssistantTurnStatus.INTERRUPTED
+                "cancelled" -> AssistantTurnStatus.CANCELLED
+                "failed" -> AssistantTurnStatus.FAILED
                 else -> error("未知助手消息状态: ${message.deliveryState}")
             },
             durationSeconds = turnDurationSeconds(
                 startedAt = message.createdAt,
                 updatedAt = message.updatedAt,
-                isTerminal = message.deliveryState in setOf("complete", "interrupted"),
+                isTerminal = message.deliveryState in setOf("complete", "interrupted", "cancelled", "failed"),
             ),
             createdAtMillis = message.createdAt,
             reply = message.toReplyUi(),
