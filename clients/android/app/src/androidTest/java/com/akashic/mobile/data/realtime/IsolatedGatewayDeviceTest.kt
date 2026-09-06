@@ -109,6 +109,8 @@ class IsolatedGatewayDeviceTest {
                     message.message.deliveryState == "complete" &&
                     message.message.text.length == 1_237
             }
+            // 终态跨桥与 DOM 更新必须落入测量窗口，不能在 Room 完成时提前截断。
+            awaitVisibleAnswer(scenario, completed)
             val completionMillis = SystemClock.elapsedRealtime() - startedAt
             val frameSummary = readFrameSummary(scenario)
 
@@ -123,7 +125,6 @@ class IsolatedGatewayDeviceTest {
             assertTrue("可见文字更新 p50 过慢: ${frameSummary.renderP50}ms", frameSummary.renderP50 <= 100.0)
             assertTrue("可见文字更新 p95 过慢: ${frameSummary.renderP95}ms", frameSummary.renderP95 <= 175.0)
             assertTrue("页面帧 p95 过慢: ${frameSummary.frameP95}ms", frameSummary.frameP95 <= 75.0)
-            awaitVisibleAnswer(scenario, completed)
             val projection = CompletableDeferred<StateFlow<ConversationUiState>>()
             scenario.onActivity { activity ->
                 projection.complete(ViewModelProvider(activity)[MainViewModel::class.java].conversationState)
