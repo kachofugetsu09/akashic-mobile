@@ -1253,6 +1253,8 @@ internal fun MobileWebChat(
                                 return true
                             }
                         }
+                        // 新 view 接管发送前先停旧 pump，不依赖旧 view 的 onRelease 顺序。
+                        snapshotPump?.cancel()
                         webView = this
                         val newSnapshotPump = MobileSnapshotPump(
                             this,
@@ -2171,7 +2173,8 @@ internal class MobileMediaResourceIndex {
     private val resources = AtomicReference<Map<String, MobileMediaResource>>(emptyMap())
 
     fun replace(next: Map<String, MobileMediaResource>) {
-        resources.set(next.toMap())
+        // 唯一生产调用移交新建后不再修改的资源快照，无需再复制一次。
+        resources.set(next)
     }
 
     fun resolve(path: String): MobileMediaResource? =
@@ -2308,15 +2311,14 @@ private class MobileSnapshotPump(
                         val terminalTransition = deliveredState
                             ?.takeIf { streamPatch == null }
                             ?.let(latest::terminalTransitionFrom)
+                        val nextMedia = if (streamPatch == null && statePatch == null) latest.mediaResources() else null
                         val payload = when {
                             streamPatch != null -> json.encodeToString(streamPatch)
                             statePatch != null -> json.encodeToString(statePatch)
-                            else -> {
-                                mediaRegistry.replace(latest.mediaResources())
-                                json.encodeToString(latest.toMobileWebSnapshot())
-                            }
+                            else -> json.encodeToString(latest.toMobileWebSnapshot())
                         }
                         withContext(Dispatchers.Main.immediate) {
+                            nextMedia?.let(mediaRegistry::replace)
                             when {
                                 streamPatch != null -> {
                                     webView.pushStreamPatch(payload)
