@@ -52,6 +52,7 @@ import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
 import com.akashic.mobile.ui.conversation.RuntimeJobUi
 import com.akashic.mobile.ui.conversation.RuntimeMcpUi
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
@@ -61,8 +62,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
@@ -302,48 +305,53 @@ class MainViewModel(
         viewModelScope.launch { container.preferences.setTheme(themeId) }
     }
 
-    private val conversationProjection = sessionState.flatMapLatest { state ->
-        val serverId = state.serverId
-        val sessionId = state.currentSessionId
-        val graph = when {
-            sessionId == null -> flowOf(emptyList())
-            state.activeTurnId == null -> container.database.messages()
-                .observeMessageGraph(sessionId)
-                .distinctUntilChanged()
-            else -> flow {
-                val initial = container.database.messages().observeMessageGraph(sessionId).first()
-                val activeIndex = activeTurnIndex(initial, state.activeTurnId)
-                check(activeIndex >= 0) {
-                    "活动 turn ${state.activeTurnId} 缺少已持久化的助手投影"
+    private val conversationProjection = sessionState
+        .map { Triple(it.serverId, it.currentSessionId, it.activeTurnId) }
+        .distinctUntilChanged()
+        .flatMapLatest { (serverId, sessionId, activeTurnId) ->
+            // 只在查询范围变化时重建订阅；连接、下载和停止状态独立更新。
+            val graph = when {
+                sessionId == null -> flowOf(emptyList())
+                activeTurnId == null -> container.database.messages()
+                    .observeMessageGraph(sessionId)
+                    .distinctUntilChanged()
+                else -> flow {
+                    val initial = container.database.messages().observeMessageGraph(sessionId).first()
+                    val activeIndex = activeTurnIndex(initial, activeTurnId)
+                    check(activeIndex >= 0) {
+                        "活动 turn $activeTurnId 缺少已持久化的助手投影"
+                    }
+                    val activeCreatedAt = initial[activeIndex].message.createdAt
+                    val frozenPrefix = initial.take(activeIndex)
+                    emitAll(
+                        container.database.messages()
+                            .observeMessageGraphFrom(sessionId, activeCreatedAt, activeTurnId)
+                            .map { liveTail -> mergeStreamingTail(frozenPrefix, liveTail) }
+                            .distinctUntilChanged(),
+                    )
                 }
-                val activeCreatedAt = initial[activeIndex].message.createdAt
-                val frozenPrefix = initial.take(activeIndex)
-                emitAll(
-                    container.database.messages()
-                        .observeMessageGraphFrom(sessionId, activeCreatedAt, state.activeTurnId)
-                        .map { liveTail -> mergeStreamingTail(frozenPrefix, liveTail) }
-                        .distinctUntilChanged(),
-                )
+            }
+            val messages = graph.map { currentGraph ->
+                projectMessages(sessionId, currentGraph)
+            }
+            val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
+            val composer = if (serverId == null || sessionId == null) {
+                flowOf(ComposerLocalState(emptyList(), null))
+            } else {
+                combine(
+                    container.database.attachmentTransfers().observeDrafts(serverId, sessionId),
+                    container.database.composerDrafts().observe(serverId, sessionId),
+                ) { attachments, draft ->
+                    ComposerLocalState(attachments, draft)
+                }
+            }
+            val currentSession = sessionState.filter {
+                it.serverId == serverId && it.currentSessionId == sessionId && it.activeTurnId == activeTurnId
+            }
+            combine(messages, conversations, composer, currentSession) { currentMessages, currentConversations, currentComposer, state ->
+                ConversationProjection(state, currentMessages, currentConversations, currentComposer)
             }
         }
-        val messages = graph.map { currentGraph ->
-            projectMessages(sessionId, currentGraph)
-        }
-        val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
-        val composer = if (serverId == null || sessionId == null) {
-            flowOf(ComposerLocalState(emptyList(), null))
-        } else {
-            combine(
-                container.database.attachmentTransfers().observeDrafts(serverId, sessionId),
-                container.database.composerDrafts().observe(serverId, sessionId),
-            ) { attachments, draft ->
-                ComposerLocalState(attachments, draft)
-            }
-        }
-        combine(messages, conversations, composer) { currentMessages, currentConversations, currentComposer ->
-            ConversationProjection(state, currentMessages, currentConversations, currentComposer)
-        }
-    }
 
     val conversationState = combine(
         conversationProjection,
@@ -491,7 +499,7 @@ class MainViewModel(
             modelCatalog = models.toUi(),
             runtimeInspection = runtime.toUi(),
         )
-    }.stateIn(
+    }.flowOn(Dispatchers.Default).stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
         ConversationUiState(

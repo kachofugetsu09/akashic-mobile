@@ -28,7 +28,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +38,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.webkit.WebResourceErrorCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.ServiceWorkerClientCompat
@@ -73,6 +75,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -323,7 +326,7 @@ private data class MobileWebUiOwner(
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 internal fun MobileWebChat(
-    state: ConversationUiState,
+    state: StateFlow<ConversationUiState>,
     themeId: String,
     onThemeChange: (String) -> Unit,
     onModelChange: (String, String) -> Unit,
@@ -971,7 +974,7 @@ internal fun MobileWebChat(
                                     if (!leaseStillCurrent()) return@post
                                     val pump = snapshotPump
                                     Log.i(MOBILE_WEB_LOG_TAG, "transport requestSnapshot: pumpReady=${pump != null}")
-                                    pump?.request(latestState)
+                                    pump?.request(latestState.value)
                                     pluginUiBridge?.publishCatalog(latestPluginUiCatalog)
                                 }
                             }
@@ -1337,7 +1340,17 @@ internal fun MobileWebChat(
         }
     }
 
-    SideEffect { snapshotPump?.submit(state) }
+    // 消息只送给当前 WebView，不为转发状态重组整个 Compose 宿主。
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(snapshotPump, state, lifecycleOwner) {
+        val pump = snapshotPump ?: return@LaunchedEffect
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            state.collect {
+                // onRelease 先关闭 pump，下一次重组才取消此收集器。
+                if (snapshotPump === pump) pump.submit(it)
+            }
+        }
+    }
     LaunchedEffect(webReady, sharedTextDraft?.id, sharedTextDraft?.revision, webView) {
         val current = webView
         val draft = latestSharedTextDraft
@@ -2291,6 +2304,13 @@ private class MobileSnapshotPump(
                 val statePatch = deliveredState
                     ?.takeUnless { forceSnapshot || streamPatch != null }
                     ?.let(latest::toMobileWebStatePatch)
+                val accompanyingStatePatch = deliveredState
+                    ?.takeIf {
+                        streamPatch != null && streamPatch.state == null &&
+                            it.copy(sessions = latest.sessions, messages = latest.messages) != latest
+                    }
+                    ?.let { latest.toMobileWebStatePatch(it.copy(messages = latest.messages)) }
+                    ?.let { json.encodeToString(it) }
                 val terminalTransition = deliveredState
                     ?.takeIf { streamPatch == null }
                     ?.let(latest::terminalTransitionFrom)
@@ -2306,6 +2326,7 @@ private class MobileSnapshotPump(
                     when {
                         streamPatch != null -> {
                             webView.pushStreamPatch(payload)
+                            accompanyingStatePatch?.let(webView::pushStatePatch)
                             traceStreamPatch(streamPatch)
                         }
                         statePatch != null -> webView.pushStatePatch(payload)
