@@ -437,6 +437,7 @@ class IsolatedGatewayDeviceTest {
                 last: 0, gaps: [], renderTimes: [], lastText: "", messageId: null,
                 snapshots: 0, snapshotChars: 0, streamPatches: 0, statePatches: 0,
                 longTasks: [], edits: 0, editTimer: null,
+                draftWrites: new Map(), draftRoundTrips: [], inputFrames: [],
               };
               window.__akashicFramePerf = state;
               new PerformanceObserver((list) => {
@@ -450,6 +451,12 @@ class IsolatedGatewayDeviceTest {
                   state.snapshotChars += event.data.length;
                 } else if (envelope.type === "mobile.stream-patch") state.streamPatches++;
                 else if (envelope.type === "mobile.state-patch") state.statePatches++;
+                const draft = envelope.payload?.composer?.draft ?? envelope.payload?.state?.composer?.draft;
+                const started = draft && state.draftWrites.get(draft.text);
+                if (started !== undefined) {
+                  state.draftRoundTrips.push(performance.now() - started);
+                  state.draftWrites.delete(draft.text);
+                }
               });
               const tick = (now) => {
                 if (state.last > 0) state.gaps.push(now - state.last);
@@ -490,8 +497,12 @@ class IsolatedGatewayDeviceTest {
                 if (!document.querySelector('.mobile-message-anchor.streaming')) return;
                 const input = document.querySelector('.mobile-composer textarea');
                 if (!input) throw new Error('基准输入框丢失');
-                setter.call(input, 'performance draft ' + (++state.edits));
+                const text = 'performance draft ' + (++state.edits);
+                const started = performance.now();
+                state.draftWrites.set(text, started);
+                setter.call(input, text);
                 input.dispatchEvent(new Event('input', { bubbles: true }));
+                requestAnimationFrame(() => state.inputFrames.push(performance.now() - started));
               }, 350);
               return true;
             })()
@@ -512,6 +523,8 @@ class IsolatedGatewayDeviceTest {
           const renderGaps = renderTimes.slice(1).map((value, index) => value - renderTimes[index]).sort((a, b) => a - b);
           const percentile = (p) => values.length === 0 ? -1 : values[Math.floor((values.length - 1) * p)];
           const renderPercentile = (p) => renderGaps.length === 0 ? -1 : renderGaps[Math.floor((renderGaps.length - 1) * p)];
+          const draftTrips = [...state.draftRoundTrips].sort((a, b) => a - b);
+          const inputFrames = [...state.inputFrames].sort((a, b) => a - b);
           return JSON.stringify({
             count: values.length,
             p50: percentile(0.50),
@@ -533,6 +546,9 @@ class IsolatedGatewayDeviceTest {
             longTasks: state.longTasks.length,
             longTaskMillis: state.longTasks.reduce((sum, duration) => sum + duration, 0),
             edits: state.edits,
+            draftRoundTripCount: draftTrips.length,
+            draftRoundTripP95: draftTrips[Math.floor((draftTrips.length - 1) * 0.95)],
+            inputFrameP95: inputFrames[Math.floor((inputFrames.length - 1) * 0.95)],
             draftText: document.querySelector('.mobile-composer textarea')?.value,
           });
         })()
