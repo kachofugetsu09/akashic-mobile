@@ -96,6 +96,7 @@ class IsolatedGatewayDeviceTest {
             assertTrue("可见文字更新 p50 过慢: ${frameSummary.renderP50}ms", frameSummary.renderP50 <= 100.0)
             assertTrue("可见文字更新 p95 过慢: ${frameSummary.renderP95}ms", frameSummary.renderP95 <= 175.0)
             assertTrue("页面帧 p95 过慢: ${frameSummary.frameP95}ms", frameSummary.frameP95 <= 75.0)
+            awaitVisibleAnswer(scenario, completed)
             if (arguments.getString("perfInteractions") == "true") {
                 val metrics = Json.parseToJsonElement(frameSummary.rawJson).jsonObject
                 val edits = requireNotNull(metrics["edits"]).jsonPrimitive.int
@@ -106,6 +107,17 @@ class IsolatedGatewayDeviceTest {
                     app.container.database.composerDrafts()
                         .observe(requireNotNull(session.state.value.serverId), sessionId)
                         .first { it?.text == expectedDraft }
+                }
+                // 重建真实宿主，验证旧 pump 释放及新 collector 恢复后不丢内容和草稿。
+                scenario.recreate()
+                awaitWebViewReady(scenario)
+                awaitVisibleAnswer(scenario, completed)
+                withTimeout(TIMEOUT_MILLIS) {
+                    while (evaluateJavascript(
+                            scenario,
+                            "document.querySelector('.mobile-composer textarea')?.value === ${org.json.JSONObject.quote(expectedDraft)}",
+                        ) != "true"
+                    ) kotlinx.coroutines.delay(50)
                 }
             }
         }
@@ -340,6 +352,25 @@ class IsolatedGatewayDeviceTest {
         predicate: (List<MessageWithBlocks>) -> Boolean,
     ): List<MessageWithBlocks> = withTimeout(TIMEOUT_MILLIS) {
         app.container.database.messages().observeMessageGraph(sessionId).first(predicate)
+    }
+
+    /** 等待完整终态正文进入 DOM，不以数据库完成代替可见完成。 */
+    private suspend fun awaitVisibleAnswer(
+        scenario: ActivityScenario<MainActivity>,
+        completed: MessageWithBlocks,
+    ) {
+        val expected = completed.message.text.replace("## ", "").replace(Regex("\\s+"), "")
+        val messageId = org.json.JSONObject.quote(completed.message.messageId)
+        val expectedJson = org.json.JSONObject.quote(expected)
+        withTimeout(TIMEOUT_MILLIS) {
+            while (evaluateJavascript(scenario, """
+                (() => {
+                  const message = document.querySelector('[data-message-id="' + CSS.escape($messageId) + '"]');
+                  return Boolean(message && !message.classList.contains('streaming') &&
+                    message.textContent.replace(/\s+/g, '').includes($expectedJson));
+                })()
+            """.trimIndent()) != "true") kotlinx.coroutines.delay(50)
+        }
     }
 
     private suspend fun awaitWebViewReady(scenario: ActivityScenario<MainActivity>) {
