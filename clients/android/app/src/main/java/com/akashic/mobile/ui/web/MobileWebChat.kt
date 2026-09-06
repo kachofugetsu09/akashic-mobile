@@ -2292,7 +2292,6 @@ private class MobileSnapshotPump(
                 // StateFlow 已保存最新投影；不再经过主线程和第二个转发队列。
                 combine(state, snapshotRequests) { latest, request -> latest to request }
                     .collect { (latest, request) ->
-                        val probeStarted = System.nanoTime()
                         val forceSnapshot = request != handledRequest
                         if (!forceSnapshot && deliveredState == latest) return@collect
                         if (!forceSnapshot && shouldDeferResyncSnapshot(deliveredState, latest)) return@collect
@@ -2318,9 +2317,7 @@ private class MobileSnapshotPump(
                             statePatch != null -> json.encodeToString(statePatch)
                             else -> json.encodeToString(latest.toMobileWebSnapshot())
                         }
-                        val probeBuilt = System.nanoTime()
                         withContext(Dispatchers.Main.immediate) {
-                            val probeEntered = System.nanoTime()
                             nextMedia?.let(mediaRegistry::replace)
                             when {
                                 streamPatch != null -> {
@@ -2338,13 +2335,6 @@ private class MobileSnapshotPump(
                             // 投递与本地基线同次提交，避免 STOP 取消回程后恢复时重复 append。
                             deliveredState = latest
                             handledRequest = request
-                            val probePosted = System.nanoTime()
-                            val buildMillis = (probeBuilt - probeStarted) / 1_000_000.0
-                            val queueMillis = (probeEntered - probeBuilt) / 1_000_000.0
-                            val postMillis = (probePosted - probeEntered) / 1_000_000.0
-                            if (buildMillis >= 8 || queueMillis >= 8 || postMillis >= 8) {
-                                Log.i("AkashicNativePerf", "kind=${if (streamPatch != null) "stream" else if (statePatch != null) "state" else "snapshot"} build_ms=$buildMillis main_queue_ms=$queueMillis post_ms=$postMillis chars=${payload.length}")
-                            }
                         }
                     }
             }
