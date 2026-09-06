@@ -59,6 +59,15 @@ class IsolatedGatewayDeviceTest {
         session.selectSession(sessionId)
         withTimeout(TIMEOUT_MILLIS) { session.state.first { it.currentSessionId == sessionId } }
 
+        if (arguments.getString("perfQueryIndex") == "true") {
+            // 仅在本次隔离测试库试验索引，不借探针更改正式 Room schema。
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val database = app.container.database.openHelper.writableDatabase
+                database.execSQL("CREATE INDEX index_messages_sessionId_createdAt_messageId ON messages(sessionId, createdAt, messageId)")
+                database.execSQL("DROP INDEX index_messages_sessionId")
+            }
+        }
+
         // 基准开始前处理系统权限，避免弹窗暂停待测页面。
         if (Build.VERSION.SDK_INT >= 33) {
             InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
