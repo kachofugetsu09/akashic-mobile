@@ -2310,7 +2310,7 @@ private class MobileSnapshotPump(
                             ?.let { latest.toMobileWebStatePatch(it.copy(messages = latest.messages)) }
                             ?.let { json.encodeToString(it) }
                         val terminalTransition = deliveredState
-                            ?.takeIf { streamPatch == null }
+                            ?.takeIf { streamPatch == null && statePatch == null }
                             ?.let(latest::terminalTransitionFrom)
                         val nextMedia = if (streamPatch == null && statePatch == null) latest.mediaResources() else null
                         val payload = when {
