@@ -70,6 +70,7 @@ import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.android.awaitFrame
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -2318,6 +2319,8 @@ private class MobileSnapshotPump(
                             else -> json.encodeToString(latest.toMobileWebSnapshot())
                         }
                         withContext(Dispatchers.Main.immediate) {
+                            // 流式提交跟随系统显示帧；等待期间 StateFlow 合并中间投影。
+                            if (streamPatch != null && streamPatch.state == null) awaitFrame()
                             nextMedia?.let(mediaRegistry::replace)
                             when {
                                 streamPatch != null -> {
