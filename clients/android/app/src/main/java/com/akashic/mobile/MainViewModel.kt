@@ -334,7 +334,9 @@ class MainViewModel(
             val messages = graph.map { currentGraph ->
                 projectMessages(sessionId, currentGraph)
             }
-            val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
+            val conversations = serverId?.let {
+                container.database.conversations().observeSummaries(it).distinctUntilChanged()
+            } ?: flowOf(emptyList())
             val composer = if (serverId == null || sessionId == null) {
                 flowOf(ComposerLocalState(emptyList(), null))
             } else {

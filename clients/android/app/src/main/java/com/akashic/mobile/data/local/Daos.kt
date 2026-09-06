@@ -70,12 +70,6 @@ interface ConversationDao {
               AND message.deliveryState = 'complete'
               AND message.createdAt > read_state.lastReadAt
           ) END AS unreadCount,
-          EXISTS (
-            SELECT 1 FROM messages AS message
-            WHERE message.sessionId = conversation.sessionId
-              AND message.role = 'assistant'
-              AND message.deliveryState = 'streaming'
-          ) AS isRunning,
           read_state.anchorMessageId AS anchorMessageId,
           COALESCE(read_state.anchorOffsetPx, 0) AS anchorOffsetPx,
           conversation.remoteKnown AS remoteKnown,

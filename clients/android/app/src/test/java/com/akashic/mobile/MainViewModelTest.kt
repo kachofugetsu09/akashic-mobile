@@ -181,7 +181,6 @@ class MainViewModelTest {
             lastMessagePreview = "历史",
             lastMessageAt = 1,
             unreadCount = 0,
-            isRunning = false,
             anchorMessageId = null,
             anchorOffsetPx = 0,
             remoteKnown = true,
