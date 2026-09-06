@@ -8,17 +8,22 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.akashic.mobile.App
 import com.akashic.mobile.MainActivity
+import com.akashic.mobile.MainViewModel
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.domain.model.ConnectionPhase
+import com.akashic.mobile.ui.conversation.ConversationUiState
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -69,6 +74,28 @@ class IsolatedGatewayDeviceTest {
             val startedAt = SystemClock.elapsedRealtime()
             session.sendMessage("Android 流式性能基准")
             withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId != null } }
+            if (arguments.getString("perfLifecycle") == "true") {
+                // 按持久增量协调暂停，不靠固定延时碰生命周期窗口。
+                val beforePause = graph(app, sessionId) { messages ->
+                    messages.any { it.blocks.any { block -> block.kind == "thinking" && block.content.length >= 400 } }
+                }.sumOf { message -> message.blocks.filter { it.kind == "thinking" }.sumOf { it.content.length } }
+                scenario.moveToState(Lifecycle.State.CREATED)
+                evaluateJavascript(scenario, """
+                    (() => {
+                      const params = new URLSearchParams(location.search);
+                      window.AkashicNativeTransport.postMessage(JSON.stringify({
+                        v: 1, generation_id: params.get('generation_id'), nonce: params.get('nonce'),
+                        method: 'requestSnapshot', args: []
+                      }));
+                    })()
+                """.trimIndent())
+                graph(app, sessionId) { messages ->
+                    messages.sumOf { message -> message.blocks.filter { it.kind == "thinking" }.sumOf { it.content.length } } >= beforePause + 400
+                }
+                scenario.moveToState(Lifecycle.State.RESUMED)
+                awaitWebViewReady(scenario)
+                Log.i("AkashicStreamPerf", "stage=stream_resumed_after_background_snapshot_request")
+            }
             withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId == null } }
             val completedGraph = graph(app, sessionId) { messages ->
                 messages.count { message ->
@@ -97,6 +124,15 @@ class IsolatedGatewayDeviceTest {
             assertTrue("可见文字更新 p95 过慢: ${frameSummary.renderP95}ms", frameSummary.renderP95 <= 175.0)
             assertTrue("页面帧 p95 过慢: ${frameSummary.frameP95}ms", frameSummary.frameP95 <= 75.0)
             awaitVisibleAnswer(scenario, completed)
+            val projection = CompletableDeferred<StateFlow<ConversationUiState>>()
+            scenario.onActivity { activity ->
+                projection.complete(ViewModelProvider(activity)[MainViewModel::class.java].conversationState)
+            }
+            withTimeout(TIMEOUT_MILLIS) {
+                projection.await().first { state ->
+                    state.messages.map { it.id } == completedGraph.map { it.message.messageId }
+                }
+            }
             Log.i("AkashicStreamPerf", "stage=visible_answer_verified")
             if (arguments.getString("perfInteractions") == "true") {
                 val metrics = Json.parseToJsonElement(frameSummary.rawJson).jsonObject
