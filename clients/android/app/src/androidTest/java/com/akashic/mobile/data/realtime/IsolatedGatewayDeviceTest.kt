@@ -97,6 +97,7 @@ class IsolatedGatewayDeviceTest {
             assertTrue("可见文字更新 p95 过慢: ${frameSummary.renderP95}ms", frameSummary.renderP95 <= 175.0)
             assertTrue("页面帧 p95 过慢: ${frameSummary.frameP95}ms", frameSummary.frameP95 <= 75.0)
             awaitVisibleAnswer(scenario, completed)
+            Log.i("AkashicStreamPerf", "stage=visible_answer_verified")
             if (arguments.getString("perfInteractions") == "true") {
                 val metrics = Json.parseToJsonElement(frameSummary.rawJson).jsonObject
                 val edits = requireNotNull(metrics["edits"]).jsonPrimitive.int
@@ -119,6 +120,7 @@ class IsolatedGatewayDeviceTest {
                         ) != "true"
                     ) kotlinx.coroutines.delay(50)
                 }
+                Log.i("AkashicStreamPerf", "stage=recreated_answer_and_draft_verified")
             }
         }
     }
@@ -367,7 +369,7 @@ class IsolatedGatewayDeviceTest {
                 (() => {
                   const message = document.querySelector('[data-message-id="' + CSS.escape($messageId) + '"]');
                   return Boolean(message && !message.classList.contains('streaming') &&
-                    message.textContent.replace(/\s+/g, '').includes($expectedJson));
+                    message.textContent.replace(/## /g, '').replace(/\s+/g, '').includes($expectedJson));
                 })()
             """.trimIndent()) != "true") kotlinx.coroutines.delay(50)
         }
