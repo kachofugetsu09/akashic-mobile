@@ -11,6 +11,7 @@ import com.akashic.mobile.data.realtime.endHistoryReload
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
+import com.akashic.mobile.ui.conversation.MessageUi
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -32,10 +33,10 @@ class MainViewModelTest {
 
     @Test
     fun streamingTailReplacesLiveRowsWithoutRebuildingSettledHistory() {
-        val settled = messageGraph("settled", createdAt = 1, text = "old")
-        val activeBefore = messageGraph("active", createdAt = 2, text = "a")
-        val activeAfter = messageGraph("active", createdAt = 2, text = "ab")
-        val sameTurnInput = messageGraph("input", createdAt = 3, text = "继续")
+        val settled = MessageUi.User("settled", "session", "old", "已发送", true, createdAtMillis = 1, reply = null)
+        val activeBefore = settled.copy(id = "active", text = "a", createdAtMillis = 2)
+        val activeAfter = activeBefore.copy(text = "ab")
+        val sameTurnInput = settled.copy(id = "input", text = "继续", createdAtMillis = 3)
 
         val merged = mergeStreamingTail(
             frozenPrefix = listOf(settled, activeBefore),

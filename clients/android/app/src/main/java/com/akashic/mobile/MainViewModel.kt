@@ -310,11 +310,12 @@ class MainViewModel(
         .distinctUntilChanged()
         .flatMapLatest { (serverId, sessionId, activeTurnId) ->
             // 只在查询范围变化时重建订阅；连接、下载和停止状态独立更新。
-            val graph = when {
+            val messages = when {
                 sessionId == null -> flowOf(emptyList())
                 activeTurnId == null -> container.database.messages()
                     .observeMessageGraph(sessionId)
                     .distinctUntilChanged()
+                    .map(::projectMessages)
                 else -> flow {
                     val initial = container.database.messages().observeMessageGraph(sessionId).first()
                     val activeIndex = activeTurnIndex(initial, activeTurnId)
@@ -322,17 +323,14 @@ class MainViewModel(
                         "活动 turn $activeTurnId 缺少已持久化的助手投影"
                     }
                     val activeCreatedAt = initial[activeIndex].message.createdAt
-                    val frozenPrefix = initial.take(activeIndex)
+                    val frozenPrefix = initial.take(activeIndex).map(::toMessageUi)
                     emitAll(
                         container.database.messages()
                             .observeMessageGraphFrom(sessionId, activeCreatedAt, activeTurnId)
-                            .map { liveTail -> mergeStreamingTail(frozenPrefix, liveTail) }
-                            .distinctUntilChanged(),
+                            .distinctUntilChanged()
+                            .map { liveTail -> mergeStreamingTail(frozenPrefix, projectMessages(liveTail)) },
                     )
                 }
-            }
-            val messages = graph.map { currentGraph ->
-                projectMessages(currentGraph)
             }
             val conversations = serverId?.let {
                 container.database.conversations().observeSummaries(it).distinctUntilChanged()
@@ -1021,13 +1019,13 @@ class MainViewModel(
     }
 }
 
-/** 流式输出时冻结已完成历史，只合并 Room 重载的活动尾部。 */
+/** 流式输出只投影活动尾部，冻结历史不再进入逐次投影循环。 */
 internal fun mergeStreamingTail(
-    frozenPrefix: List<MessageWithBlocks>,
-    liveTail: List<MessageWithBlocks>,
-): List<MessageWithBlocks> {
-    val liveIds = liveTail.mapTo(hashSetOf()) { it.message.messageId }
-    return frozenPrefix.filterNot { it.message.messageId in liveIds } + liveTail
+    frozenPrefix: List<MessageUi>,
+    liveTail: List<MessageUi>,
+): List<MessageUi> {
+    val liveIds = liveTail.mapTo(hashSetOf()) { it.id }
+    return frozenPrefix.filterNot { it.id in liveIds } + liveTail
 }
 
 /** 按 streaming 投影的持久主键定位活动 turn。 */
