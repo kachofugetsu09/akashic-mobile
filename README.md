@@ -4,6 +4,8 @@ Akashic 的 Android 客户端与移动 WebView 容器。共享对话 WebUI 源�
 
 本仓库可以独立测试、构建和发布 APK；服务端协议真源仍由 `akashic-agent/schema/` 维护。
 
+当前 Android 数据库为 Room v18。升级会把旧版 `user:<client_message_id>` 待发行迁到 Core 保留的同一 Message ID；完整远端 Input 可补结算遗漏的 ACK，未完成的长消息恢复进度继续保留。该变更需要发布 Android binary，迁移不会清除应用数据或附件文件。
+
 ## 本地验证
 
 ```bash

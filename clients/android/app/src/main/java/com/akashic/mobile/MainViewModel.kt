@@ -5,7 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.akashic.mobile.data.local.AppSettings
-import com.akashic.mobile.data.local.MessageWithBlocks
+import com.akashic.mobile.data.local.MessageWithAttachments
 import com.akashic.mobile.data.local.PreparedComposerDraftResult
 import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.AttachmentTransferEntity
@@ -29,17 +29,12 @@ import com.akashic.mobile.ui.conversation.ComposerAttachmentState
 import com.akashic.mobile.ui.conversation.ComposerAttachmentUi
 import com.akashic.mobile.ui.conversation.ComposerDraftUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
-import com.akashic.mobile.ui.conversation.AssistantTurnStatus
-import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.ui.conversation.ModelCatalogUi
 import com.akashic.mobile.ui.conversation.ModelRuntimeUi
 import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
-import com.akashic.mobile.ui.conversation.ProcessBlockKind
-import com.akashic.mobile.ui.conversation.ProcessBlockState
-import com.akashic.mobile.ui.conversation.ProcessBlockUi
 import com.akashic.mobile.ui.conversation.ReadingPositionUi
 import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.PendingMessageUi
@@ -937,7 +932,7 @@ class MainViewModel(
     /** 把一份 Room Message 图投影为 WebUI 消息、下载状态和本地待发送提示。 */
     private fun projectMessageState(
         sessionId: String?,
-        graph: List<MessageWithBlocks>,
+        graph: List<MessageWithAttachments>,
     ): ProjectedMessageState {
         val timelineMessages = graph.mapNotNull { row -> projectTimelineMessage(sessionId, row) }
         val downloads = graph.asSequence()
@@ -947,9 +942,10 @@ class MainViewModel(
         val pendingMessages = graph.mapNotNull { row ->
             val message = row.message
             if (
-                message.sessionId != sessionId || message.serverSeq != null ||
+                message.sessionId != sessionId ||
+                (message.serverSeq != null && message.deliveryState != "restoring") ||
                 message.role != "user" || message.deliveryState !in setOf(
-                    "pending", "sent", "failed", "failed_retryable", "outcome_unknown",
+                    "pending", "sent", "failed", "failed_retryable", "outcome_unknown", "restoring",
                 )
             ) return@mapNotNull null
             PendingMessageUi(
@@ -959,7 +955,7 @@ class MainViewModel(
                 createdAtMillis = message.createdAt,
                 deliveryLabel = when (message.deliveryState) {
                     "pending" -> "待发送"
-                    "sent" -> "正在确认"
+                    "sent", "restoring" -> "正在确认"
                     "failed", "failed_retryable" -> "发送失败"
                     "outcome_unknown" -> "结果待确认"
                     else -> error("未知本地消息状态: ${message.deliveryState}")
@@ -978,9 +974,10 @@ class MainViewModel(
     /** 历史前缀按 Message 实体复用；附件下载进度不会触发正文 JSON 重解析。 */
     private fun projectTimelineMessage(
         sessionId: String?,
-        row: MessageWithBlocks,
+        row: MessageWithAttachments,
     ): TimelineMessageUi? {
         val message = row.message
+        if (message.deliveryState == "restoring") return null
         val seq = message.serverSeq ?: return null
         if (message.sessionId != sessionId) return null
         require(message.recordedAt.isNotEmpty() && message.author.isNotEmpty() && message.source.isNotEmpty()) {

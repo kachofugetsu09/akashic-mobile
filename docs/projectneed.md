@@ -26,9 +26,9 @@ SessionDB 是核心长期状态。除非用户通过明确的删除或撤销操�
 
 一次同步中没有看到某个会话、消息或附件，不足以证明服务端事实已删除。移动端只能按核心协议的明确终态或显式用户操作处理删除语义。
 
-### MOB-CORE-003 Web 与 Mobile 共享 Core 分配的 Akashic 身份
+### MOB-CORE-003 Web 与 Mobile 共享 Core 接纳的 Akashic 身份
 
-Web 与 Mobile 是同一 `akashic` Channel 的两个客户端 adapter。Session 与历史 Message 身份只由 Core 创建和迁移；Android 不生成 Session ID、不保存 old→new 映射，也不按客户端来源过滤会话目录。
+Web 与 Mobile 是同一 `akashic` Channel 的两个客户端 adapter。Session 身份由 Core 创建；客户端发送 Input 时生成一次 Message ID，Core 接纳后原样保存为历史 `Message.id`。Android 不生成 Session ID、不为同一 Input 维护本地临时 ID 或 old→new 映射，也不按客户端来源过滤会话目录。
 
 ## 3. 移动端持久化
 
@@ -136,7 +136,7 @@ Mobile 只把 `Message` 日志作为会话正文。`session.follow` 的 `reply.s
 
 ### MOB-XREPO-006 Input ACK 与显式重试保持单一 owner
 
-`message.send.ok` 只在 Core 已持久接受对应 Input 后返回，并必须带回相同 `client_message_id`。客户端验证该身份后删除 outbox；如果 canonical Input 已先从 Message 日志落地，ACK 不得把 `complete` 降级为 `sent`。明确失败与结果未知继续保留可重试 owner；显式重试复用原视觉 user message 和稳定来源 identity，同时生成新的命令 identity。普通再次发送始终创建新 user message，不按正文、时间或相邻位置猜测重试。
+`message.send` 的 frame ID、`client_message_id`、本地 user `messageId` 与 Core 保存的 Input `Message.id` 必须相同。`message.send.ok` 只在 Core 已持久接受对应 Input 后返回，并带回同一 ID；客户端验证后删除 outbox。如果 Input 已先从 Message 日志落地，ACK 不得把 `complete` 降级为 `sent`。结果未知复用原 ID 核对；明确失败的显式重试生成一个新的 Message/命令 ID，并在同一 Room 事务中移动原视觉行、阅读锚点、草稿引用、消息引用和附件链接。普通再次发送始终创建新 user message，不按正文、时间、metadata 或相邻位置猜测身份。
 
 ## 7. 仓库与安全边界
 

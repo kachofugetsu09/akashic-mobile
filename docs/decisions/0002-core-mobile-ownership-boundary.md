@@ -21,6 +21,8 @@
 
 跨边界变化必须同时声明生产者、消费者、权威状态和客户端替代方案。移动端仓库保持独立构建，不通过 submodule 复制核心运行时。
 
+Input 的身份在边界上只有一个值：客户端先生成 `message.send` frame ID，Core 接纳后把同值保存为 `Message.id`。Room v18 把旧 `user:<clientMessageId>` 本地行迁到该 ID；完整远端 Input 是补结算 outbox 的成功证据，未完成的 restoring 行及下载进度继续保留。迁移拒绝猜测其他旧 ID 形状。
+
 ## 验证
 
 任务合同和 PR 必须列出能力 owner、持久化增减与受保护状态；Runtime Contract 验证固定核心与移动端组合。

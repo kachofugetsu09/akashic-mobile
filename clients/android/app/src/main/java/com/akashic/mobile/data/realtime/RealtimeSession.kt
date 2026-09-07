@@ -1340,7 +1340,7 @@ class RealtimeSession(
                             mediaRefs = attachments.map { it.attachmentId },
                             clientCreatedAt = Instant.ofEpochMilli(now).toString(),
                             replyTo = replyTarget?.let { target ->
-                                messageReplyReference(target.messageId, target.clientMessageId)
+                                messageReplyReference(target.messageId)
                             },
                             modelRuntimeId = modelSelection?.runtimeId,
                             modelReasoningEffort = modelSelection?.reasoningEffort,
@@ -1393,9 +1393,8 @@ class RealtimeSession(
                                 now,
                             ),
                             message = MessageEntity(
-                                // TODO(deprecated): optimistic 本地临时 ID 命名空间，canonical 身份由服务端 history 投影原子迁移
-                                messageId = "user:$clientMessageId",
-                                clientMessageId = clientMessageId,
+                                messageId = clientMessageId,
+                                clientMessageId = null,
                                 sessionId = sessionId,
                                 role = "user",
                                 text = body.ifBlank {

@@ -369,10 +369,8 @@ data class MessageAttachmentEntity(
     val ordinal: Int,
 )
 
-data class MessageWithBlocks(
+data class MessageWithAttachments(
     @Embedded val message: MessageEntity,
-    @Relation(parentColumn = "messageId", entityColumn = "messageId")
-    val blocks: List<TurnBlockEntity>,
     @Relation(
         entity = MessageAttachmentEntity::class,
         parentColumn = "messageId",

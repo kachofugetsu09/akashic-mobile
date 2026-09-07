@@ -49,8 +49,8 @@ internal enum class NotificationTargetProjection {
 }
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
-/** TODO(deprecated): 进程内 canonical 别名表只服务 UI 持有旧临时 ID 的短暂窗口，未来收紧临时 ID 生命周期后删除。 */
-private const val MAX_CANONICAL_MESSAGE_ALIASES = 256
+/** 限制明确失败重试后的短期旧 ID 映射，避免进程状态无界增长。 */
+private const val MAX_MOVED_MESSAGE_IDS = 256
 
 @Serializable
 internal data class StoredToolBlock(
@@ -95,12 +95,9 @@ class LocalDeliveryStore(
     private val mediaCache: MediaCacheStore,
     private val messageContentStore: MessageContentStore,
 ) {
-    /**
-     * TODO(deprecated): 进程内 canonical 别名表只覆盖"UI 仍持有旧临时 ID"的短窗口；
-     * 临时 ID 生命周期收紧后由 DB 内 move 系列查询承接，不再保留内存别名。
-     */
     private val projectionStateMutex = Mutex()
-    private val canonicalMessageAliases = linkedMapOf<String, String>()
+    /** 明确失败重试换 ID 后，短暂接住 WebUI 已发出的旧 ID 操作。 */
+    private val movedMessageIds = linkedMapOf<String, String>()
 
     /** 恢复当前电脑拥有的会话选择，拒绝把另一台电脑的会话带入当前投影。 */
     suspend fun restoreSelectedSession(serverId: String, selectedSessionId: String?): String? {
@@ -225,7 +222,7 @@ class LocalDeliveryStore(
     private suspend fun resolveComposerReply(sessionId: String, replyToMessageId: String?): String? =
         replyToMessageId?.let { messageId ->
             require(messageId.length in 1..512) { "会话草稿引用 ID 无效" }
-            val resolvedMessageId = canonicalMessageAliases[messageId] ?: messageId
+            val resolvedMessageId = movedMessageIds[messageId] ?: messageId
             val target = database.messages().get(resolvedMessageId) ?: return@let null
             require(target.sessionId == sessionId) { "会话草稿引用不属于当前会话" }
             resolvedMessageId
@@ -244,11 +241,11 @@ class LocalDeliveryStore(
             "阅读位置会话不存在: $sessionId"
         }
         require(conversation.serverId == expectedServerId) { "阅读位置会话不属于当前电脑" }
-        val resolvedMessageId = canonicalMessageAliases[messageId] ?: messageId
+        val resolvedMessageId = movedMessageIds[messageId] ?: messageId
         val message = database.messages().get(resolvedMessageId) ?: return@withLock false
         require(message.sessionId == sessionId) { "阅读锚点不属于当前会话" }
 
-        // 2. 在 canonical 迁移共用的锁内持久化，避免写回已删除身份
+        // 2. 与重试换 ID 共用写锁，避免写回已删除身份
         database.conversationReadStates().savePosition(sessionId, resolvedMessageId, offsetPx, updatedAt)
         true
     }
@@ -280,7 +277,7 @@ class LocalDeliveryStore(
         }
         require(conversation.serverId == expectedServerId) { "已读水位会话不属于当前电脑" }
 
-        // 2. 与保存及 canonical 迁移共用同一写序
+        // 2. 与保存及重试换 ID 共用同一写序
         database.conversationReadStates().markReadThrough(sessionId, readAt, updatedAt)
     }
 
@@ -343,7 +340,7 @@ class LocalDeliveryStore(
     /** 清除可从服务端恢复的投影与附件缓存，同时保留配对和未发送工作。 */
     suspend fun clearReloadableCache(serverId: String, preservedSessionId: String?) {
         // 1. 原子移除已提交消息，保留待发送消息、草稿和连接身份；
-        //    与 sync.reset_required 共用同一白名单：sent（已 ACK 未 canonical 化）也保留
+        //    与 sync.reset_required 共用同一白名单：sent（已 ACK、正文尚未投影）也保留
         projectionStateMutex.withLock {
             database.withTransaction {
                 database.messages().deleteServerProjection(serverId)
@@ -478,15 +475,20 @@ class LocalDeliveryStore(
             check(database.conversations().markRemoteKnown(requireNotNull(envelope.sessionId)) == 1) {
                 "Outbox ACK 对应的会话投影不存在: ${envelope.sessionId}"
             }
-            val message = requireNotNull(database.messages().getByClientMessageId(payload.clientMessageId)) {
+            val message = requireNotNull(database.messages().get(payload.clientMessageId)) {
                 "Outbox message is missing: ${payload.clientMessageId}"
             }
             if (message.serverSeq == null) {
                 check(database.messages().markInputAccepted(payload.clientMessageId, updatedAt) == 1) {
                     "Outbox message is not pending: ${payload.clientMessageId}"
                 }
+            } else if (message.deliveryState != "complete") {
+                require(
+                    message.role == "user" && message.deliveryState == "restoring" &&
+                        database.messageContentTransfers().get(message.messageId) != null
+                ) { "Saved Input has invalid restoring state" }
             } else {
-                require(message.role == "user" && message.deliveryState == "complete") {
+                require(message.role == "user") {
                     "Canonical Input has invalid delivery state"
                 }
             }
@@ -548,67 +550,78 @@ class LocalDeliveryStore(
         }
     }
 
-    /** 原位重试失败消息，并按失败语义选择原幂等键或新命令 ID。 */
+    /** 重试失败消息，并按失败语义复用原 ID 或原子迁到新 ID。 */
     suspend fun retryFailedMessage(messageId: String, newCommandId: String, updatedAt: Long): Boolean =
-        database.withTransaction {
-            // 1. 恢复失败消息、命令和附件不变量
-            val message = requireNotNull(database.messages().get(messageId)) { "Unknown failed message: $messageId" }
-            require(message.role == "user") { "Only user messages can be retried" }
-            if (message.deliveryState in setOf("pending", "sent", "complete")) {
-                return@withTransaction false
-            }
-            val clientMessageId = requireNotNull(message.clientMessageId) { "Failed message has no client id" }
-            val command = requireNotNull(database.outbox().get(clientMessageId)) { "Failed message has no outbox command" }
-            val envelope = ProtocolCodec.decode(command.envelopeJson)
-            val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
-            require(payload.clientMessageId == clientMessageId) { "Outbox client id mismatch" }
-            require(command.state == message.deliveryState) { "Outbox and message failure states diverged" }
+        projectionStateMutex.withLock {
+            var movedFromId: String? = null
+            val retried = database.withTransaction {
+                // 1. 恢复失败消息、命令和附件不变量
+                val resolvedMessageId = movedMessageIds[messageId] ?: messageId
+                val message = requireNotNull(database.messages().get(resolvedMessageId)) {
+                    "Unknown failed message: $messageId"
+                }
+                require(message.role == "user") { "Only user messages can be retried" }
+                if (message.deliveryState in setOf("pending", "sent", "complete")) {
+                    return@withTransaction false
+                }
+                val currentMessageId = message.messageId
+                val command = requireNotNull(database.outbox().get(currentMessageId)) {
+                    "Failed message has no outbox command"
+                }
+                val envelope = ProtocolCodec.decode(command.envelopeJson)
+                val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(
+                    envelope.payload,
+                )
+                require(payload.clientMessageId == currentMessageId) { "Outbox message id mismatch" }
+                require(command.state == message.deliveryState) { "Outbox and message failure states diverged" }
 
-            // 2. 未知结果复用原幂等键；明确失败生成新幂等键但保留视觉消息 ID
-            if (command.state == "outcome_unknown") {
-                check(database.outbox().recheckUnknown(command.commandId) == 1)
-                check(database.messages().updateDelivery(clientMessageId, "pending", updatedAt) == 1)
-            } else {
-                require(command.state == "failed_retryable") { "Message is not retryable: ${command.state}" }
-                val retryPayload = payload.copy(
-                    clientMessageId = newCommandId,
-                    retryOfClientMessageId = payload.retryOfClientMessageId
-                        ?: payload.clientMessageId,
-                )
-                val retryEnvelope = envelope.copy(
-                    id = newCommandId,
-                    payload = ProtocolCodec.json().encodeToJsonElement(
-                        com.akashic.mobile.data.realtime.MessageSendPayload.serializer(),
-                        retryPayload,
-                    ).jsonObject,
-                )
-                check(
-                    database.messages().replaceRetryIdentity(
-                        messageId,
-                        clientMessageId,
-                        newCommandId,
-                        updatedAt,
-                    ) == 1,
-                )
-                check(database.outbox().deleteAcknowledged(command.commandId) == 1)
-                database.outbox().enqueue(
-                    OutboxCommandEntity(
-                        commandId = newCommandId,
-                        serverId = command.serverId,
-                        envelopeJson = ProtocolCodec.encode(retryEnvelope),
-                        state = "pending",
-                        attemptCount = 0,
-                        createdAt = command.createdAt,
-                        lastAttemptAt = null,
-                    ),
-                )
-            }
+                // 2. 未知结果复用原 ID；明确失败把视觉消息和命令一起迁到新 ID
+                if (command.state == "outcome_unknown") {
+                    check(database.outbox().recheckUnknown(command.commandId) == 1)
+                    check(database.messages().updateDelivery(currentMessageId, "pending", updatedAt) == 1)
+                } else {
+                    require(command.state == "failed_retryable") {
+                        "Message is not retryable: ${command.state}"
+                    }
+                    val retryPayload = payload.copy(
+                        clientMessageId = newCommandId,
+                        retryOfClientMessageId = payload.retryOfClientMessageId
+                            ?: payload.clientMessageId,
+                    )
+                    val retryEnvelope = envelope.copy(
+                        id = newCommandId,
+                        payload = ProtocolCodec.json().encodeToJsonElement(
+                            com.akashic.mobile.data.realtime.MessageSendPayload.serializer(),
+                            retryPayload,
+                        ).jsonObject,
+                    )
+                    moveLocalMessageIdentity(message, newCommandId, updatedAt)
+                    movedFromId = message.messageId
+                    check(database.outbox().deleteAcknowledged(command.commandId) == 1)
+                    database.outbox().enqueue(
+                        OutboxCommandEntity(
+                            commandId = newCommandId,
+                            serverId = command.serverId,
+                            envelopeJson = ProtocolCodec.encode(retryEnvelope),
+                            state = "pending",
+                            attemptCount = 0,
+                            createdAt = command.createdAt,
+                            lastAttemptAt = null,
+                        ),
+                    )
+                }
 
-            // 3. 重新占用原附件，ACK 或下一次失败负责推进最终状态
-            if (payload.mediaRefs.isNotEmpty()) {
-                check(database.attachmentTransfers().markSending(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+                // 3. 重新占用原附件，ACK 或下一次失败负责推进最终状态
+                if (payload.mediaRefs.isNotEmpty()) {
+                    check(
+                        database.attachmentTransfers().markSending(payload.mediaRefs, updatedAt) ==
+                            payload.mediaRefs.size,
+                    )
+                }
+                true
             }
-            true
+            movedFromId?.let { rememberMovedMessageId(it, newCommandId) }
+            retried
         }
 
     private suspend fun applyEventContent(
@@ -853,12 +866,10 @@ class LocalDeliveryStore(
         require(author.isNotBlank() && source.isNotBlank()) { "History Message attribution is invalid" }
         val metadata = remote.metadata ?: JsonObject(emptyMap())
         val completedAt = parseServerInstant(timestamp, "history.page.timestamp")
-        val clientMessageId = metadata["client_message_id"]?.jsonPrimitive?.contentOrNull
-        clientMessageId?.let(::requireFrameId)
         val kind = body["kind"]?.jsonPrimitive?.contentOrNull ?: error("History body has no kind")
         val canonical = MessageEntity(
             messageId = remote.id,
-            clientMessageId = clientMessageId.takeIf { kind == "input" },
+            clientMessageId = null,
             sessionId = sessionId,
             role = if (kind == "input") "user" else "assistant",
             text = timelineText(body),
@@ -882,9 +893,7 @@ class LocalDeliveryStore(
         )
         val prior = database.messages().get(remote.id)
         val isNewServerMessage = prior?.serverSeq != remote.seq
-        val localSource = clientMessageId?.takeIf { kind == "input" }
-            ?.let { database.messages().getByClientMessageId(it)?.messageId }
-        mergeCanonicalMessage(localSource, canonical)
+        saveMessage(canonical)
         upsertMessageAttachments(
             serverId = serverId,
             sessionId = sessionId,
@@ -1061,12 +1070,12 @@ class LocalDeliveryStore(
         }
     }
 
-    /** 保存服务端 Message，并把同一 Input 的本地发送身份迁到正式 ID。 */
-    private suspend fun mergeCanonicalMessage(sourceId: String?, canonical: MessageEntity) {
+    /** 保存服务端 Message；同一 ID 的本地发送行会被完整记录原位替换。 */
+    private suspend fun saveMessage(canonical: MessageEntity) {
         val messages = database.messages()
-        val media = database.mediaAttachments()
         val existing = messages.get(canonical.messageId)
-        if (existing != null && existing.role != "restoring") {
+        val contentTransfer = database.messageContentTransfers().get(canonical.messageId)
+        if (existing != null && existing.role != "restoring" && contentTransfer == null) {
             require(existing.sessionId == canonical.sessionId) {
                 "Message identity belongs to another session"
             }
@@ -1075,29 +1084,44 @@ class LocalDeliveryStore(
                 return
             }
         }
-        val source = sourceId?.let { messages.get(it) }
-        if (sourceId == null || sourceId == canonical.messageId || source == null) {
-            messages.upsert(canonical)
-            return
+        if (existing != null && contentTransfer != null && existing.role != "restoring") {
+            require(existing.role == canonical.role) { "Restoring Message kind changed" }
         }
-        require(
-            canonical.role == "user" && canonical.clientMessageId != null &&
-                source.sessionId == canonical.sessionId && source.role == "user" &&
-                source.clientMessageId == canonical.clientMessageId
-        ) { "Local Input identity does not match the saved Message" }
-
-        check(messages.clearClientMessageId(sourceId) == 1) { "Local Input disappeared" }
         messages.upsert(canonical)
-        database.conversationReadStates().moveAnchor(source.sessionId, sourceId, canonical.messageId)
-        database.composerDrafts().moveReplyTarget(source.sessionId, sourceId, canonical.messageId)
-        media.moveLinks(sourceId, canonical.messageId)
-        check(messages.delete(sourceId) == 1) { "Local Input disappeared during Message save" }
-        canonicalMessageAliases.entries.forEach { alias ->
-            if (alias.value == sourceId) alias.setValue(canonical.messageId)
+    }
+
+    /** 明确失败重试会生成新的 Message ID，并同步迁移全部本地引用。 */
+    private suspend fun moveLocalMessageIdentity(
+        source: MessageEntity,
+        targetId: String,
+        updatedAt: Long,
+    ) {
+        require(database.messages().get(targetId) == null) { "Retry Message ID already exists: $targetId" }
+        require(database.messageContentTransfers().get(source.messageId) == null) {
+            "Local failed Message unexpectedly owns a content download"
         }
-        canonicalMessageAliases[sourceId] = canonical.messageId
-        if (canonicalMessageAliases.size > MAX_CANONICAL_MESSAGE_ALIASES) {
-            canonicalMessageAliases.remove(canonicalMessageAliases.keys.first())
+        database.messages().upsert(
+            source.copy(
+                messageId = targetId,
+                clientMessageId = null,
+                deliveryState = "pending",
+                updatedAt = updatedAt,
+            ),
+        )
+        database.conversationReadStates().moveAnchor(source.sessionId, source.messageId, targetId)
+        database.composerDrafts().moveReplyTarget(source.sessionId, source.messageId, targetId)
+        database.messages().moveReplyTargets(source.messageId, targetId)
+        database.mediaAttachments().moveLinks(source.messageId, targetId)
+        check(database.messages().delete(source.messageId) == 1) { "Failed Message disappeared during retry" }
+    }
+
+    private fun rememberMovedMessageId(sourceId: String, targetId: String) {
+        movedMessageIds.entries.forEach { alias ->
+            if (alias.value == sourceId) alias.setValue(targetId)
+        }
+        movedMessageIds[sourceId] = targetId
+        if (movedMessageIds.size > MAX_MOVED_MESSAGE_IDS) {
+            movedMessageIds.remove(movedMessageIds.keys.first())
         }
     }
 

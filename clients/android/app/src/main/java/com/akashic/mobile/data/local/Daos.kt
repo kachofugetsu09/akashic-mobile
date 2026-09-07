@@ -83,9 +83,15 @@ interface ConversationDao {
             EXISTS (
               SELECT 1 FROM messages AS message
               WHERE message.sessionId = conversation.sessionId
-                AND message.clientMessageId IS NOT NULL
-                AND message.deliveryState IN (
-                  'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
+                AND message.role = 'user'
+                AND (
+                  message.deliveryState IN (
+                    'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
+                  )
+                  OR EXISTS (
+                    SELECT 1 FROM outbox_commands AS command
+                    WHERE command.commandId = message.messageId
+                  )
                 )
             ) OR EXISTS (
               SELECT 1 FROM attachment_transfers AS transfer
@@ -254,59 +260,6 @@ interface MessageDao {
 
     @Query(
         """
-        UPDATE turn_blocks
-        SET content = content || :delta, status = 'running', updatedAt = :updatedAt
-        WHERE blockId = :blockId
-          AND messageId = :messageId
-          AND turnId = :turnId
-          AND ordinal = :ordinal
-          AND kind = 'thinking'
-          AND EXISTS (
-            SELECT 1 FROM messages
-            WHERE messages.messageId = :messageId
-              AND messages.sessionId = :sessionId
-              AND messages.role = 'assistant'
-              AND messages.deliveryState = 'streaming'
-              AND (:controlTurnId IS NULL OR messages.controlTurnId = :controlTurnId)
-              AND (:clientMessageId IS NULL OR messages.turnClientMessageId = :clientMessageId)
-          )
-        """,
-    )
-    suspend fun appendThinkingDelta(
-        blockId: String,
-        messageId: String,
-        sessionId: String,
-        turnId: String,
-        ordinal: Int,
-        controlTurnId: String?,
-        clientMessageId: String?,
-        delta: String,
-        updatedAt: Long,
-    ): Int
-
-    @Query(
-        """
-        UPDATE messages
-        SET text = text || :delta, deliveryState = 'streaming', updatedAt = :updatedAt
-        WHERE messageId = :messageId
-          AND sessionId = :sessionId
-          AND role = 'assistant'
-          AND deliveryState = 'streaming'
-          AND (:controlTurnId IS NULL OR controlTurnId = :controlTurnId)
-          AND (:clientMessageId IS NULL OR turnClientMessageId = :clientMessageId)
-        """,
-    )
-    suspend fun appendAnswerDelta(
-        messageId: String,
-        sessionId: String,
-        controlTurnId: String?,
-        clientMessageId: String?,
-        delta: String,
-        updatedAt: Long,
-    ): Int
-
-    @Query(
-        """
         SELECT * FROM messages AS local
         WHERE local.sessionId = :sessionId
           AND local.deliveryState != 'restoring'
@@ -335,47 +288,6 @@ interface MessageDao {
 
     @Query("SELECT * FROM messages WHERE messageId = :messageId")
     suspend fun get(messageId: String): MessageEntity?
-
-    @Query("SELECT * FROM messages WHERE clientMessageId = :clientMessageId")
-    suspend fun getByClientMessageId(clientMessageId: String): MessageEntity?
-
-    /** TODO(deprecated): 旧协议数据无稳定身份时的时间窗兜底，权威字段滚动出窗口后删除。 */
-    @Query(
-        """
-        SELECT messages.* FROM messages
-        INNER JOIN conversations ON conversations.sessionId = messages.sessionId
-        WHERE conversations.serverId = :serverId
-          AND messages.role = 'assistant'
-          AND messages.deliveryState = 'streaming'
-          AND messages.messageId LIKE 'assistant:%'
-        ORDER BY messages.createdAt, messages.messageId
-        """,
-    )
-    suspend fun activeAssistantTurns(serverId: String): List<MessageEntity>
-
-    @Query(
-        """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'assistant'
-          AND deliveryState = 'streaming'
-          AND messageId LIKE 'assistant:%'
-        LIMIT 1
-        """,
-    )
-    suspend fun activeAssistantTurn(sessionId: String): MessageEntity?
-
-    @Query(
-        """
-        SELECT * FROM messages
-        WHERE sessionId = :sessionId
-          AND role = 'assistant'
-          AND deliveryState = 'streaming'
-          AND messageId LIKE 'assistant:%'
-        ORDER BY createdAt, messageId
-        """,
-    )
-    suspend fun activeAssistantTurnsForSession(sessionId: String): List<MessageEntity>
 
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: String): Int
@@ -411,8 +323,14 @@ interface MessageDao {
         """
         SELECT COUNT(*) FROM messages
         WHERE sessionId = :sessionId
-          AND clientMessageId IS NOT NULL
-          AND deliveryState IN ('pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown')
+          AND role = 'user'
+          AND (
+            deliveryState IN ('pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown')
+            OR EXISTS (
+              SELECT 1 FROM outbox_commands AS command
+              WHERE command.commandId = messages.messageId
+            )
+          )
         """,
     )
     suspend fun countLocalWorkForSession(sessionId: String): Int
@@ -429,65 +347,43 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE messageId = :messageId")
     suspend fun delete(messageId: String): Int
 
-    @Query("UPDATE messages SET clientMessageId = NULL WHERE messageId = :messageId")
-    suspend fun clearClientMessageId(messageId: String): Int
-
-    @Query(
-        "UPDATE messages SET turnClientMessageId = :clientMessageId " +
-            "WHERE messageId = :messageId AND turnClientMessageId IS NULL",
-    )
-    suspend fun bindTurnClientMessageId(messageId: String, clientMessageId: String): Int
-
-    @Query(
-        "UPDATE messages SET controlTurnId = :turnId " +
-            "WHERE messageId = :messageId AND controlTurnId IS NULL",
-    )
-    suspend fun bindControlTurnId(messageId: String, turnId: String): Int
-
     @Query(
         """
         DELETE FROM messages
         WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)
           AND NOT (
-            clientMessageId IS NOT NULL
-            AND deliveryState IN ('pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown')
+            role = 'user'
+            AND (
+              deliveryState IN ('pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown')
+              OR EXISTS (
+                SELECT 1 FROM outbox_commands AS command
+                WHERE command.commandId = messages.messageId
+              )
+            )
           )
         """,
     )
     suspend fun deleteServerProjection(serverId: String): Int
 
-    @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE clientMessageId = :clientMessageId")
-    suspend fun updateDelivery(clientMessageId: String, state: String, updatedAt: Long): Int
+    @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE messageId = :messageId")
+    suspend fun updateDelivery(messageId: String, state: String, updatedAt: Long): Int
 
     @Query(
         """
         UPDATE messages
         SET deliveryState = 'sent', updatedAt = :updatedAt
-        WHERE clientMessageId = :clientMessageId
+        WHERE messageId = :messageId
           AND serverSeq IS NULL
           AND deliveryState = 'pending'
         """,
     )
-    suspend fun markInputAccepted(clientMessageId: String, updatedAt: Long): Int
+    suspend fun markInputAccepted(messageId: String, updatedAt: Long): Int
 
     @Query("UPDATE messages SET text = :text, updatedAt = :updatedAt WHERE messageId = :messageId")
     suspend fun updateRestoredContent(messageId: String, text: String, updatedAt: Long): Int
 
-    @Query(
-        """
-        UPDATE messages
-        SET clientMessageId = :newClientMessageId, deliveryState = 'pending', updatedAt = :updatedAt
-        WHERE messageId = :messageId
-          AND clientMessageId = :oldClientMessageId
-          AND deliveryState = 'failed_retryable'
-        """,
-    )
-    suspend fun replaceRetryIdentity(
-        messageId: String,
-        oldClientMessageId: String,
-        newClientMessageId: String,
-        updatedAt: Long,
-    ): Int
+    @Query("UPDATE messages SET replyToMessageId = :targetId WHERE replyToMessageId = :sourceId")
+    suspend fun moveReplyTargets(sourceId: String, targetId: String): Int
 
     @Query("UPDATE turn_blocks SET status = 'completed', updatedAt = :updatedAt WHERE messageId = :messageId AND status = 'running'")
     suspend fun completeRunningBlocks(messageId: String, updatedAt: Long): Int
@@ -518,37 +414,8 @@ interface MessageDao {
           local.messageId
         """,
     )
-    fun observeMessageGraph(sessionId: String): Flow<List<MessageWithBlocks>>
+    fun observeMessageGraph(sessionId: String): Flow<List<MessageWithAttachments>>
 
-    @Transaction
-    @Query(
-        """
-        SELECT * FROM messages AS local
-        WHERE local.sessionId = :sessionId
-          AND (
-            local.createdAt >= :createdAt
-            OR local.controlTurnId = :activeTurnId
-          )
-        ORDER BY
-          CASE WHEN local.serverSeq IS NOT NULL THEN local.serverSeq ELSE COALESCE(
-            (
-              SELECT MIN(remote.serverSeq) FROM messages AS remote
-              WHERE remote.sessionId = local.sessionId
-                AND remote.serverSeq IS NOT NULL
-                AND remote.createdAt >= local.createdAt
-            ),
-            9223372036854775807
-          ) END,
-          CASE WHEN local.serverSeq IS NULL THEN 0 ELSE 1 END,
-          local.createdAt,
-          local.messageId
-        """,
-    )
-    fun observeMessageGraphFrom(
-        sessionId: String,
-        createdAt: Long,
-        activeTurnId: String,
-    ): Flow<List<MessageWithBlocks>>
 }
 
 @Dao

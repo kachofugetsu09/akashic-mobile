@@ -28,7 +28,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MobileWebUiBlobEntity::class,
         MobileWebUiRejectEntity::class,
     ],
-    version = 17,
+    version = 18,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -80,6 +80,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_14_15,
             MIGRATION_15_16,
             MIGRATION_16_17,
+            MIGRATION_17_18,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -562,6 +563,255 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE `message_content_transfers` ADD COLUMN `notifyWhenReady` INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("ALTER TABLE `pending_message_notifications` ADD COLUMN `ready` INTEGER NOT NULL DEFAULT 1")
                 db.execSQL("ALTER TABLE `pending_message_notifications` ADD COLUMN `headSeq` INTEGER")
+            }
+        }
+
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 找出仍使用临时本地 ID 的待发 Input；outbox commandId 已经是目标 Message ID。
+                db.execSQL(
+                    """
+                    CREATE TEMP TABLE `message_identity_moves` AS
+                    SELECT
+                      local.`messageId` AS `sourceId`,
+                      local.`clientMessageId` AS `targetId`,
+                      EXISTS(
+                        SELECT 1 FROM `messages` AS target
+                        WHERE target.`messageId` = local.`clientMessageId`
+                      ) AS `targetExists`,
+                      EXISTS(
+                        SELECT 1 FROM `messages` AS remote
+                        WHERE remote.`messageId` = local.`clientMessageId`
+                          AND remote.`sessionId` = local.`sessionId`
+                          AND remote.`serverSeq` IS NOT NULL
+                          AND remote.`recordedAt` != ''
+                          AND remote.`bodyJson` != '{}'
+                          AND remote.`role` = 'user'
+                          AND remote.`bodyJson` LIKE '%"kind":"input"%'
+                      ) AS `keepTarget`
+                      , EXISTS(
+                        SELECT 1 FROM `messages` AS target
+                        WHERE target.`messageId` = local.`clientMessageId`
+                          AND target.`sessionId` = local.`sessionId`
+                          AND target.`role` = 'restoring'
+                          AND target.`deliveryState` = 'restoring'
+                          AND EXISTS(
+                            SELECT 1 FROM `message_content_transfers` AS transfer
+                            WHERE transfer.`messageId` = target.`messageId`
+                              AND transfer.`sessionId` = target.`sessionId`
+                          )
+                      ) AS `targetRestoring`
+                    FROM `messages` AS local
+                    WHERE local.`role` = 'user'
+                      AND local.`clientMessageId` IS NOT NULL
+                      AND local.`messageId` = 'user:' || local.`clientMessageId`
+                      AND local.`deliveryState` IN (
+                        'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
+                      )
+                    """.trimIndent(),
+                )
+                db.query(
+                    "SELECT COUNT(*) FROM `message_identity_moves` " +
+                        "WHERE `targetExists` = 1 AND `keepTarget` = 0 AND `targetRestoring` = 0",
+                ).use { cursor ->
+                    check(cursor.moveToFirst() && cursor.getInt(0) == 0) {
+                        "Room 18 Message identity target is neither a complete Input nor a restoring Input"
+                    }
+                }
+                db.query(
+                    """
+                    SELECT COUNT(*) FROM `messages`
+                    WHERE `role` = 'user'
+                      AND `clientMessageId` IS NOT NULL
+                      AND `messageId` != `clientMessageId`
+                      AND `messageId` != 'user:' || `clientMessageId`
+                      AND `deliveryState` IN (
+                        'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
+                      )
+                    """.trimIndent(),
+                ).use { cursor ->
+                    check(cursor.moveToFirst() && cursor.getInt(0) == 0) {
+                        "Room 18 found unsupported local Message identity"
+                    }
+                }
+
+                // 2. 所有稳定引用先改指统一 ID。
+                db.execSQL(
+                    """
+                    UPDATE `conversation_read_states`
+                    SET `anchorMessageId` = (
+                      SELECT `targetId` FROM `message_identity_moves`
+                      WHERE `sourceId` = `conversation_read_states`.`anchorMessageId`
+                    )
+                    WHERE `anchorMessageId` IN (SELECT `sourceId` FROM `message_identity_moves`)
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    UPDATE `composer_drafts`
+                    SET `replyToMessageId` = (
+                      SELECT `targetId` FROM `message_identity_moves`
+                      WHERE `sourceId` = `composer_drafts`.`replyToMessageId`
+                    )
+                    WHERE `replyToMessageId` IN (SELECT `sourceId` FROM `message_identity_moves`)
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    UPDATE `messages`
+                    SET `replyToMessageId` = (
+                      SELECT `targetId` FROM `message_identity_moves`
+                      WHERE `sourceId` = `messages`.`replyToMessageId`
+                    )
+                    WHERE `replyToMessageId` IN (SELECT `sourceId` FROM `message_identity_moves`)
+                    """.trimIndent(),
+                )
+
+                // 3. 没有目标行时复制本地事实；restoring 目标保留 manifest 和下载进度。
+                db.execSQL(
+                    """
+                    INSERT INTO `messages` (
+                      `messageId`, `clientMessageId`, `sessionId`, `role`, `text`, `deliveryState`,
+                      `createdAt`, `updatedAt`, `serverSeq`, `replyToMessageId`, `replyRole`,
+                      `replyPreview`, `turnClientMessageId`, `controlTurnId`, `recordedAt`, `author`,
+                      `source`, `bodyJson`, `metadataJson`, `attachmentsJson`
+                    )
+                    SELECT
+                      move.`targetId`, NULL, local.`sessionId`, local.`role`, local.`text`,
+                      local.`deliveryState`, local.`createdAt`, local.`updatedAt`, local.`serverSeq`,
+                      local.`replyToMessageId`, local.`replyRole`, local.`replyPreview`,
+                      local.`turnClientMessageId`, local.`controlTurnId`, local.`recordedAt`,
+                      local.`author`, local.`source`, local.`bodyJson`, local.`metadataJson`,
+                      local.`attachmentsJson`
+                    FROM `message_identity_moves` AS move
+                    JOIN `messages` AS local ON local.`messageId` = move.`sourceId`
+                    WHERE move.`targetExists` = 0
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    UPDATE `messages`
+                    SET
+                      `clientMessageId` = NULL,
+                      `role` = (SELECT local.`role` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`),
+                      `text` = (SELECT local.`text` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`),
+                      `deliveryState` = 'restoring',
+                      `createdAt` = (SELECT local.`createdAt` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`),
+                      `updatedAt` = (SELECT local.`updatedAt` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`),
+                      `replyToMessageId` = (SELECT local.`replyToMessageId` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`),
+                      `replyRole` = (SELECT local.`replyRole` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`),
+                      `replyPreview` = (SELECT local.`replyPreview` FROM `message_identity_moves` AS move JOIN `messages` AS local ON local.`messageId` = move.`sourceId` WHERE move.`targetId` = `messages`.`messageId`)
+                    WHERE `messages`.`messageId` IN (
+                      SELECT `targetId` FROM `message_identity_moves`
+                      WHERE `targetRestoring` = 1
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    UPDATE `outbox_commands`
+                    SET `state` = 'retry', `lastAttemptAt` = NULL
+                    WHERE `commandId` IN (
+                      SELECT move.`targetId`
+                      FROM `message_identity_moves` AS move
+                      JOIN `messages` AS local ON local.`messageId` = move.`sourceId`
+                      WHERE move.`targetRestoring` = 1
+                        AND local.`deliveryState` IN ('failed_retryable', 'outcome_unknown')
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    UPDATE `attachment_transfers`
+                    SET `state` = 'sending'
+                    WHERE `state` = 'ready'
+                      AND `attachmentId` IN (
+                        SELECT link.`attachmentId`
+                        FROM `message_attachments` AS link
+                        JOIN `message_identity_moves` AS move ON move.`sourceId` = link.`messageId`
+                        JOIN `messages` AS local ON local.`messageId` = move.`sourceId`
+                        WHERE move.`targetRestoring` = 1
+                          AND local.`deliveryState` IN ('failed_retryable', 'outcome_unknown')
+                      )
+                    """.trimIndent(),
+                )
+                listOf("message_attachments", "turn_blocks").forEach { table ->
+                    db.execSQL(
+                        """
+                        UPDATE `$table`
+                        SET `messageId` = (
+                          SELECT `targetId` FROM `message_identity_moves`
+                          WHERE `sourceId` = `$table`.`messageId` AND `keepTarget` = 0
+                        )
+                        WHERE `messageId` IN (
+                          SELECT `sourceId` FROM `message_identity_moves` WHERE `keepTarget` = 0
+                        )
+                        """.trimIndent(),
+                    )
+                }
+                db.execSQL(
+                    """
+                    UPDATE `message_content_transfers`
+                    SET `messageId` = (
+                      SELECT `targetId` FROM `message_identity_moves`
+                      WHERE `sourceId` = `message_content_transfers`.`messageId`
+                        AND `targetExists` = 0
+                    )
+                    WHERE `messageId` IN (
+                      SELECT `sourceId` FROM `message_identity_moves` WHERE `targetExists` = 0
+                    )
+                    """.trimIndent(),
+                )
+
+                // 4. 完整远端行证明发送已接受，补做漏掉的 ACK 后移除旧投影关系。
+                db.execSQL(
+                    """
+                    UPDATE `attachment_transfers`
+                    SET `state` = 'sent'
+                    WHERE `state` IN ('ready', 'sending')
+                      AND `attachmentId` IN (
+                        SELECT link.`attachmentId`
+                        FROM `message_attachments` AS link
+                        JOIN `message_identity_moves` AS move ON move.`sourceId` = link.`messageId`
+                        WHERE move.`keepTarget` = 1
+                      )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "DELETE FROM `outbox_commands` WHERE `commandId` IN (" +
+                        "SELECT `targetId` FROM `message_identity_moves` WHERE `keepTarget` = 1)",
+                )
+                listOf("message_attachments", "turn_blocks").forEach { table ->
+                    db.execSQL(
+                        "DELETE FROM `$table` WHERE `messageId` IN (" +
+                            "SELECT `sourceId` FROM `message_identity_moves` WHERE `keepTarget` = 1)",
+                    )
+                }
+                db.execSQL(
+                    "DELETE FROM `message_content_transfers` WHERE `messageId` IN (" +
+                        "SELECT `sourceId` FROM `message_identity_moves` WHERE `targetExists` = 1)",
+                )
+                db.execSQL(
+                    "DELETE FROM `pending_message_notifications` WHERE `messageId` IN (" +
+                        "SELECT `sourceId` FROM `message_identity_moves` WHERE `keepTarget` = 1)",
+                )
+                db.execSQL(
+                    """
+                    UPDATE `pending_message_notifications`
+                    SET `messageId` = (
+                      SELECT `targetId` FROM `message_identity_moves`
+                      WHERE `sourceId` = `pending_message_notifications`.`messageId`
+                    )
+                    WHERE `messageId` IN (
+                      SELECT `sourceId` FROM `message_identity_moves` WHERE `keepTarget` = 0
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "DELETE FROM `messages` WHERE `messageId` IN (SELECT `sourceId` FROM `message_identity_moves`)",
+                )
+                db.execSQL("UPDATE `messages` SET `clientMessageId` = NULL WHERE `clientMessageId` IS NOT NULL")
+                db.execSQL("DROP TABLE `message_identity_moves`")
             }
         }
     }

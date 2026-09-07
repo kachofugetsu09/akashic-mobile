@@ -22,7 +22,7 @@ WebSocket 保留有序控制和小事件，HTTPS 提供成熟的 Range、条件�
 
 ## 后果
 
-- Room v17 的传输记录绑定 `messageId + sessionId + messageSeq`；应用私有目录保留 `message-content` 临时文件。
+- 自 Room v17 起，传输记录绑定 `messageId + sessionId + messageSeq`；v18 的 Input 身份迁移保留该记录与确认偏移，应用私有目录继续保留 `message-content` 临时文件。
 - 普通断线和进程退出不清除已确认片段；重载服务端投影时级联删除记录并清理孤立文件。
 - 旧协议在 Message v2 边界明确失败，不返回假完整内容。
 - 协议快照和 Runtime Contract 使用仓库当前锁文件固定的核心提交。

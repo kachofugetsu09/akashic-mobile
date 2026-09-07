@@ -120,16 +120,10 @@ class MessageNotificationPolicyTest {
     }
 
     @Test
-    fun repliesRequireCanonicalMessageIdentity() {
-        val canonical = messageReplyReference("mobile:session-a:42", null)
+    fun replyReferenceUsesTheMessageIdentityDirectly() {
+        val canonical = messageReplyReference("mobile:session-a:42")
 
         assertEquals("mobile:session-a:42", canonical.messageId)
-        assertThrows(IllegalArgumentException::class.java) {
-            messageReplyReference(
-                "user:01ARZ3NDEKTSV4RRFFQ69G5FAV",
-                "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            )
-        }
     }
 
 }

@@ -202,56 +202,6 @@ enum class ConnectionStatusUi {
     DISCONNECTED,
 }
 
-sealed interface MessageUi {
-    val id: String
-    val sessionId: String
-    val createdAtMillis: Long
-    val updatedAtMillis: Long
-    val reply: MessageReplyUi?
-    val attachments: List<MessageAttachmentUi>
-
-    data class User(
-        override val id: String,
-        override val sessionId: String,
-        val text: String,
-        val deliveryLabel: String,
-        val replyable: Boolean,
-        val deliveryAction: MessageDeliveryActionUi? = null,
-        override val createdAtMillis: Long,
-        override val reply: MessageReplyUi?,
-        override val attachments: List<MessageAttachmentUi> = emptyList(),
-        override val updatedAtMillis: Long = createdAtMillis,
-        val clientMessageId: String? = null,
-    ) : MessageUi
-
-    data class AssistantTurn(
-        override val id: String,
-        override val sessionId: String,
-        val intro: String?,
-        val blocks: List<ProcessBlockUi>,
-        val answer: String,
-        val status: AssistantTurnStatus,
-        val durationSeconds: Int?,
-        override val createdAtMillis: Long,
-        override val reply: MessageReplyUi? = null,
-        override val attachments: List<MessageAttachmentUi> = emptyList(),
-        override val updatedAtMillis: Long = createdAtMillis,
-        val clientMessageId: String? = null,
-        val controlTurnId: String? = null,
-    ) : MessageUi {
-        val isStreaming: Boolean
-            get() = status == AssistantTurnStatus.STREAMING
-    }
-}
-
-enum class AssistantTurnStatus {
-    STREAMING,
-    COMPLETE,
-    INTERRUPTED,
-    CANCELLED,
-    FAILED,
-}
-
 data class MessageAttachmentUi(
     val id: String,
     val filename: String,
@@ -269,28 +219,6 @@ enum class MessageAttachmentState {
     CACHED,
     FAILED,
     EVICTED,
-}
-
-data class ProcessBlockUi(
-    val id: String,
-    val kind: ProcessBlockKind,
-    val title: String,
-    val detail: String,
-    val state: ProcessBlockState,
-    val arguments: JsonObject? = null,
-    val resultPreview: String? = null,
-    val durationMillis: Long? = null,
-)
-
-enum class ProcessBlockKind {
-    THINKING,
-    TOOL,
-}
-
-enum class ProcessBlockState {
-    COMPLETED,
-    RUNNING,
-    FAILED,
 }
 
 internal val EmptyConversationState = ConversationUiState(

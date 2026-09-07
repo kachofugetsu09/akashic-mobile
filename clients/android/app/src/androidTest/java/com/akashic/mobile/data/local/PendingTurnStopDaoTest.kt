@@ -51,10 +51,6 @@ class PendingTurnStopDaoTest {
         dao.insert(stop)
 
         assertEquals(listOf(stop), dao.listForServer("server"))
-        assertEquals(
-            listOf("assistant:turn-1"),
-            database.messages().activeAssistantTurns("server").map(MessageEntity::messageId),
-        )
         assertEquals(1, database.conversations().delete("server", "akashic:test"))
         assertEquals(listOf(stop), dao.listForServer("server"))
 

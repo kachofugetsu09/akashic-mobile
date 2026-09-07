@@ -21,9 +21,7 @@ internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String {
 
 internal fun messageReplyReference(
     messageId: String,
-    clientMessageId: String?,
 ): MessageReplyReference {
-    require(!messageId.startsWith("user:")) { "只能引用已进入 Message 日志的 message_id" }
     return MessageReplyReference(messageId = messageId)
 }
 
