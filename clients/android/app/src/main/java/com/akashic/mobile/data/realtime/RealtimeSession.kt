@@ -220,6 +220,54 @@ internal fun historyRequestSnapshotMaxSeq(
 internal fun historyPageEnumerationComplete(payload: HistoryPagePayload): Boolean =
     !payload.hasMore && payload.nextAfterSeq == payload.throughSeq
 
+internal sealed interface SessionMessageContent {
+    val sessionId: String
+
+    data class Messages(
+        override val sessionId: String,
+        val payload: MessagesAppendedPayload,
+    ) : SessionMessageContent
+
+    data class ReplyStatus(
+        override val sessionId: String,
+        val payload: JsonObject,
+    ) : SessionMessageContent
+}
+
+/** 严格区分 session.message 的消息追加与临时回复状态。 */
+internal fun decodeSessionMessage(payload: JsonObject): SessionMessageContent {
+    val type = payload["type"]?.jsonPrimitive?.content ?: error("session.message 缺少 type")
+    return when (type) {
+        "messages.appended" -> {
+            val appended = ProtocolCodec.decodePayload<MessagesAppendedPayload>(payload)
+            require(appended.version == 2) { "messages.appended version mismatch" }
+            require(appended.sessionId.isNotBlank()) { "messages.appended 缺少 session_id" }
+            require(appended.nextAfterSeq in appended.afterSeq..appended.throughSeq) {
+                "messages.appended next cursor is invalid"
+            }
+            if (appended.hasMore) {
+                require(appended.nextAfterSeq > appended.afterSeq) {
+                    "messages.appended cursor did not advance"
+                }
+            } else {
+                require(appended.nextAfterSeq == appended.throughSeq) {
+                    "messages.appended terminal page did not reach through_seq"
+                }
+            }
+            SessionMessageContent.Messages(appended.sessionId, appended)
+        }
+        "reply.status" -> {
+            require(payload["version"]?.jsonPrimitive?.longOrNull == 2L) {
+                "reply.status version mismatch"
+            }
+            val sessionId = payload["session_id"]?.jsonPrimitive?.content
+                ?: error("reply.status 缺少 session_id")
+            SessionMessageContent.ReplyStatus(sessionId, payload)
+        }
+        else -> error("未知 session.message 类型")
+    }
+}
+
 internal fun hasActiveReply(status: JsonObject?): Boolean =
     status?.get("items")?.jsonArray?.any { item ->
         item.jsonObject["active"]?.jsonPrimitive?.booleanOrNull == true
@@ -2544,22 +2592,21 @@ class RealtimeSession(
 
     private suspend fun applySessionMessage(payload: JsonObject) {
         val currentProfile = requireNotNull(profile)
-        val sessionId = payload["session_id"]?.jsonPrimitive?.content
-            ?: error("session.message 缺少 session_id")
-        if (sessionId != mutableState.value.currentSessionId) return
-        when (payload["type"]?.jsonPrimitive?.content) {
-            "messages.appended" -> {
-                deliveryStore.applyMessagePage(currentProfile.serverId, sessionId, payload)
+        val message = decodeSessionMessage(payload)
+        if (message.sessionId != mutableState.value.currentSessionId) return
+        when (message) {
+            is SessionMessageContent.Messages -> {
+                deliveryStore.applyMessageRows(
+                    currentProfile.serverId,
+                    message.sessionId,
+                    message.payload.items,
+                )
                 downloads.resumeIfIdle(currentProfile.serverId)
                 messageDownloads.resumeIfIdle(currentProfile.serverId)
             }
-            "reply.status" -> {
-                require(payload["version"]?.jsonPrimitive?.longOrNull == 2L) {
-                    "reply.status version mismatch"
-                }
-                mutableState.value = mutableState.value.copy(replyStatus = payload)
+            is SessionMessageContent.ReplyStatus -> {
+                mutableState.value = mutableState.value.copy(replyStatus = message.payload)
             }
-            else -> error("未知 session.message 类型")
         }
     }
 

@@ -436,21 +436,19 @@ class LocalDeliveryStore(
         }
     }
 
-    /** 应用当前连接的非 durable Message 订阅页，不推进 durable event cursor。 */
-    suspend fun applyMessagePage(serverId: String, sessionId: String, payload: JsonObject) =
+    /** 应用当前连接订阅到的非 durable Message 行，不推进 durable event cursor。 */
+    suspend fun applyMessageRows(
+        serverId: String,
+        sessionId: String,
+        items: List<RemoteHistoryMessage>,
+    ) =
         projectionStateMutex.withLock {
             database.withTransaction {
-                val page = ProtocolCodec.decodePayload<HistoryPagePayload>(payload)
-                applyHistoryPage(
+                applyMessageRowsInTransaction(
                     serverId,
-                    WireEnvelope(
-                        v = 1,
-                        kind = WireKind.CONTROL,
-                        type = "history.page",
-                        sessionId = sessionId,
-                        payload = payload,
-                    ),
-                    notificationMessageIds = page.items.mapTo(linkedSetOf()) { it.id },
+                    sessionId,
+                    items,
+                    notificationMessageIds = items.mapTo(linkedSetOf()) { it.id },
                 )
             }
         }
@@ -626,7 +624,14 @@ class LocalDeliveryStore(
                 val sessionId = requireNotNull(envelope.sessionId)
                 val notificationIds = database.pendingMessageNotifications()
                     .pendingHintsForSession(sessionId).mapTo(linkedSetOf()) { it.messageId }
-                applyHistoryPage(serverId, envelope, notificationIds)
+                val page = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
+                require(page.version == 2) { "History page message version mismatch" }
+                applyMessageRowsInTransaction(
+                    serverId,
+                    sessionId,
+                    page.items,
+                    notificationIds,
+                )
             }
             "turn.started", "react.thinking.delta", "react.tool.started",
             "react.tool.completed", "answer.delta", "message.final",
@@ -749,14 +754,12 @@ class LocalDeliveryStore(
         }
     }
 
-    private suspend fun applyHistoryPage(
+    private suspend fun applyMessageRowsInTransaction(
         serverId: String,
-        envelope: WireEnvelope,
+        sessionId: String,
+        items: List<RemoteHistoryMessage>,
         notificationMessageIds: Set<String>,
     ) {
-        val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
-        val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        require(payload.version == 2) { "History page message version mismatch" }
         val current = database.conversations().get(sessionId)
         if (current == null) {
             database.conversations().upsert(
@@ -772,7 +775,7 @@ class LocalDeliveryStore(
             require(current.serverId == serverId) { "History session belongs to another server" }
             check(database.conversations().markRemoteKnown(sessionId) == 1)
         }
-        payload.items.forEach { remote ->
+        items.forEach { remote ->
             require(remote.sessionId == sessionId) { "History item session mismatch" }
             require((remote.body == null) != (remote.messageRef == null)) {
                 "History item must carry exactly one of body or message_ref"

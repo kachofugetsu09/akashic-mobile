@@ -1,6 +1,7 @@
 package com.akashic.mobile.data.realtime
 
 import com.akashic.mobile.domain.model.ConnectionPhase
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -9,6 +10,69 @@ import org.junit.Test
 class ConnectionRecoveryPolicyTest {
     private val unavailable = TransferNetworkState(TransferNetworkKind.UNAVAILABLE, false)
     private val unmetered = TransferNetworkState(TransferNetworkKind.UNMETERED, true)
+
+    @Test
+    fun `session message keeps empty append nonempty append and reply status separate`() {
+        val empty = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "type": "messages.appended",
+              "version": 2,
+              "session_id": "akashic:test",
+              "items": [],
+              "after_seq": 4,
+              "next_after_seq": 4,
+              "through_seq": 4,
+              "has_more": false
+            }
+            """.trimIndent(),
+        ).jsonObject
+        val nonempty = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "type": "messages.appended",
+              "version": 2,
+              "session_id": "akashic:test",
+              "items": [{
+                "id": "message-0",
+                "session_id": "akashic:test",
+                "seq": 0,
+                "timestamp": "2026-09-08T05:33:47Z",
+                "author": "user",
+                "source": "conversation",
+                "body": {"kind": "input", "parts": []},
+                "metadata": {},
+                "attachments": []
+              }],
+              "after_seq": -1,
+              "next_after_seq": 0,
+              "through_seq": 0,
+              "has_more": false
+            }
+            """.trimIndent(),
+        ).jsonObject
+        val status = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "type": "reply.status",
+              "version": 2,
+              "session_id": "akashic:test",
+              "snapshot_id": null,
+              "available": false,
+              "items": []
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        val emptyMessage = decodeSessionMessage(empty) as SessionMessageContent.Messages
+        val appendedMessage = decodeSessionMessage(nonempty) as SessionMessageContent.Messages
+        val replyStatus = decodeSessionMessage(status) as SessionMessageContent.ReplyStatus
+
+        assertTrue(emptyMessage.payload.items.isEmpty())
+        assertEquals(4L, emptyMessage.payload.nextAfterSeq)
+        assertEquals("message-0", appendedMessage.payload.items.single().id)
+        assertEquals(status, replyStatus.payload)
+    }
 
     @Test
     fun `failure before recovery consumes one immediate reconnect`() {

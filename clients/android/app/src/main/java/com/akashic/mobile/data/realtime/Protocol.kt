@@ -573,6 +573,18 @@ data class HistoryPagePayload(
 )
 
 @Serializable
+data class MessagesAppendedPayload(
+    val type: String,
+    val version: Int,
+    @SerialName("session_id") val sessionId: String,
+    val items: List<RemoteHistoryMessage>,
+    @SerialName("after_seq") val afterSeq: Long,
+    @SerialName("next_after_seq") val nextAfterSeq: Long,
+    @SerialName("through_seq") val throughSeq: Long,
+    @SerialName("has_more") val hasMore: Boolean,
+)
+
+@Serializable
 data class MessageContentRef(
     val version: Int,
     val encoding: String,
