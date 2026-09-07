@@ -94,6 +94,60 @@ class ProtocolCodecTest {
     }
 
     @Test
+    fun `production follow path and message stream types match fixed core schema`() {
+        val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val follow = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "session.follow",
+            id = commandId,
+            connectionEpoch = 7,
+            sessionId = "akashic:one",
+            payload = ProtocolCodec.json().encodeToJsonElement(
+                SessionFollowPayload.serializer(),
+                SessionFollowPayload(afterSeq = 42),
+            ).jsonObject,
+        )
+
+        assertEquals(follow, ProtocolCodec.decode(ProtocolCodec.encode(follow)))
+        for (replyType in listOf("session.follow.ok", "session.follow.error")) {
+            val reply = follow.copy(kind = WireKind.REPLY, type = replyType)
+            assertEquals(reply, ProtocolCodec.decode(ProtocolCodec.encode(reply)))
+        }
+        for (messageType in listOf("messages.appended", "reply.status")) {
+            val control = WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.CONTROL,
+                type = "session.message",
+                connectionEpoch = 7,
+                payload = buildJsonObject { put("type", messageType) },
+            )
+            assertEquals(control, ProtocolCodec.decode(ProtocolCodec.encode(control)))
+        }
+    }
+
+    @Test
+    fun `fixed core type rules accept current extensions and reject retired turn stop`() {
+        val command = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "model.call.get",
+            id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            connectionEpoch = 7,
+        )
+        val specialReply = command.copy(kind = WireKind.REPLY, type = "message.content.ready")
+
+        assertEquals(command, ProtocolCodec.decode(ProtocolCodec.encode(command)))
+        assertEquals(specialReply, ProtocolCodec.decode(ProtocolCodec.encode(specialReply)))
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtocolCodec.encode(command.copy(type = "turn.stop"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtocolCodec.encode(command.copy(kind = WireKind.REPLY, type = "turn.stop.ok"))
+        }
+    }
+
+    @Test
     fun `round trips stop as a normal message command`() {
         val envelope = WireEnvelope(
             v = WIRE_PROTOCOL_VERSION,

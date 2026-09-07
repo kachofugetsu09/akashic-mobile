@@ -651,36 +651,50 @@ object ProtocolCodec {
         coerceInputValues = false
     }
 
+    private val commandTypes = setOf(
+        "session.list",
+        "session.create",
+        "session.open",
+        "session.follow",
+        "history.get",
+        "message.content.prepare",
+        "message.send",
+        "attachment.begin",
+        "attachment.finish",
+        "attachment.download",
+        "command.list",
+        "model.catalog.get",
+        "model.call.get",
+        "runtime.document.list",
+        "runtime.document.get",
+        "runtime.capability.list",
+        "runtime.mcp.get",
+        "scheduler.job.list",
+        "scheduler.job.get",
+        "plugin.ui.catalog",
+        "plugin.ui.asset.get",
+        "plugin.ui.query",
+        "plugin.ui.query.prepare",
+        "plugin.ui.cancel",
+        MOBILE_WEB_UI_RELEASE_GET,
+        MOBILE_WEB_UI_CONTENT_PREPARE,
+        "device.update",
+        "ping",
+    )
+
+    private val specialReplyTypes = setOf(
+        "session.created",
+        "message.content.ready",
+        "plugin.ui.catalog.not_modified",
+        "plugin.ui.query.ready",
+    )
+
+    private val replyTypePattern = Regex(
+        "^([a-z][a-z0-9]*(?:\\.[a-z][a-z0-9_]*)+)\\.(?:ok|error)$",
+    )
+
     private val knownTypes = mapOf(
-        WireKind.COMMAND to setOf(
-            "session.list",
-            "session.create",
-            "session.open",
-            "history.get",
-            "message.content.prepare",
-            "message.send",
-            "turn.stop",
-            "attachment.begin",
-            "attachment.finish",
-            "attachment.download",
-            "command.list",
-            "model.catalog.get",
-            "runtime.document.list",
-            "runtime.document.get",
-            "runtime.capability.list",
-            "runtime.mcp.get",
-            "scheduler.job.list",
-            "scheduler.job.get",
-            "plugin.ui.catalog",
-            "plugin.ui.asset.get",
-            "plugin.ui.query",
-            "plugin.ui.query.prepare",
-            "plugin.ui.cancel",
-            MOBILE_WEB_UI_RELEASE_GET,
-            MOBILE_WEB_UI_CONTENT_PREPARE,
-            "device.update",
-            "ping",
-        ),
+        WireKind.COMMAND to commandTypes,
         WireKind.EVENT to setOf(
             "session.list",
             "session.created",
@@ -706,6 +720,7 @@ object ProtocolCodec {
             "device.proof",
             "auth.accepted",
             "resume",
+            "session.message",
             "plugin.ui.changed",
             MOBILE_WEB_UI_RELEASE_CHANGED,
             "device.revoked",
@@ -750,6 +765,12 @@ object ProtocolCodec {
         knownTypes[envelope.kind]?.let { types ->
             require(envelope.type in types) { "Unsupported ${envelope.kind} type: ${envelope.type}" }
         }
+        if (envelope.kind == WireKind.REPLY) {
+            val command = replyTypePattern.matchEntire(envelope.type)?.groupValues?.get(1)
+            require(envelope.type in specialReplyTypes || command in commandTypes) {
+                "Unsupported REPLY type: ${envelope.type}"
+            }
+        }
 
         when (envelope.kind) {
             WireKind.COMMAND,
@@ -777,7 +798,7 @@ object ProtocolCodec {
                 "Authenticated frames require a positive connection_epoch"
             }
             WireKind.CONTROL -> when (envelope.type) {
-                "auth.accepted", "resume", "plugin.ui.changed", MOBILE_WEB_UI_RELEASE_CHANGED, "device.revoked" -> require(
+                "auth.accepted", "resume", "session.message", "plugin.ui.changed", MOBILE_WEB_UI_RELEASE_CHANGED, "device.revoked" -> require(
                     envelope.connectionEpoch != null && envelope.connectionEpoch > 0,
                 ) { "Authenticated controls require a positive connection_epoch" }
                 else -> require(envelope.connectionEpoch == null) {
