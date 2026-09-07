@@ -14,6 +14,33 @@ import okio.ByteString.Companion.toByteString
 
 class ProtocolCodecTest {
     @Test
+    fun `decodes fixed core message content grant exactly`() {
+        val sha256 = "a".repeat(64)
+        val payload = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "version": 2,
+              "message_id": "message-1",
+              "byte_length": 42,
+              "sha256": "$sha256",
+              "encoding": "utf-8",
+              "media_type": "application/json",
+              "path": "/mobile/message-content/v2",
+              "ticket": "signed-ticket",
+              "expires_at": "2026-09-08T08:01:00Z"
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        val grant = ProtocolCodec.decodePayload<MessageContentGrantPayload>(payload)
+
+        assertEquals(2, grant.version)
+        assertEquals("utf-8", grant.encoding)
+        assertEquals("application/json", grant.mediaType)
+        assertEquals(MESSAGE_CONTENT_HTTP_PATH, grant.path)
+    }
+
+    @Test
     fun `decodes message log v2 row without relaxing unknown keys`() {
         val payload = ProtocolCodec.json().parseToJsonElement(
             """

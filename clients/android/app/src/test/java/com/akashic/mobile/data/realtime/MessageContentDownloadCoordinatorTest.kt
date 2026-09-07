@@ -74,20 +74,25 @@ class MessageContentDownloadCoordinatorTest {
                 id = command.id,
                 connectionEpoch = 1,
                 sessionId = transfer.sessionId,
-                payload = ProtocolCodec.json().encodeToJsonElement(
-                    MessageContentGrantPayload.serializer(),
-                    MessageContentGrantPayload(
-                        messageId = transfer.messageId,
-                        byteLength = transfer.byteLength,
-                        sha256 = transfer.sha256,
-                        path = "/mobile/message-content/v1",
-                        ticket = "ticket",
-                        expiresAt = "2026-08-02T00:01:00Z",
-                    ),
+                payload = ProtocolCodec.json().parseToJsonElement(
+                    """
+                    {
+                      "version": 2,
+                      "message_id": "${transfer.messageId}",
+                      "byte_length": ${transfer.byteLength},
+                      "sha256": "${transfer.sha256}",
+                      "encoding": "utf-8",
+                      "media_type": "application/json",
+                      "path": "/mobile/message-content/v2",
+                      "ticket": "ticket",
+                      "expires_at": "2026-08-02T00:01:00Z"
+                    }
+                    """.trimIndent(),
                 ).jsonObject,
             ),
         )
         val request = requests.single()
+        assertEquals(MESSAGE_CONTENT_HTTP_PATH, request.path)
         coordinator.onHttpResponse(
             command.id,
             MessageContentHttpResponse(
@@ -138,10 +143,13 @@ class MessageContentDownloadCoordinatorTest {
                     payload = ProtocolCodec.json().encodeToJsonElement(
                         MessageContentGrantPayload.serializer(),
                         MessageContentGrantPayload(
+                            version = 2,
                             messageId = "different-message",
                             byteLength = transfer.byteLength,
                             sha256 = transfer.sha256,
-                            path = "/mobile/message-content/v1",
+                            encoding = "utf-8",
+                            mediaType = "application/json",
+                            path = MESSAGE_CONTENT_HTTP_PATH,
                             ticket = "ticket",
                             expiresAt = "2026-09-08T08:01:00Z",
                         ),
@@ -187,10 +195,13 @@ class MessageContentDownloadCoordinatorTest {
                 payload = ProtocolCodec.json().encodeToJsonElement(
                     MessageContentGrantPayload.serializer(),
                     MessageContentGrantPayload(
+                        version = 2,
                         messageId = transfer.messageId,
                         byteLength = transfer.byteLength,
                         sha256 = transfer.sha256,
-                        path = "/mobile/message-content/v1",
+                        encoding = "utf-8",
+                        mediaType = "application/json",
+                        path = MESSAGE_CONTENT_HTTP_PATH,
                         ticket = "ticket",
                         expiresAt = "2026-09-08T08:01:00Z",
                     ),

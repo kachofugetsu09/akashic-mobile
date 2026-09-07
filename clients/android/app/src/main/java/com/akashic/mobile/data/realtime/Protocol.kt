@@ -627,9 +627,12 @@ data class MessageContentPreparePayload(
 
 @Serializable
 data class MessageContentGrantPayload(
+    val version: Int,
     @SerialName("message_id") val messageId: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,
+    val encoding: String,
+    @SerialName("media_type") val mediaType: String,
     val path: String,
     val ticket: String,
     @SerialName("expires_at") val expiresAt: String,

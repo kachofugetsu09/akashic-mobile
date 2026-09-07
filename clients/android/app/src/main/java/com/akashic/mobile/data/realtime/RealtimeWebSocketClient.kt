@@ -240,6 +240,7 @@ class RealtimeWebSocketClient(
                 Request.Builder()
                     .url(url)
                     .header("Authorization", "Bearer ${request.ticket}")
+                    .header("Accept-Encoding", "identity")
                     .header("Range", "bytes=${request.offset}-$rangeEnd")
                     .header("If-Range", "\"${request.sha256}\"")
                     .get()
@@ -588,7 +589,6 @@ class RealtimeWebSocketClient(
         val MOBILE_WEB_UI_MANIFEST_ROUTE = Regex("^/mobile/webui/v1/manifest/[0-9a-f]{64}$")
         val MOBILE_WEB_UI_BLOB_ROUTE = Regex("^/mobile/webui/v1/blob/([0-9a-f]{64})$")
         const val PLUGIN_UI_HTTP_PATH = "/mobile/plugin-ui/v1/query"
-        const val MESSAGE_CONTENT_HTTP_PATH = "/mobile/message-content/v1"
         val PLUGIN_UI_JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
     }
 }
