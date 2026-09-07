@@ -39,7 +39,7 @@
 - 增加：配对后的目录、历史和 realtime 事件 upsert 会话、消息、turn 和附件元数据。
 - 更新：Message delivery、read position、cursor 和下载状态按各 DAO 状态机更新。新 Input 从本地建行到 Core 投影始终使用 `message.send` frame ID；运行路径不读取 metadata 或 Room `clientMessageId` 推导身份。`clientMessageId`、`turnClientMessageId`、`controlTurnId` 和旧 turn block 表仅保留旧 schema 的迁移证据，不再拥有 Message v2 运行状态。
 - 逻辑失效：附件缓存以 `evicted` 表达文件不可用；消息投递使用明确状态，不用缺行伪装终态。v10→v11 迁移只把同一会话中较旧的重复 streaming 临时消息更新为 `interrupted`，同步结束其 running blocks，并保留最新活动投影、消息正文和全部 turn blocks。
-- 物理删除：`reloadFromServer` 只允许清理可重载投影，并通过 delivery 状态保护带本地工作的消息和会话。Room v17→v18 只处理可逆的 `user:<clientMessageId>` 旧本地形状：目标不存在时复制本地事实并移动引用；目标是 restoring 时合入本地展示状态并保留 manifest、文件和确认偏移，失败或结果未知的原 outbox 以同 ID 重新排入核对；目标是同 Session 的完整远端 Input 时保留远端正文和附件投影，并以该成功证据补结算 outbox 与 sending 附件。迁移不删除附件文件；无法证明的身份冲突会 fail-loud。
+- 物理删除：`reloadFromServer` 只允许清理可重载投影，并通过 delivery 状态保护带本地工作的消息和会话。Room v17→v18 只移动 `user:` 前缀、无服务端序号且尚无 Message v2 正文和来源的旧本地行；首次发送 ID 留在 `messageId`，明确失败重试只把 `clientMessageId` 与 outbox 更新为最新 ID。迁移把这类行与引用移到最新 ID：目标不存在时复制本地事实并移动引用；目标是 restoring 时合入本地展示状态并保留 manifest、文件和确认偏移，失败或结果未知的原 outbox 以同 ID 重新排入核对；目标是同 Session 的完整远端 Input 时保留远端正文和附件投影，并以该成功证据补结算 outbox 与 sending 附件。旧版已取得 `<sessionId>:<seq>` canonical ID 且尚无 Message v2 body 的 Input 保留原 ID，只清除废弃的 `clientMessageId`，随后由同 ID 的历史记录原位补全；该 canonical ID 也证明 Input 已被 Core 接纳，因此会把投递状态收敛为 `sent`，并补结算 ACK 前断线留下的 outbox 和待发附件。迁移不删除附件文件；无法证明的其他身份冲突会 fail-loud。
 - 恢复：从固定核心协议重新同步；正常重连可从本地连续 `serverSeq` 投影的首个不完整页续传，投影完整时不重放；投影不连续、数量异常、核心要求 reset 或用户在协议错误状态主动执行“清理缓存并同步”时从第一页重建。错误连接上的用户重建先提交可重载投影清理，再重连并从既有 durable cursor 恢复；失败必须暴露，不能用空列表冒充成功。
 
 ### Room 本地工作

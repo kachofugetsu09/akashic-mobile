@@ -568,7 +568,7 @@ abstract class AppDatabase : RoomDatabase() {
 
         val MIGRATION_17_18 = object : Migration(17, 18) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                // 1. 找出仍使用临时本地 ID 的待发 Input；outbox commandId 已经是目标 Message ID。
+                // 1. 找出仍使用首次发送视觉 ID 的本地 Input；重试会只更新 clientMessageId。
                 db.execSQL(
                     """
                     CREATE TEMP TABLE `message_identity_moves` AS
@@ -604,10 +604,39 @@ abstract class AppDatabase : RoomDatabase() {
                     FROM `messages` AS local
                     WHERE local.`role` = 'user'
                       AND local.`clientMessageId` IS NOT NULL
-                      AND local.`messageId` = 'user:' || local.`clientMessageId`
+                      AND local.`messageId` LIKE 'user:%'
+                      AND local.`serverSeq` IS NULL
+                      AND local.`recordedAt` = ''
+                      AND local.`author` = ''
+                      AND local.`source` = ''
+                      AND local.`bodyJson` = '{}'
                       AND local.`deliveryState` IN (
                         'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
                       )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    CREATE TEMP TABLE `legacy_canonical_inputs` AS
+                    SELECT
+                      local.`messageId` AS `messageId`,
+                      local.`clientMessageId` AS `clientMessageId`
+                    FROM `messages` AS local
+                    WHERE local.`role` = 'user'
+                      AND local.`clientMessageId` IS NOT NULL
+                      AND local.`serverSeq` IS NULL
+                      AND local.`recordedAt` = ''
+                      AND local.`author` = ''
+                      AND local.`source` = ''
+                      AND local.`bodyJson` = '{}'
+                      AND local.`deliveryState` IN (
+                        'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
+                      )
+                      AND substr(local.`messageId`, 1, length(local.`sessionId`) + 1) =
+                        local.`sessionId` || ':'
+                      AND length(substr(local.`messageId`, length(local.`sessionId`) + 2)) > 0
+                      AND substr(local.`messageId`, length(local.`sessionId`) + 2)
+                        NOT GLOB '*[^0-9]*'
                     """.trimIndent(),
                 )
                 db.query(
@@ -620,13 +649,20 @@ abstract class AppDatabase : RoomDatabase() {
                 }
                 db.query(
                     """
-                    SELECT COUNT(*) FROM `messages`
-                    WHERE `role` = 'user'
-                      AND `clientMessageId` IS NOT NULL
-                      AND `messageId` != `clientMessageId`
-                      AND `messageId` != 'user:' || `clientMessageId`
-                      AND `deliveryState` IN (
+                    SELECT COUNT(*) FROM `messages` AS local
+                    WHERE local.`role` = 'user'
+                      AND local.`clientMessageId` IS NOT NULL
+                      AND local.`messageId` != local.`clientMessageId`
+                      AND local.`deliveryState` IN (
                         'pending', 'sent', 'failed', 'failed_retryable', 'outcome_unknown'
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM `message_identity_moves` AS move
+                        WHERE move.`sourceId` = local.`messageId`
+                      )
+                      AND NOT EXISTS (
+                        SELECT 1 FROM `legacy_canonical_inputs` AS canonical
+                        WHERE canonical.`messageId` = local.`messageId`
                       )
                     """.trimIndent(),
                 ).use { cursor ->
@@ -781,6 +817,32 @@ abstract class AppDatabase : RoomDatabase() {
                     "DELETE FROM `outbox_commands` WHERE `commandId` IN (" +
                         "SELECT `targetId` FROM `message_identity_moves` WHERE `keepTarget` = 1)",
                 )
+                db.execSQL(
+                    """
+                    UPDATE `attachment_transfers`
+                    SET `state` = 'sent'
+                    WHERE `state` IN ('ready', 'sending')
+                      AND `attachmentId` IN (
+                        SELECT link.`attachmentId`
+                        FROM `message_attachments` AS link
+                        JOIN `legacy_canonical_inputs` AS canonical
+                          ON canonical.`messageId` = link.`messageId`
+                      )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    """
+                    UPDATE `messages`
+                    SET `deliveryState` = 'sent'
+                    WHERE `messageId` IN (
+                      SELECT `messageId` FROM `legacy_canonical_inputs`
+                    )
+                    """.trimIndent(),
+                )
+                db.execSQL(
+                    "DELETE FROM `outbox_commands` WHERE `commandId` IN (" +
+                        "SELECT `clientMessageId` FROM `legacy_canonical_inputs`)",
+                )
                 listOf("message_attachments", "turn_blocks").forEach { table ->
                     db.execSQL(
                         "DELETE FROM `$table` WHERE `messageId` IN (" +
@@ -812,6 +874,7 @@ abstract class AppDatabase : RoomDatabase() {
                 )
                 db.execSQL("UPDATE `messages` SET `clientMessageId` = NULL WHERE `clientMessageId` IS NOT NULL")
                 db.execSQL("DROP TABLE `message_identity_moves`")
+                db.execSQL("DROP TABLE `legacy_canonical_inputs`")
             }
         }
     }

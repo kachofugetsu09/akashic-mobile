@@ -125,7 +125,7 @@ embedded baseline 没有远端 generation，`generationRef=null` 本身就是它
 
 Android 为每次 `message.send` 生成一个 ID，并同时用作 frame ID、`client_message_id`、本地 user `messageId` 和 outbox `commandId`；Core 接纳后保留该值作为 Input `Message.id`。因此 append 可以原位完成本地行，随后到达的 ACK 只结算 outbox 与附件状态。明确失败重试生成新 ID，并在一个 Room 事务中移动本地引用；结果未知仍用原 ID 核对。
 
-Room v17→v18 把生产旧形状 `user:<clientMessageId>` 合到 `<clientMessageId>`。若同 ID 的完整远端 Input 已存在，它的正文和附件投影优先，并补结算对应 outbox；若同 ID 仍在 restoring，则保留 manifest、下载文件和确认偏移，失败或结果未知的原命令以同 ID 重新核对，ACK 与正文下载无论谁先完成都收敛到同一行。其他身份形状或与 Output/别 Session 的碰撞会中止迁移，不用 metadata 或内容猜测。
+Room v17→v18 把旧版保留的 `user:<首次 clientMessageId>` 视觉身份合到当前 `clientMessageId`；明确失败重试可能让两者不同。迁移只移动没有服务端序号、Message v2 正文和来源的 `user:` 本地行。若当前 ID 的完整远端 Input 已存在，它的正文和附件投影优先，并补结算对应 outbox；若同 ID 仍在 restoring，则保留 manifest、下载文件和确认偏移，失败或结果未知的原命令以同 ID 重新核对，ACK 与正文下载无论谁先完成都收敛到同一行。旧协议已经取得 `<sessionId>:<seq>` canonical ID 的 Input 保留原 ID，只清除 `clientMessageId`，等待 history 按同 ID 原位补全；该 ID 同时作为接纳证据，把投递状态收敛为 `sent`，并补结算 ACK 前断线残留的 outbox 与待发附件。其他身份形状或与 Output/别 Session 的碰撞会中止迁移，不用 metadata 或内容猜测。
 
 ## 未定义而不得猜测
 

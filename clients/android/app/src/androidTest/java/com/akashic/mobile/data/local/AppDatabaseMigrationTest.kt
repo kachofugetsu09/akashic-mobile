@@ -39,6 +39,8 @@ class AppDatabaseMigrationTest {
             DATABASE_15_16,
             DATABASE_16_17,
             DATABASE_17_18,
+            DATABASE_17_18_RETRIED,
+            DATABASE_17_18_CANONICAL,
             DATABASE_17_18_INVALID,
         )
             .forEach(context::deleteDatabase)
@@ -930,6 +932,173 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate17To18MovesRetriedInputToLatestClientMessageId() {
+        val firstId = "01ARZ3NDEKTSV4RRFFQ69G5FB0"
+        val retryId = "01ARZ3NDEKTSV4RRFFQ69G5FB1"
+        val sourceId = "user:$firstId"
+        helper.createDatabase(DATABASE_17_18_RETRIED, 17).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES(" +
+                    "'server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '迁移会话', 2, 1)")
+            insertV17Message(sourceId, retryId, "failed_retryable", "重试问题", null, "{}", 10)
+            insertV17Message("reply", null, "complete", "引用", 3, "{}", 11, replyTo = sourceId)
+            execSQL("INSERT INTO conversation_read_states VALUES('akashic:test', 0, '$sourceId', 24, 12)")
+            execSQL("INSERT INTO composer_drafts VALUES('akashic:test', 'server', '继续', '$sourceId', 13)")
+            insertV17Outbox(retryId, "failed_retryable")
+            execSQL(
+                "INSERT INTO media_attachments VALUES(" +
+                    "'retry-media', 'server', 'akashic:test', 'retry.png', 'image/png', " +
+                    "3, '${"a".repeat(64)}', 3, 'cached', 'cache/retry-media', 1, 1)",
+            )
+            execSQL("INSERT INTO message_attachments VALUES('$sourceId', 'retry-media', 0)")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_17_18_RETRIED,
+            18,
+            true,
+            AppDatabase.MIGRATION_17_18,
+        ).use { database ->
+            database.query(
+                "SELECT messageId, clientMessageId, text, deliveryState FROM messages " +
+                    "WHERE text = '重试问题'",
+            ).use {
+                check(it.moveToFirst())
+                assertEquals(retryId, it.getString(0))
+                assertEquals(true, it.isNull(1))
+                assertEquals("重试问题", it.getString(2))
+                assertEquals("failed_retryable", it.getString(3))
+            }
+            database.query("SELECT anchorMessageId FROM conversation_read_states").use {
+                check(it.moveToFirst()); assertEquals(retryId, it.getString(0))
+            }
+            database.query("SELECT replyToMessageId FROM composer_drafts").use {
+                check(it.moveToFirst()); assertEquals(retryId, it.getString(0))
+            }
+            database.query("SELECT replyToMessageId FROM messages WHERE messageId = 'reply'").use {
+                check(it.moveToFirst()); assertEquals(retryId, it.getString(0))
+            }
+            database.query("SELECT messageId FROM message_attachments WHERE attachmentId = 'retry-media'").use {
+                check(it.moveToFirst()); assertEquals(retryId, it.getString(0))
+            }
+            database.query("SELECT commandId, state FROM outbox_commands").use {
+                check(it.moveToFirst())
+                assertEquals(retryId, it.getString(0))
+                assertEquals("failed_retryable", it.getString(1))
+                assertEquals(false, it.moveToNext())
+            }
+            database.query("SELECT COUNT(*) FROM messages WHERE messageId = '$sourceId'").use {
+                check(it.moveToFirst()); assertEquals(0, it.getInt(0))
+            }
+        }
+    }
+
+    @Test
+    fun migrate17To18KeepsLegacyCanonicalInputIdentityAndSettlesOutbox() {
+        val clientId = "01ARZ3NDEKTSV4RRFFQ69G5FB2"
+        val unacknowledgedClientId = "01ARZ3NDEKTSV4RRFFQ69G5FB3"
+        val sessionId = "akashic:00000000000070008000000000000001"
+        val canonicalId = "$sessionId:2"
+        val unacknowledgedCanonicalId = "$sessionId:3"
+        helper.createDatabase(DATABASE_17_18_CANONICAL, 17).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES(" +
+                    "'server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL("INSERT INTO conversations VALUES('$sessionId', 'server', '迁移会话', 2, 1)")
+            insertV17Message(
+                canonicalId,
+                clientId,
+                "sent",
+                "已接纳问题",
+                null,
+                "{}",
+                10,
+                sessionId = sessionId,
+            )
+            insertV17Message(
+                "reply",
+                null,
+                "complete",
+                "引用",
+                3,
+                "{}",
+                11,
+                replyTo = canonicalId,
+                sessionId = sessionId,
+            )
+            insertV17Message(
+                unacknowledgedCanonicalId,
+                unacknowledgedClientId,
+                "outcome_unknown",
+                "ACK 前已持久化",
+                null,
+                "{}",
+                12,
+                sessionId = sessionId,
+            )
+            insertV17Outbox(unacknowledgedClientId, "outcome_unknown")
+            execSQL(
+                "INSERT INTO media_attachments VALUES(" +
+                    "'canonical-media', 'server', '$sessionId', 'canonical.png', 'image/png', " +
+                    "3, '${"a".repeat(64)}', 3, 'cached', 'cache/canonical-media', 1, 1)",
+            )
+            execSQL(
+                "INSERT INTO attachment_transfers VALUES(" +
+                    "'canonical-media', 'server', '$sessionId', 'canonical.png', 'image/png', " +
+                    "3, '${"a".repeat(64)}', 3, 'ready', 1)",
+            )
+            execSQL("INSERT INTO message_attachments VALUES('$unacknowledgedCanonicalId', 'canonical-media', 0)")
+            execSQL("INSERT INTO conversation_read_states VALUES('$sessionId', 0, '$canonicalId', 24, 12)")
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_17_18_CANONICAL,
+            18,
+            true,
+            AppDatabase.MIGRATION_17_18,
+        ).use { database ->
+            database.query(
+                "SELECT messageId, clientMessageId, text, deliveryState, serverSeq, bodyJson " +
+                    "FROM messages WHERE messageId = '$canonicalId'",
+            ).use {
+                check(it.moveToFirst())
+                assertEquals(canonicalId, it.getString(0))
+                assertEquals(true, it.isNull(1))
+                assertEquals("已接纳问题", it.getString(2))
+                assertEquals("sent", it.getString(3))
+                assertEquals(true, it.isNull(4))
+                assertEquals("{}", it.getString(5))
+            }
+            database.query("SELECT anchorMessageId FROM conversation_read_states").use {
+                check(it.moveToFirst()); assertEquals(canonicalId, it.getString(0))
+            }
+            database.query("SELECT replyToMessageId FROM messages WHERE messageId = 'reply'").use {
+                check(it.moveToFirst()); assertEquals(canonicalId, it.getString(0))
+            }
+            database.query("SELECT COUNT(*) FROM outbox_commands").use {
+                check(it.moveToFirst()); assertEquals(0, it.getInt(0))
+            }
+            database.query(
+                "SELECT messageId, clientMessageId, deliveryState FROM messages " +
+                    "WHERE messageId = '$unacknowledgedCanonicalId'",
+            ).use {
+                check(it.moveToFirst())
+                assertEquals(unacknowledgedCanonicalId, it.getString(0))
+                assertEquals(true, it.isNull(1))
+                assertEquals("sent", it.getString(2))
+            }
+            database.query("SELECT state FROM attachment_transfers WHERE attachmentId = 'canonical-media'").use {
+                check(it.moveToFirst()); assertEquals("sent", it.getString(0))
+            }
+        }
+    }
+
+    @Test
     fun migrate17To18RejectsUnknownPendingIdentityShape() {
         helper.createDatabase(DATABASE_17_18_INVALID, 17).apply {
             execSQL(
@@ -970,6 +1139,7 @@ class AppDatabaseMigrationTest {
         role: String = "user",
         recordedAt: String = "",
         replyTo: String? = null,
+        sessionId: String = "akashic:test",
     ) {
         execSQL(
             """
@@ -977,11 +1147,12 @@ class AppDatabaseMigrationTest {
               messageId, clientMessageId, sessionId, role, text, deliveryState, createdAt, updatedAt,
               serverSeq, replyToMessageId, replyRole, replyPreview, turnClientMessageId, controlTurnId,
               recordedAt, author, source, bodyJson, metadataJson, attachmentsJson
-            ) VALUES(?, ?, 'akashic:test', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, '{}', '[]')
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, '{}', '[]')
             """.trimIndent(),
             arrayOf<Any?>(
                 messageId,
                 clientMessageId,
+                sessionId,
                 role,
                 text,
                 deliveryState,
@@ -1022,6 +1193,8 @@ class AppDatabaseMigrationTest {
         const val DATABASE_15_16 = "migration-15-16"
         const val DATABASE_16_17 = "migration-16-17"
         const val DATABASE_17_18 = "migration-17-18"
+        const val DATABASE_17_18_RETRIED = "migration-17-18-retried"
+        const val DATABASE_17_18_CANONICAL = "migration-17-18-canonical"
         const val DATABASE_17_18_INVALID = "migration-17-18-invalid"
     }
 }
