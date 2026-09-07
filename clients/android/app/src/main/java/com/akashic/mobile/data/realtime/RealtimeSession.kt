@@ -2092,6 +2092,7 @@ class RealtimeSession(
                             payload.clientMessageId,
                             System.currentTimeMillis(),
                         )
+                        rememberRemoteSession(requireNotNull(envelope.sessionId))
                         activeOutboxCommandId = null
                         attachmentDrafts.deleteSentFiles(sentFiles)
                         flushOutbox()
