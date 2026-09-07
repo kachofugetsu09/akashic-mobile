@@ -177,15 +177,13 @@ data class WireEnvelope(
 @Serializable
 data class MessageReplyReference(
     @SerialName("message_id")
-    val messageId: String? = null,
-    @SerialName("client_message_id")
-    val clientMessageId: String? = null,
-    @SerialName("delivery_id")
-    val deliveryId: String? = null,
+    val messageId: String,
 )
 
 @Serializable
 data class MessageSendPayload(
+    @SerialName("message_log_version")
+    val messageLogVersion: Int = 2,
     @SerialName("client_message_id")
     val clientMessageId: String,
     @SerialName("retry_of_client_message_id")
@@ -335,6 +333,21 @@ data class PairAcceptedPayload(
 @Serializable
 data class SessionListPayload(
     val items: List<RemoteSessionSummary>,
+    val version: Int,
+    val total: Int,
+    @SerialName("next_cursor") val nextCursor: SessionListCursor? = null,
+)
+
+@Serializable
+data class SessionListCursor(
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("session_id") val sessionId: String,
+)
+
+@Serializable
+data class MessageSendOkPayload(
+    val accepted: Boolean,
+    @SerialName("client_message_id") val clientMessageId: String,
 )
 
 @Serializable
@@ -544,30 +557,28 @@ data class RemoteSessionSummary(
     val title: String,
     @SerialName("updated_at") val updatedAt: String,
     @SerialName("message_count") val messageCount: Int,
-    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
-)
+    @SerialName("head_seq") val headSeq: Long,
+) {
+    val snapshotMaxSeq: Long get() = headSeq
+}
 
 @Serializable
 data class HistoryPagePayload(
     val items: List<RemoteHistoryMessage>,
-    val title: String? = null,
-    val total: Int,
-    val page: Int? = null,
-    @SerialName("page_size") val pageSize: Int,
-    @SerialName("content_ref_version") val contentRefVersion: Int? = null,
-    @SerialName("after_seq") val afterSeq: Long? = null,
-    @SerialName("next_after_seq") val nextAfterSeq: Long? = null,
-    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
-    @SerialName("has_more") val hasMore: Boolean? = null,
+    val version: Int,
+    @SerialName("after_seq") val afterSeq: Long,
+    @SerialName("next_after_seq") val nextAfterSeq: Long,
+    @SerialName("through_seq") val throughSeq: Long,
+    @SerialName("has_more") val hasMore: Boolean,
 )
 
 @Serializable
 data class MessageContentRef(
     val version: Int,
     val encoding: String,
+    @SerialName("media_type") val mediaType: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,
-    val preview: String,
 )
 
 @Serializable
@@ -579,24 +590,36 @@ data class AttachmentAvailabilityError(
 @Serializable
 data class RemoteHistoryMessage(
     val id: String,
-    @SerialName("session_key") val sessionKey: String,
-    val seq: Int,
-    val role: String,
-    val content: String? = null,
-    @SerialName("content_ref") val contentRef: MessageContentRef? = null,
-    @SerialName("tool_chain") val toolChain: JsonElement? = null,
-    val extra: JsonObject,
-    val ts: String,
-    @SerialName("client_message_id") val clientMessageId: String? = null,
-    @SerialName("reply_to_message_id") val replyToMessageId: String? = null,
-    @SerialName("reply_role") val replyRole: String? = null,
-    @SerialName("reply_preview") val replyPreview: String? = null,
-    val attachments: List<AttachmentDescriptor> = emptyList(),
-    @SerialName("attachment_error") val attachmentError: AttachmentAvailabilityError? = null,
+    @SerialName("session_id") val sessionId: String,
+    val seq: Long,
+    val timestamp: String? = null,
+    val author: String? = null,
+    val source: String? = null,
+    val body: JsonObject? = null,
+    val metadata: JsonObject? = null,
+    @SerialName("message_ref") val messageRef: MessageContentRef? = null,
+    val attachments: List<TimelineAttachmentDescriptor> = emptyList(),
+)
+
+@Serializable
+data class TimelineAttachmentDescriptor(
+    @SerialName("artifact_id") val artifactId: String,
+    val kind: String,
+    val filename: String? = null,
+    @SerialName("media_type") val mediaType: String? = null,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+)
+
+@Serializable
+data class SessionFollowPayload(
+    @SerialName("message_log_version") val messageLogVersion: Int = 2,
+    @SerialName("after_seq") val afterSeq: Long,
 )
 
 @Serializable
 data class MessageContentPreparePayload(
+    @SerialName("message_log_version") val messageLogVersion: Int = 2,
     @SerialName("message_id") val messageId: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,

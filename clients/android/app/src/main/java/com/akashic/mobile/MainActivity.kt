@@ -244,7 +244,6 @@ class MainActivity : ComponentActivity() {
                             themeId = appSettings.theme,
                             onThemeChange = viewModel::setTheme,
                             onModelChange = viewModel::selectModel,
-                            turnTrace = viewModel.turnTrace,
                             sharedTextDraft = incomingShare?.text?.let { text ->
                                 val share = requireNotNull(incomingShare)
                                 share.targetSessionId?.let { sessionId ->

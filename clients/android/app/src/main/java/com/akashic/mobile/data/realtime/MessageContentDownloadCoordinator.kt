@@ -155,9 +155,9 @@ class MessageContentDownloadCoordinator(
             ProtocolCodec.json().encodeToJsonElement(
                 MessageContentPreparePayload.serializer(),
                 MessageContentPreparePayload(
-                    transfer.messageId,
-                    transfer.byteLength,
-                    transfer.sha256,
+                    messageId = transfer.messageId,
+                    byteLength = transfer.byteLength,
+                    sha256 = transfer.sha256,
                 ),
             ).jsonObject,
         )

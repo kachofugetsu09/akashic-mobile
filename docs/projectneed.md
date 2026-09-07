@@ -124,19 +124,19 @@ HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system t
 
 ### MOB-XREPO-003 Session seq 是主动消息的唯一历史进度
 
-核心必须先把 Akashic 主动消息提交到 SessionDB，再以 canonical `message_id` 和 `head_seq` 通知移动端。移动端不接收第二份主动正文，不生成 `proactive:*` 或 `ephemeral:*` assistant identity，也不按正文与时间猜测历史对应项。Room 中连续最大 `serverSeq` 是本地历史进度；客户端把它与 Session list 的 `snapshot_max_seq` 比较，并用已有 `history.get(after_seq)` 只拉取缺尾。不得新增服务端或客户端 history cursor；Realtime ACK cursor 只负责传输重放。
+核心必须先把 Akashic 主动消息提交到 Message 日志，再以 canonical `message_id` 和 `head_seq` 通知移动端。移动端不接收第二份主动正文，不生成 `proactive:*` 或 `ephemeral:*` assistant identity，也不按正文与时间猜测历史对应项。Room 中已完整落地的最大 `serverSeq` 是本地历史进度；客户端分别核对 Session list 的 `message_count` 与 `head_seq`，并用已有 `history.get(after_seq, through_seq)` 只拉取缺尾。`seq` 可以有空洞，不能用 `count - 1` 代替高水位。不得新增服务端或客户端 history cursor；Realtime ACK cursor 只负责传输重放。主动通知 hint 必须与 durable event cursor 在同一事务保存，直到其精确 `message_id` 的完整 `Output(finish=complete)` 落地后才可发布通知。
 
 ### MOB-XREPO-004 WebUI 发布只消费固定 Core schema
 
 WebUI `ReleaseView`、Target、manifest、短期 ticket 和 HTTPS 资源协议以 Core schema 为唯一真源。本仓库必须固定 source repository、完整 commit/tree、schema path/hash 和实际 provider runtime；不得用 Kotlin 类型、设计文档、浮动分支或本机 checkout 反向定义协议。`release.changed` 只触发新的已认证 Resolve，客户端不得把 hint、sequence、时间或 semver 当作可下载 target 或新旧排序依据。
 
-### MOB-XREPO-005 Turn 与 Attempt 身份分别校验
+### MOB-XREPO-005 Follow 只投影 Message 与生成状态
 
-`Turn` 是用户可理解的逻辑工作单元，`Attempt` 是其内部一次可中断、可重放的执行。Mobile 实时事件的 `turn_id` 标识 Attempt，`control_turn_id` 标识逻辑 Turn；客户端必须用 Attempt 维持流式生命周期，用逻辑 Turn 与 canonical history 合并，不得要求跨 Attempt 的两个身份相等，也不得在任一身份内部接受漂移。缺少 `control_turn_id` 的旧协议事件继续把 `turn_id` 作为逻辑身份兼容。
+Mobile 只把 `Message` 日志作为会话正文。`session.follow` 的 `reply.status` 是当前生成状态，`messages.appended` 是新增 Message 页；它们都不建立与 Message 并行的 Turn 投影。切换会话必须推进 WebUI projection generation，避免同一代际混合两个 Session。
 
-### MOB-XREPO-006 失败终态与显式重试保持原语义
+### MOB-XREPO-006 Input ACK 与显式重试保持单一 owner
 
-`failed`、`cancelled` 与 `interrupted` 必须作为三个终态写入 Room 并原样投影到 WebUI。`message.send.ok` 只表示 Core 已接受命令；客户端保留该 outbox owner，直到 `message.final` 或 `turn.interrupted` 才删除或转为失败状态。只有带 `retryable=true` 的 failed 终态提供重试；显式重试复用原视觉 user message 和稳定来源 identity，同时生成新的命令 identity 与 Attempt。普通再次发送始终创建新 user message，不按正文、时间或相邻位置猜测重试。
+`message.send.ok` 只在 Core 已持久接受对应 Input 后返回，并必须带回相同 `client_message_id`。客户端验证该身份后删除 outbox；如果 canonical Input 已先从 Message 日志落地，ACK 不得把 `complete` 降级为 `sent`。明确失败与结果未知继续保留可重试 owner；显式重试复用原视觉 user message 和稳定来源 identity，同时生成新的命令 identity。普通再次发送始终创建新 user message，不按正文、时间或相邻位置猜测重试。
 
 ## 7. 仓库与安全边界
 

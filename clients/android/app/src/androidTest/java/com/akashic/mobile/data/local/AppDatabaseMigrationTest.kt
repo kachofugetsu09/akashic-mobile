@@ -36,6 +36,7 @@ class AppDatabaseMigrationTest {
             DATABASE_13_14,
             DATABASE_14_15,
             DATABASE_15_16,
+            DATABASE_16_17,
         )
             .forEach(context::deleteDatabase)
     }
@@ -757,6 +758,38 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate16To17KeepsNotificationsReadyAndAddsNullableHeadSequence() {
+        helper.createDatabase(DATABASE_16_17, 16).apply {
+            execSQL(
+                "INSERT INTO server_profiles VALUES(" +
+                    "'server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)",
+            )
+            execSQL(
+                "INSERT INTO pending_message_notifications VALUES(" +
+                    "'message-1', 'server', 'akashic:test', '旧通知', 1, 'normal', 10)",
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_16_17,
+            17,
+            true,
+            AppDatabase.MIGRATION_16_17,
+        ).use { database ->
+            database.query(
+                "SELECT content, ready, headSeq FROM pending_message_notifications " +
+                    "WHERE messageId = 'message-1'",
+            ).use { cursor ->
+                check(cursor.moveToFirst()) { "迁移丢失待通知消息" }
+                assertEquals("旧通知", cursor.getString(0))
+                assertEquals(1, cursor.getInt(1))
+                assertEquals(true, cursor.isNull(2))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_1_2 = "migration-1-2"
         const val DATABASE_2_3 = "migration-2-3"
@@ -773,5 +806,6 @@ class AppDatabaseMigrationTest {
         const val DATABASE_13_14 = "migration-13-14"
         const val DATABASE_14_15 = "migration-14-15"
         const val DATABASE_15_16 = "migration-15-16"
+        const val DATABASE_16_17 = "migration-16-17"
     }
 }

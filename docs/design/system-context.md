@@ -98,26 +98,26 @@ embedded baseline 没有远端 generation，`generationRef=null` 本身就是它
 
 ## 历史同步进度
 
-正常重连时，`RealtimeSession` 使用服务端冻结的 `snapshot_max_seq` 和 `after_seq` 游标读取历史；同步期间追加的新消息留给下一轮，不改变当前快照。旧核心仍使用 page/page_size 兼容路径。投影不连续、数量异常或收到 `sync.reset_required` 时从头重建。核心 SessionDB 仍是权威事实，本地进度只决定可重建投影的读取起点。
+正常重连时，`RealtimeSession` 分页读取 Message v2 Session 目录，并分别核对每个会话的 `message_count` 与 `head_seq`。历史读取使用 `after_seq + through_seq` 冻结前缀；同步期间追加的新消息留给 follow 或下一轮。`seq` 可以有空洞，数量不能代替高水位。数量、head 或本地投影不匹配，以及收到 `sync.reset_required` 时，从头重建服务端投影。核心 Message 日志仍是权威事实，本地进度只决定可重建投影的读取起点。
 
-历史消息正文超过 WebSocket 事件预算时，历史页只携带带长度、摘要和预览的 `content_ref`，thinking、tool block、顺序和消息身份仍随历史页落库。客户端通过 WebSocket 申请与当前设备、连接和消息绑定的短期 ticket，再从同源 HTTPS Range route 分段写入私有文件。每段先落盘后推进 Room 偏移，完整摘要与 UTF-8 校验通过后才原子替换预览。
+单条 Message JSON 超过 WebSocket 事件预算时，历史页只携带 `message_ref` 的版本、长度和摘要。客户端先保存不进入 UI 的 restoring 行和持久传输 owner，通过 WebSocket 申请与当前设备、连接和 Message 绑定的短期 ticket，再从同源 HTTPS Range route 分段写入私有文件。每段先落盘后推进 Room 偏移；只有完整长度、SHA-256、UTF-8、Message 身份、Session 和 `seq` 全部匹配，才原子提交整条 Message 并删除传输 owner。部分正文、预览或并行 block 不构成第二份消息事实。
 
 ```text
-┌──────────────┐  history.page + content_ref  ┌─────────────────┐
-│ Core SessionDB│ ───────────────────────────▶ │ Room projection │
-└──────┬───────┘                              └────────┬────────┘
-       │ WSS prepare / short ticket                     │ preview + blocks
-       └──────────────────────┐                         │
-                              ▼                         ▼
-                       ┌──────────────┐  verified   ┌──────────────┐
-                       │ HTTPS Range  │ ───────────▶ │ full content │
-                       │ <= 256 KiB   │  fsync/hash │ same message │
-                       └──────────────┘             └──────────────┘
+┌──────────────────┐  history.page + message_ref  ┌──────────────────┐
+│ Core Message log │ ────────────────────────────▶ │ hidden restoring │
+└────────┬─────────┘                              │ row + transfer   │
+         │ WSS prepare / short ticket              └────────┬─────────┘
+         └──────────────────────┐                           │
+                                ▼                           ▼
+                         ┌──────────────┐  verified   ┌──────────────┐
+                         │ HTTPS Range  │ ───────────▶ │ whole Message│
+                         │ <= 256 KiB   │ fsync/hash  │ one Room row  │
+                         └──────────────┘             └──────────────┘
 ```
 
 ## 主动消息投影身份
 
-核心先把主动 assistant 消息提交到 SessionDB，再发送只含 canonical `message_id` 与 `head_seq` 的更新通知。Android 不保存第二份实时正文；它比较 Room 中连续最大 `serverSeq` 与 Session snapshot，并通过 `history.get(after_seq)` 拉取缺少的尾部。引用始终使用 canonical `reply_to.message_id`，不保留 delivery ID、临时消息身份或按正文与时间猜测的兼容路径。
+核心先把主动 Output 提交到 Message 日志，再发送只含 canonical `message_id` 与 `head_seq` 的 `session.updated`。Android 不保存第二份实时正文；它在推进 durable event cursor 的同一 Room 事务保存未就绪通知，按 `head_seq` 请求缺尾。精确 `message_id` 的完整 `Output(finish=complete)` 落地后，原位把通知标为 ready；进程重启继续拉取未就绪项。引用始终使用 canonical `reply_to.message_id`，不保留 delivery ID、临时消息身份或按正文与时间猜测的兼容路径。
 
 ## 未定义而不得猜测
 

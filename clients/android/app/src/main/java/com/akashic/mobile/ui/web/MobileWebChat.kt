@@ -49,9 +49,7 @@ import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewClientCompat
 import com.akashic.mobile.BuildConfig
-import com.akashic.mobile.data.realtime.TurnTraceTracker
 import com.akashic.mobile.ui.conversation.ConversationUiState
-import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.data.realtime.MobileWebUiStore
 import com.akashic.mobile.data.realtime.MobileWebUiCoordinator
 import com.akashic.mobile.data.realtime.MobileWebUiAttemptLease
@@ -393,7 +391,6 @@ internal fun MobileWebChat(
     onStop: () -> Unit,
     onBackAtRoot: () -> Unit,
     modifier: Modifier = Modifier,
-    turnTrace: TurnTraceTracker? = null,
 ) {
     val latestState by rememberUpdatedState(state)
     val latestThemeId by rememberUpdatedState(themeId)
@@ -1253,7 +1250,6 @@ internal fun MobileWebChat(
                             this,
                             mediaRegistry,
                             onFirstSnapshot = { healthGate.markSnapshot() },
-                            turnTrace = turnTrace,
                         )
                         snapshotPump = newSnapshotPump
                         pluginUiBridge = newPluginUiBridge
@@ -1653,7 +1649,10 @@ private class MobileWebBridge(
 
     fun cancelPluginUiOwner(ownerId: String) = dispatch { it.onPluginUiOwnerCancelled(ownerId) }
 
-    fun stopTurn() = dispatch { it.onStop() }
+    fun sendSessionCommand(sessionId: String, command: String) {
+        if (sessionId.isBlank() || command != "/stop") return
+        dispatch { it.onStop() }
+    }
 }
 
 private const val MOBILE_WEB_TRANSPORT_NAME = "AkashicNativeTransport"
@@ -1745,7 +1744,7 @@ private val MOBILE_WEB_TRANSPORT_METHODS = mapOf(
         MobileWebTransportArgType.STRING,
     ),
     "cancelPluginUiOwner" to listOf(MobileWebTransportArgType.STRING),
-    "stopTurn" to emptyList(),
+    "sendSessionCommand" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
 )
 
 private class MobileWebTransportListener(
@@ -1888,7 +1887,7 @@ private fun dispatchMobileWebTransport(
             string(5), string(6), string(7), string(8), string(9),
         )
         "cancelPluginUiOwner" -> bridge.cancelPluginUiOwner(string(0))
-        "stopTurn" -> bridge.stopTurn()
+        "sendSessionCommand" -> bridge.sendSessionCommand(string(0), string(1))
     }
 }
 
@@ -2218,13 +2217,7 @@ private class MobileMediaRegistry : WebViewAssetLoader.PathHandler {
 }
 
 private fun ConversationUiState.mediaResources(): Map<String, MobileMediaResource> =
-    messages.asSequence()
-        .flatMap { message ->
-            when (message) {
-                is MessageUi.User -> message.attachments.asSequence()
-                is MessageUi.AssistantTurn -> message.attachments.asSequence()
-            }
-        }
+    downloads.asSequence()
         .filter { it.cachePath.isNotBlank() }
         .associate {
             mobileMediaResourceKey(it.id, it.filename) to
@@ -2236,10 +2229,6 @@ private val MEDIA_EXTENSION_PATTERN = Regex("^[a-z0-9]{1,16}$")
 
 private fun WebView.pushSnapshot(snapshotJson: String) {
     postMobileMessage("mobile.snapshot", snapshotJson)
-}
-
-private fun WebView.pushStreamPatch(patchJson: String) {
-    postMobileMessage("mobile.stream-patch", patchJson)
 }
 
 private fun WebView.pushStatePatch(patchJson: String) {
@@ -2261,13 +2250,10 @@ private fun WebView.pushSharedTextDraft(draft: MobileSharedTextDraft) {
     )
 }
 
-internal const val ASSISTANT_TURN_PREFIX = "assistant:"
-
 private class MobileSnapshotPump(
     private val webView: WebView,
     private val mediaRegistry: MobileMediaRegistry,
     private val onFirstSnapshot: () -> Unit,
-    private val turnTrace: TurnTraceTracker? = null,
 ) {
     private val json = Json { explicitNulls = false }
     private val states = Channel<ConversationUiState>(Channel.CONFLATED)
@@ -2285,36 +2271,27 @@ private class MobileSnapshotPump(
                 val forceSnapshot = forceFullSnapshot.getAndSet(false)
                 if (!forceSnapshot && deliveredState == latest) continue
                 if (!forceSnapshot && shouldDeferResyncSnapshot(deliveredState, latest)) continue
-                val streamPatch = deliveredState
+                val previous = deliveredState
+                val events = previous
                     ?.takeUnless { forceSnapshot }
-                    ?.let(latest::toMobileWebStreamPatch)
-                val statePatch = deliveredState
-                    ?.takeUnless { forceSnapshot || streamPatch != null }
-                    ?.let(latest::toMobileWebStatePatch)
-                val terminalTransition = deliveredState
-                    ?.takeIf { streamPatch == null }
-                    ?.let(latest::terminalTransitionFrom)
-                val payload = when {
-                    streamPatch != null -> json.encodeToString(streamPatch)
-                    statePatch != null -> json.encodeToString(statePatch)
-                    else -> {
-                        mediaRegistry.replace(latest.mediaResources())
-                        json.encodeToString(latest.toMobileWebSnapshot())
-                    }
+                    ?.let(latest::toMobileWebMessageEvents)
+                val snapshot = if (events == null) json.encodeToString(latest.toMobileWebSnapshot()) else null
+                val statePatch = if (events == null) null else {
+                    latest.toMobileWebStatePatch(requireNotNull(previous))?.let { json.encodeToString(it) }
                 }
+                // 下载进度沿状态 patch 变化；设备 URL 注册不能只等完整快照。
+                if (snapshot != null || latest.downloads != previous?.downloads) {
+                    mediaRegistry.replace(latest.mediaResources())
+                }
+                val messageEvents = (events ?: listOfNotNull(latest.toMobileWebReplyEvent()))
+                    .map { json.encodeToString(it) }
                 withContext(Dispatchers.Main.immediate) {
-                    when {
-                        streamPatch != null -> {
-                            webView.pushStreamPatch(payload)
-                            traceStreamPatch(streamPatch)
-                        }
-                        statePatch != null -> webView.pushStatePatch(payload)
-                        else -> {
-                            webView.pushSnapshot(payload)
-                            if (deliveredState == null) onFirstSnapshot()
-                        }
+                    if (snapshot != null) {
+                        webView.pushSnapshot(snapshot)
+                        if (previous == null) onFirstSnapshot()
                     }
-                    terminalTransition?.let(::traceTerminalTransition)
+                    messageEvents.forEach { webView.postMobileMessage("mobile.message-event", it) }
+                    if (statePatch != null) webView.pushStatePatch(statePatch)
                 }
                 deliveredState = latest
             }
@@ -2323,32 +2300,6 @@ private class MobileSnapshotPump(
 
     fun submit(state: ConversationUiState) {
         states.trySend(state).getOrThrow()
-    }
-
-    /** 记录已跨桥投递 patch 的 stage；只描述投递，不虚报 visible/paint。 */
-    private fun traceStreamPatch(patch: MobileWebStreamPatch) {
-        val trace = turnTrace ?: return
-        val turnId = patch.messageId.removePrefix(ASSISTANT_TURN_PREFIX)
-        if (turnId == patch.messageId) return
-        trace.onWebViewPatch(
-            sessionId = patch.selectedSessionId,
-            turnId = turnId,
-            clientMessageId = patch.clientMessageId,
-            thinkingDelta = patch.thinkingAppend != null,
-            answerDelta = patch.contentAppend != null,
-            terminal = patch.message?.streaming == false,
-        )
-    }
-
-    private fun traceTerminalTransition(transition: MobileWebTerminalTransition) {
-        turnTrace?.onWebViewPatch(
-            sessionId = transition.sessionId,
-            turnId = transition.turnId,
-            clientMessageId = transition.clientMessageId,
-            thinkingDelta = false,
-            answerDelta = false,
-            terminal = true,
-        )
     }
 
     fun request(state: ConversationUiState) {
@@ -2370,4 +2321,4 @@ internal fun shouldDeferResyncSnapshot(
     latest.isResyncing &&
     latest.selectedSessionId == delivered.selectedSessionId &&
     latest.projectionGeneration == delivered.projectionGeneration &&
-    latest.messages.size != delivered.messages.size
+    latest.timelineMessages.size != delivered.timelineMessages.size

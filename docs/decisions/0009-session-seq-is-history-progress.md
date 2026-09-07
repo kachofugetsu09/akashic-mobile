@@ -13,8 +13,9 @@
 ## 决定
 
 Core 先提交 Akashic 主动正文并分配 canonical `message_id + seq`。Android 收到
-`session.updated` 后请求 Session list，比较 `snapshot_max_seq` 与 Room 中最大连续
-`serverSeq`，再通过已有 `history.get(after_seq)` 拉取缺尾。Room 消息行本身就是历史进度，
+`session.updated` 后保存其 `message_id + head_seq`，比较 `head_seq` 与 Room 中已完整落地的最大
+`serverSeq`，再通过已有 `history.get(after_seq, through_seq)` 拉取缺尾。Session list 的
+`message_count` 与 `head_seq` 分别核对数量和高水位，不能假设 `seq = count - 1`。Room 消息行本身就是历史进度，
 不新增 history cursor。
 
 删除 `message.proactive`、`proactive:*`、`ephemeral:*` assistant fallback 和按内容/时间兼容
@@ -33,5 +34,6 @@ Mobile 必须以固定 commit/schema 组合验收。
 ## 验收
 
 - Android 协议与运行代码不接受 `message.proactive`。
-- `session.updated` 会触发 Session list/head 对账，缺尾从本地最大连续 `serverSeq` 开始拉取。
+- `session.updated` 的通知意图与 durable cursor 在同一事务保存，缺尾从本地完整 Message 高水位开始拉取；进程重启后继续恢复。
+- 只有 hint 精确指向的 `Output(finish=complete)` 完整落地后才发布通知。
 - 全新安装或清除历史后可从 `after_seq = -1` 重建；实时 ACK cursor 不参与历史完成判断。

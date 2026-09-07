@@ -33,6 +33,10 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.coroutines.launch
 import java.util.Base64
 
@@ -220,7 +224,9 @@ class MobileConnectionService : Service() {
                 ConnectionPhase.FAILED -> "连接启动失败"
                 else -> "正在连接"
         }
-        val taskStatus = state.activeSessionIds.size.takeIf { it > 0 }
+        val taskStatus = state.replyStatus?.get("items")?.jsonArray
+            ?.count { it.jsonObject["active"]?.jsonPrimitive?.booleanOrNull == true }
+            ?.takeIf { it > 0 }
             ?.let { "$it 个任务运行中" }
         val status = transferStatus ?: listOfNotNull(connectionStatus, taskStatus).joinToString(" · ")
         val builder = NotificationCompat.Builder(this, CONNECTION_CHANNEL_ID)

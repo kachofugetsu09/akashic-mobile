@@ -1,599 +1,267 @@
 package com.akashic.mobile.ui.web
 
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
-import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.EmptyConversationState
-import com.akashic.mobile.ui.conversation.AssistantTurnStatus
-import com.akashic.mobile.ui.conversation.CommandUi
-import com.akashic.mobile.ui.conversation.ComposerDraftUi
-import com.akashic.mobile.ui.conversation.MessageUi
-import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
-import com.akashic.mobile.ui.conversation.MessageReplyUi
-import com.akashic.mobile.ui.conversation.ProcessBlockKind
-import com.akashic.mobile.ui.conversation.ProcessBlockState
-import com.akashic.mobile.ui.conversation.ProcessBlockUi
-import com.akashic.mobile.ui.conversation.PendingMessageUi
-import com.akashic.mobile.ui.conversation.ReadingPositionUi
-import com.akashic.mobile.ui.conversation.NavigationTargetUi
-import com.akashic.mobile.ui.conversation.TransferStatusUi
-import com.akashic.mobile.ui.conversation.SessionUi
+import com.akashic.mobile.ui.conversation.MessageAttachmentState
+import com.akashic.mobile.ui.conversation.MessageAttachmentUi
+import com.akashic.mobile.ui.conversation.TimelineAttachmentUi
+import com.akashic.mobile.ui.conversation.TimelineMessageUi
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.encodeToJsonElement
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MobileWebSnapshotTest {
     @Test
-    fun assistantProjectionCarriesCoreControlTurnId() {
-        val assistant = MessageUi.AssistantTurn(
-            id = "message:assistant:canonical",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "回答",
-            status = AssistantTurnStatus.COMPLETE,
-            durationSeconds = 1,
-            createdAtMillis = 1_000,
-            controlTurnId = "turn:logical",
-        )
-
-        val projected = assistant.toMobileWebMessage()
-        val encoded = Json.parseToJsonElement(Json.encodeToString(projected)).jsonObject
-
-        assertEquals("turn:logical", projected.controlTurnId)
-        assertEquals("turn:logical", encoded["controlTurnId"]?.jsonPrimitive?.content)
-    }
-
-    @Test
-    fun defersHistoryGrowthUntilResyncBecomesReady() {
-        val delivered = EmptyConversationState.copy(
+    fun `serializes complete message log v2 row in snapshot v9`() {
+        val body = buildJsonObject {
+            put("kind", "output")
+            put("finish", "complete")
+            put("parts", buildJsonArray {
+                add(buildJsonObject {
+                    put("kind", "text")
+                    put("value", "完整正文")
+                })
+            })
+        }
+        val metadata = buildJsonObject {
+            put("reply_to", "message-0")
+        }
+        val replyStatus = buildJsonObject {
+            put("type", "reply.status")
+            put("version", 2)
+            put("session_id", "akashic:test")
+            put("snapshot_id", "reply-snapshot-1")
+            put("available", true)
+            put("items", buildJsonArray {
+                add(buildJsonObject {
+                    put("session_id", "akashic:test")
+                    put("source", "conversation")
+                    put("handle", "reply-1")
+                    put("active", true)
+                    put("preview", buildJsonObject {
+                        put("message_id", "reply-1")
+                        put("text", "")
+                        put("thinking", "")
+                    })
+                })
+            })
+        }
+        val snapshot = EmptyConversationState.copy(
             selectedSessionId = "akashic:test",
             projectionGeneration = 7,
-            messages = listOf(userMessage("message-1")),
-            isResyncing = true,
-        )
-        val nextPage = delivered.copy(
-            messages = listOf(userMessage("message-1"), userMessage("message-2")),
-        )
-
-        assertTrue(shouldDeferResyncSnapshot(delivered, nextPage))
-        assertEquals(false, shouldDeferResyncSnapshot(delivered, nextPage.copy(isResyncing = false)))
-        assertEquals(false, shouldDeferResyncSnapshot(null, nextPage))
-    }
-
-    @Test
-    fun createsPatchForAppendOnlyStreamingAnswer() {
-        val beforeMessage = MessageUi.AssistantTurn(
-            id = "assistant:turn-1",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "正在",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = 1,
-            createdAtMillis = 1_000,
-            updatedAtMillis = 1_100,
-            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            projectionGeneration = 7,
-            messages = listOf(beforeMessage),
-            isStreaming = true,
-        )
-        val after = before.copy(
-            sessions = listOf(
-                SessionUi("akashic:test", "会话", "正在分析", 1_200, 0, true, true),
-            ),
-            messages = listOf(
-                beforeMessage.copy(
-                    answer = "正在分析",
-                    durationSeconds = 2,
-                    updatedAtMillis = 1_200,
+            downloads = listOf(
+                MessageAttachmentUi(
+                    id = "artifact-1",
+                    filename = "result.png",
+                    contentType = "image/png",
+                    sizeBytes = 42,
+                    transferredBytes = 42,
+                    state = MessageAttachmentState.CACHED,
+                    cachePath = "/private/result.png",
                 ),
             ),
-        )
-
-        val patch = after.toMobileWebStreamPatch(before)
-
-        assertEquals(3, patch?.protocolVersion)
-        assertEquals(7L, patch?.projectionGeneration)
-        assertEquals(0, patch?.messageIndex)
-        assertEquals("分析", patch?.contentAppend)
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", patch?.clientMessageId)
-        assertEquals(null, patch?.message)
-    }
-
-    @Test
-    fun createsPatchForThinkingAndCommitsCompletedTurn() {
-        val thinking = ProcessBlockUi(
-            id = "thinking-1",
-            kind = ProcessBlockKind.THINKING,
-            title = "思考",
-            detail = "先",
-            state = ProcessBlockState.RUNNING,
-        )
-        val beforeMessage = MessageUi.AssistantTurn(
-            id = "assistant:turn-1",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = listOf(thinking),
-            answer = "",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = null,
-            createdAtMillis = 1_000,
-            clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            messages = listOf(beforeMessage),
-            isStreaming = true,
-        )
-        val appended = before.copy(
-            messages = listOf(
-                beforeMessage.copy(blocks = listOf(thinking.copy(detail = "先检查调用链"))),
-            ),
-        )
-        val completed = appended.copy(
-            messages = listOf(
-                beforeMessage.copy(
-                    blocks = listOf(thinking.copy(detail = "先检查调用链")),
-                    status = AssistantTurnStatus.COMPLETE,
-                ),
-            ),
-            isStreaming = false,
-        )
-
-        assertEquals(
-            "检查调用链",
-            appended.toMobileWebStreamPatch(before)?.thinkingAppend?.delta,
-        )
-        val terminal = completed.toMobileWebStreamPatch(appended)
-        assertEquals(false, terminal?.message?.streaming)
-        assertEquals(false, terminal?.state?.composer?.isStreaming)
-        assertEquals("assistant:turn-1", terminal?.messageId)
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", terminal?.clientMessageId)
-    }
-
-    @Test
-    fun rejectsStreamPatchWithInvalidClientMessageId() {
-        val beforeMessage = MessageUi.AssistantTurn(
-            id = "assistant:turn-1",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "正在",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = 1,
-            createdAtMillis = 1_000,
-            clientMessageId = "not-a-frame-id",
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            messages = listOf(beforeMessage),
-            isStreaming = true,
-        )
-        val after = before.copy(
-            messages = listOf(beforeMessage.copy(answer = "正在分析", updatedAtMillis = 1_200)),
-        )
-
-        assertThrows(IllegalArgumentException::class.java) {
-            after.toMobileWebStreamPatch(before)
-        }
-    }
-
-    @Test
-    fun createsPatchForToolInsertionAndToolStateChange() {
-        val thinking = ProcessBlockUi(
-            id = "thinking-1",
-            kind = ProcessBlockKind.THINKING,
-            title = "思考",
-            detail = "检查完成",
-            state = ProcessBlockState.COMPLETED,
-        )
-        val tool = ProcessBlockUi(
-            id = "tool-1",
-            kind = ProcessBlockKind.TOOL,
-            title = "读取文件",
-            detail = "读取配置",
-            state = ProcessBlockState.RUNNING,
-        )
-        val message = MessageUi.AssistantTurn(
-            id = "assistant:turn-1",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = listOf(thinking),
-            answer = "",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = null,
-            createdAtMillis = 1_000,
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            messages = listOf(message),
-            isStreaming = true,
-        )
-        val running = before.copy(messages = listOf(message.copy(blocks = listOf(thinking, tool))))
-        val finished = running.copy(
-            messages = listOf(
-                message.copy(
-                    blocks = listOf(
-                        thinking,
-                        tool.copy(state = ProcessBlockState.COMPLETED, resultPreview = "完成"),
-                    ),
-                ),
-            ),
-        )
-
-        assertEquals(
-            MobileWebProcessState.RUNNING,
-            running.toMobileWebStreamPatch(before)?.message?.blocks?.last()?.state,
-        )
-        assertEquals(
-            MobileWebProcessState.COMPLETED,
-            finished.toMobileWebStreamPatch(running)?.message?.blocks?.last()?.state,
-        )
-    }
-
-    @Test
-    fun streamingPatchDoesNotSerializeConversationHistory() {
-        val history = List(400) { index ->
-            MessageUi.User(
-                id = "user:$index",
-                sessionId = "akashic:test",
-                text = "历史消息-$index-${"内容".repeat(150)}",
-                deliveryLabel = "已发送",
-                replyable = true,
-                createdAtMillis = index.toLong(),
-                reply = null,
-            )
-        }
-        val streaming = MessageUi.AssistantTurn(
-            id = "assistant:streaming",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "正在",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = 1,
-            createdAtMillis = 1_000,
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            projectionGeneration = 9,
-            messages = history + streaming,
-            isStreaming = true,
-        )
-        val after = before.copy(
-            messages = history + streaming.copy(answer = "正在检查调用链"),
-        )
-
-        val patchJson = Json.encodeToString(after.toMobileWebStreamPatch(before))
-        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
-
-        assertTrue(snapshotJson.length > 100_000)
-        assertTrue(patchJson.length * 100 < snapshotJson.length)
-        assertTrue(!patchJson.contains("正在检查调用链"))
-        assertTrue(patchJson.contains("检查调用链"))
-    }
-
-    @Test
-    fun terminalPatchDoesNotSerializeConversationHistoryOrRequireStableMessageId() {
-        val history = List(400) { index ->
-            MessageUi.User(
-                id = "user:$index",
-                sessionId = "akashic:test",
-                text = "历史消息-$index-${"内容".repeat(150)}",
-                deliveryLabel = "已发送",
-                replyable = true,
-                createdAtMillis = index.toLong(),
-                reply = null,
-            )
-        }
-        val streaming = MessageUi.AssistantTurn(
-            id = "assistant:turn-1",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "正在检查调用链",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = 2,
-            createdAtMillis = 1_000,
-            updatedAtMillis = 1_200,
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            projectionGeneration = 9,
-            messages = history + streaming,
-            isStreaming = true,
-        )
-        val after = before.copy(
-            sessions = listOf(
-                SessionUi("akashic:test", "会话", "检查完成", 1_300, 0, false, true),
-            ),
-            messages = history + streaming.copy(
-                id = "message:canonical",
-                answer = "检查调用链完成",
-                status = AssistantTurnStatus.COMPLETE,
-                durationSeconds = 3,
-                updatedAtMillis = 1_300,
-            ),
-            isStreaming = false,
-        )
-
-        val patch = after.toMobileWebStreamPatch(before)
-        val patchJson = Json.encodeToString(patch)
-        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
-
-        assertEquals("assistant:turn-1", patch?.messageId)
-        assertEquals("message:canonical", patch?.message?.id)
-        assertEquals(false, patch?.state?.composer?.isStreaming)
-        assertTrue(snapshotJson.length > 100_000)
-        assertTrue(patchJson.length * 100 < snapshotJson.length)
-        assertTrue(!patchJson.contains("历史消息-399"))
-    }
-
-    @Test
-    fun failedTerminalKeepsExactStatusInWebSnapshot() {
-        val failed = MessageUi.AssistantTurn(
-            id = "assistant:failed",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "provider offline",
-            status = AssistantTurnStatus.FAILED,
-            durationSeconds = 2,
-            createdAtMillis = 1_000,
-        )
-
-        val json = Json.encodeToString(
-            EmptyConversationState.copy(messages = listOf(failed)).toMobileWebSnapshot(),
-        )
-
-        assertTrue(json.contains("\"terminalStatus\":\"failed\""))
-        assertTrue(!json.contains("\"interrupted\":true"))
-    }
-
-    @Test
-    fun fullSnapshotStillIdentifiesCanonicalTerminalTransition() {
-        val clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        val user = MessageUi.User(
-            id = "user:$clientMessageId",
-            sessionId = "akashic:test",
-            text = "问题",
-            deliveryLabel = "已发送",
-            replyable = true,
-            createdAtMillis = 900,
-            reply = null,
-            clientMessageId = clientMessageId,
-        )
-        val streaming = MessageUi.AssistantTurn(
-            id = "assistant:turn-1",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "回答",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = 1,
-            createdAtMillis = 1_000,
-            clientMessageId = clientMessageId,
-            controlTurnId = "turn-1",
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            projectionGeneration = 9,
-            messages = listOf(user, streaming),
-            isStreaming = true,
-        )
-        val after = before.copy(
-            messages = listOf(
-                user.copy(id = "message:user:canonical", deliveryLabel = "已完成"),
-                streaming.copy(
-                    id = "message:assistant:canonical",
-                    status = AssistantTurnStatus.COMPLETE,
-                ),
-            ),
-            isStreaming = false,
-        )
-
-        assertEquals(null, after.toMobileWebStreamPatch(before))
-        assertEquals(
-            MobileWebTerminalTransition("akashic:test", "turn-1", clientMessageId),
-            after.terminalTransitionFrom(before),
-        )
-    }
-
-    @Test
-    fun controlTurnIdIdentifiesLegacyTerminalWithoutClientIdentity() {
-        val streaming = MessageUi.AssistantTurn(
-            id = "assistant:turn-legacy",
-            sessionId = "akashic:test",
-            intro = null,
-            blocks = emptyList(),
-            answer = "回答",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = 1,
-            createdAtMillis = 1_000,
-        )
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            messages = listOf(streaming),
-            isStreaming = true,
-        )
-        val after = before.copy(
-            messages = listOf(
-                streaming.copy(
-                    id = "message:canonical",
-                    status = AssistantTurnStatus.COMPLETE,
-                    controlTurnId = "turn-legacy",
-                ),
-            ),
-            isStreaming = false,
-        )
-
-        assertEquals(
-            MobileWebTerminalTransition("akashic:test", "turn-legacy", null),
-            after.terminalTransitionFrom(before),
-        )
-    }
-
-    @Test
-    fun controlStatePatchDoesNotSerializeUnchangedConversationHistory() {
-        val history = List(400) { index ->
-            MessageUi.User(
-                id = "user:$index",
-                sessionId = "akashic:test",
-                text = "历史消息-$index-${"内容".repeat(150)}",
-                deliveryLabel = "已发送",
-                replyable = true,
-                createdAtMillis = index.toLong(),
-                reply = null,
-            )
-        }
-        val before = EmptyConversationState.copy(
-            selectedSessionId = "akashic:test",
-            projectionGeneration = 9,
-            messages = history,
-        )
-        val after = before.copy(connectionNotice = "消息已缓存")
-
-        val patchJson = Json.encodeToString(after.toMobileWebStatePatch(before))
-        val snapshotJson = Json.encodeToString(after.toMobileWebSnapshot())
-
-        assertTrue(snapshotJson.length > 100_000)
-        assertTrue(patchJson.length * 100 < snapshotJson.length)
-        assertEquals(null, after.copy(projectionGeneration = 10).toMobileWebStatePatch(before))
-    }
-
-    @Test
-    fun serializesVersionedConversationSnapshot() {
-        val snapshot = ConversationUiState(
-            connectionLabel = "正在重连",
-            connectionStatus = ConnectionStatusUi.RECONNECTING,
-            connectionNotice = "消息已缓存",
-            errorNotice = null,
-            sessions = listOf(
-                SessionUi(
-                    sessionId = "akashic:test",
-                    title = "正在执行",
-                    lastMessagePreview = "后台任务仍在处理",
-                    lastMessageAtMillis = 1_752_681_601_000,
-                    unreadCount = 1,
-                    isRunning = true,
-                    isAvailable = false,
-                ),
-            ),
-            selectedSessionId = "akashic:test",
-            readingPosition = ReadingPositionUi("message-1", -18),
-            navigationTarget = NavigationTargetUi("akashic:test", "message-2"),
-            projectionGeneration = 7,
-            messages = listOf(
-                MessageUi.User(
+            timelineMessages = listOf(
+                TimelineMessageUi(
                     id = "message-1",
                     sessionId = "akashic:test",
-                    text = "你好",
-                    deliveryLabel = "发送失败",
-                    replyable = false,
-                    deliveryAction = MessageDeliveryActionUi.RETRY,
-                    createdAtMillis = 1_752_681_600_000,
-                    updatedAtMillis = 1_752_681_600_100,
-                    reply = MessageReplyUi("message-0", "assistant", "之前的回答"),
-                ),
-                MessageUi.AssistantTurn(
-                    id = "message-2",
-                    sessionId = "akashic:test",
-                    intro = null,
-                    blocks = listOf(
-                        ProcessBlockUi(
-                            id = "tool-1",
-                            kind = ProcessBlockKind.TOOL,
-                            title = "read_file",
-                            detail = "读取上下文",
-                            state = ProcessBlockState.COMPLETED,
-                            arguments = buildJsonObject {
-                                put("path", "/sandbox/context.md")
-                            },
-                            resultPreview = "读取完成",
-                            durationMillis = 840,
+                    seq = 9_007_199_254_740_991L,
+                    timestamp = "2026-09-08T08:00:00Z",
+                    author = "assistant",
+                    source = "akashic",
+                    body = body,
+                    metadata = metadata,
+                    attachments = listOf(
+                        TimelineAttachmentUi(
+                            artifactId = "artifact-1",
+                            kind = "image",
+                            filename = "result.png",
+                            mediaType = "image/png",
+                            sizeBytes = 42,
+                            sha256 = "a".repeat(64),
                         ),
                     ),
-                    answer = "正在处理",
-                    status = AssistantTurnStatus.STREAMING,
-                    durationSeconds = null,
-                    createdAtMillis = 1_752_681_601_000,
-                    updatedAtMillis = 1_752_681_601_200,
                 ),
             ),
-            attachments = emptyList(),
-            composerDraft = ComposerDraftUi("继续检查草稿", "message-1", 1_752_681_602_000),
-            pendingMessages = listOf(PendingMessageUi("message-1", "你好", 1_752_681_600_000)),
-            transferStatus = TransferStatusUi(
-                title = "大文件上传已暂停",
-                detail = "当前为移动网络，确认后会从 42% 继续",
-                progressPercent = 42,
-                requiresMeteredApproval = true,
-            ),
-            commands = listOf(CommandUi("memorystatus", "查看记忆整理状态")),
-            isStreaming = true,
-            isResyncing = false,
-            canResync = false,
-            isStopping = false,
-            canStop = false,
-            canSend = true,
+            replyStatus = replyStatus,
         ).toMobileWebSnapshot()
 
         val encoded = Json.encodeToString(snapshot)
+        val json = Json.parseToJsonElement(encoded).jsonObject
+        val message = json.getValue("messages").jsonArray.single().jsonObject
 
-        assertEquals(8, snapshot.protocolVersion)
-        assertTrue(snapshot.runtimeInspection.documents.isEmpty())
-        assertEquals(7, snapshot.projectionGeneration)
-        assertEquals(MobileWebConnectionStatus.RECONNECTING, snapshot.connection.status)
-        assertTrue(snapshot.sessions.single().isRunning)
-        assertTrue(!snapshot.sessions.single().isAvailable)
-        assertEquals(listOf("message-1", "message-2"), snapshot.messages.map { it.id })
-        assertEquals(
-            listOf(1_752_681_600_100, 1_752_681_601_200),
-            snapshot.messages.map { it.searchRevision },
+        assertEquals(9, snapshot.protocolVersion)
+        assertEquals(9_007_199_254_740_991L, snapshot.throughSeq)
+        assertEquals(replyStatus, snapshot.replyStatus)
+        assertEquals("artifact-1", snapshot.downloads.single().artifactId)
+        assertEquals("cached", snapshot.downloads.single().state)
+        assertEquals(42L, snapshot.downloads.single().transferredBytes)
+        assertTrue(snapshot.downloads.single().contentUrl?.contains("artifact-1") == true)
+        assertEquals("message-1", message.getValue("id").jsonPrimitive.content)
+        assertEquals("akashic:test", message.getValue("session_id").jsonPrimitive.content)
+        assertEquals(body, message.getValue("body"))
+        assertEquals(metadata, message.getValue("metadata"))
+        assertEquals("artifact-1", message.getValue("attachments").jsonArray.single().jsonObject
+            .getValue("artifact_id").jsonPrimitive.content)
+    }
+
+    @Test
+    fun `state patch v2 excludes message fields and only follows control changes`() {
+        val timeline = listOf(
+            TimelineMessageUi(
+                id = "message-1",
+                sessionId = "akashic:test",
+                seq = 1,
+                timestamp = "2026-09-08T08:00:00Z",
+                author = "user",
+                source = "mobile",
+                body = buildJsonObject {
+                    put("kind", "input")
+                    put("parts", buildJsonArray {
+                        add(buildJsonObject {
+                            put("kind", "text")
+                            put("value", "你好")
+                        })
+                    })
+                },
+                metadata = buildJsonObject {},
+                attachments = emptyList(),
+            ),
         )
-        assertEquals(listOf("akashic:test", "akashic:test"), snapshot.messages.map { it.sessionId })
-        assertTrue(!snapshot.messages.first().replyable)
-        assertEquals(MobileWebDeliveryAction.RETRY, snapshot.messages.first().deliveryAction)
-        assertTrue(!snapshot.messages.last().replyable)
-        assertTrue(snapshot.messages.last().streaming)
-        val tool = snapshot.messages.last().blocks.single()
-        assertEquals(MobileWebProcessState.COMPLETED, tool.state)
-        assertEquals("/sandbox/context.md", tool.arguments?.get("path")?.jsonPrimitive?.content)
-        assertEquals("读取完成", tool.resultPreview)
-        assertEquals(840L, tool.durationMillis)
-        assertEquals("memorystatus", snapshot.composer.commands.single().command)
-        assertEquals(42, snapshot.composer.transferStatus?.progressPercent)
-        assertTrue(snapshot.composer.transferStatus?.requiresMeteredApproval == true)
-        assertEquals("之前的回答", snapshot.messages.first().reply?.preview)
-        assertEquals(-18, snapshot.readingPosition?.offsetPx)
-        assertEquals("message-2", snapshot.navigationTarget?.messageId)
-        assertEquals("message-1", snapshot.composer.pendingMessages.single().messageId)
-        assertEquals("继续检查草稿", snapshot.composer.draft.text)
-        assertEquals("message-1", snapshot.composer.draft.replyToMessageId)
-        assertEquals(1_752_681_602_000, snapshot.composer.draft.updatedAt)
-        assertEquals(8, Json.parseToJsonElement(encoded).jsonObject
-            .getValue("protocolVersion").jsonPrimitive.content.toInt())
-        assertTrue(encoded.contains("\"status\":\"reconnecting\""))
-        assertTrue(encoded.contains("\"deliveryAction\":\"retry\""))
+        val before = EmptyConversationState.copy(
+            connectionStatus = ConnectionStatusUi.READY,
+            selectedSessionId = "akashic:test",
+            timelineMessages = timeline,
+        )
+        val changedTimeline = before.copy(
+            timelineMessages = timeline + timeline.single().copy(id = "message-2", seq = 2),
+        )
+        val changedReply = before.copy(
+            replyStatus = buildJsonObject { put("type", "reply.status") },
+        )
+        val patch = before.copy(connectionNotice = "已连接").toMobileWebStatePatch(before)
+
+        requireNotNull(patch)
+        assertEquals(2, patch.protocolVersion)
+        assertTrue(!Json.encodeToString(patch).contains("message-1"))
+        assertNull(changedTimeline.toMobileWebStatePatch(before))
+        assertNull(changedReply.toMobileWebStatePatch(before))
+    }
+
+    @Test
+    fun `append event contains only the new tail and exact cursors`() {
+        val first = timelineMessage("message-1", 1, "old")
+        val second = timelineMessage("message-2", 4, "new")
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "akashic:test",
+            projectionGeneration = 11,
+            timelineMessages = listOf(first),
+        )
+
+        val events = requireNotNull(
+            before.copy(timelineMessages = listOf(first, second)).toMobileWebMessageEvents(before),
+        )
+        val wrapper = events.single()
+
+        assertEquals(1, wrapper.protocolVersion)
+        assertEquals(11L, wrapper.projectionGeneration)
+        assertEquals("messages.appended", wrapper.event.getValue("type").jsonPrimitive.content)
+        assertEquals(1L, wrapper.event.getValue("after_seq").jsonPrimitive.content.toLong())
+        assertEquals(4L, wrapper.event.getValue("through_seq").jsonPrimitive.content.toLong())
+        assertEquals(4L, wrapper.event.getValue("next_after_seq").jsonPrimitive.content.toLong())
+        assertEquals(
+            listOf("message-2"),
+            wrapper.event.getValue("items").jsonArray.map {
+                it.jsonObject.getValue("id").jsonPrimitive.content
+            },
+        )
+    }
+
+    @Test
+    fun `reply status event does not serialize long history`() {
+        val longMessage = timelineMessage("message-long", 1, "x".repeat(120_367))
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "akashic:test",
+            projectionGeneration = 5,
+            timelineMessages = listOf(longMessage),
+        )
+        val status = buildJsonObject {
+            put("type", "reply.status")
+            put("version", 2)
+            put("session_id", "akashic:test")
+            put("snapshot_id", "reply-1")
+            put("available", true)
+            put("items", buildJsonArray {})
+        }
+
+        val event = requireNotNull(
+            before.copy(replyStatus = status).toMobileWebMessageEvents(before),
+        ).single()
+        val encoded = Json.encodeToString(event)
+
+        assertEquals(status, event.event)
+        assertTrue(encoded.length < 1_000)
+        assertTrue(!encoded.contains("message-long"))
+    }
+
+    @Test
+    fun `restoring a long message into history requires a full snapshot`() {
+        val preview = timelineMessage("message-2", 2, "preview")
+        val tail = timelineMessage("message-3", 3, "tail")
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "akashic:test",
+            projectionGeneration = 8,
+            timelineMessages = listOf(preview, tail),
+        )
+        val restored = preview.copy(body = timelineBody("x".repeat(120_367)))
+
+        assertNull(before.copy(timelineMessages = listOf(restored, tail)).toMobileWebMessageEvents(before))
+    }
+
+    @Test
+    fun `empty reply status remains an explicit protocol value`() {
+        val state = EmptyConversationState.copy(selectedSessionId = "akashic:test")
+        val event = requireNotNull(state.toMobileWebReplyEvent())
+        val snapshotJson = Json { explicitNulls = false }.encodeToJsonElement(
+            MobileWebSnapshot.serializer(),
+            state.toMobileWebSnapshot(),
+        ).jsonObject
+
+        assertEquals("false", event.event.getValue("available").jsonPrimitive.content)
+        assertTrue(event.event.getValue("snapshot_id").toString() == "null")
+        assertTrue(snapshotJson.containsKey("replyStatus"))
+        assertTrue(snapshotJson.getValue("replyStatus").toString() == "null")
     }
 }
 
-private fun userMessage(id: String) = MessageUi.User(
+private fun timelineMessage(id: String, seq: Long, text: String) = TimelineMessageUi(
     id = id,
     sessionId = "akashic:test",
-    text = id,
-    deliveryLabel = "已发送",
-    replyable = true,
-    createdAtMillis = 1_000,
-    reply = null,
+    seq = seq,
+    timestamp = "2026-09-08T08:00:00Z",
+    author = "assistant",
+    source = "akashic",
+    body = timelineBody(text),
+    metadata = buildJsonObject {},
+    attachments = emptyList(),
 )
+
+private fun timelineBody(text: String) = buildJsonObject {
+    put("kind", "output")
+    put("finish", "complete")
+    put("parts", buildJsonArray {
+        add(buildJsonObject {
+            put("kind", "text")
+            put("value", text)
+        })
+    })
+}

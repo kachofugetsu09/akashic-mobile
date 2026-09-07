@@ -10,8 +10,7 @@ import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
 import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
-import com.akashic.mobile.data.realtime.deliveredFinalMessageEvent
-import com.akashic.mobile.data.realtime.FinalMessageEvent
+import com.akashic.mobile.data.realtime.finalMessageAttention
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.format.DateTimeParseException
@@ -79,6 +78,18 @@ internal fun parseServerInstant(value: String, field: String): Long =
         throw IllegalArgumentException("$field must be an RFC 3339 UTC instant", error)
     }
 
+/** 从 Message body 提取原生列表摘要，保留非文本 part 给 WebUI 使用。 */
+internal fun timelineText(body: JsonObject): String {
+    if (body["kind"]?.jsonPrimitive?.contentOrNull == "control") {
+        return body["reason"]?.jsonPrimitive?.contentOrNull.orEmpty()
+    }
+    return (body["parts"] as? JsonArray).orEmpty().mapNotNull { raw ->
+        val part = raw as? JsonObject ?: return@mapNotNull null
+        if (part["kind"]?.jsonPrimitive?.contentOrNull != "text") return@mapNotNull null
+        part["value"]?.jsonPrimitive?.contentOrNull
+    }.joinToString("\n")
+}
+
 class LocalDeliveryStore(
     private val database: AppDatabase,
     private val mediaCache: MediaCacheStore,
@@ -90,25 +101,6 @@ class LocalDeliveryStore(
      */
     private val projectionStateMutex = Mutex()
     private val canonicalMessageAliases = linkedMapOf<String, String>()
-
-    /** 用服务端 stop 终态收敛精确匹配的本地 streaming 投影。 */
-    suspend fun reconcileInterruptedTurn(sessionId: String, turnId: String, updatedAt: Long) {
-        database.withTransaction {
-            // 1. stop reply 只能关闭它引用的同一条本地活动 turn
-            val active = requireNotNull(database.messages().activeAssistantTurn(sessionId)) {
-                "权威 stop 终态缺少本地 streaming turn: $sessionId/$turnId"
-            }
-            require(active.messageId == "assistant:$turnId") {
-                "权威 stop 终态与本地活动 turn 不匹配: ${active.messageId}/$turnId"
-            }
-
-            // 2. 消息与运行中子项在同一 Room 事务内共同进入终态
-            database.messages().upsert(
-                active.copy(deliveryState = "interrupted", updatedAt = updatedAt),
-            )
-            database.messages().completeRunningBlocks(active.messageId, updatedAt)
-        }
-    }
 
     /** 恢复当前电脑拥有的会话选择，拒绝把另一台电脑的会话带入当前投影。 */
     suspend fun restoreSelectedSession(serverId: String, selectedSessionId: String?): String? {
@@ -426,30 +418,13 @@ class LocalDeliveryStore(
                 "Event sequence gap: expected ${cursor.lastAcknowledgedEventSeq + 1}, got $eventSeq"
             }
 
-            val delivered = if (envelope.type in DELIVERED_MESSAGE_EVENTS) {
-                deliveredFinalMessageEvent(envelope)
-            } else {
-                null
-            }
+            // Message v2 正文来自 history/session.follow；旧 durable Turn 事件只推进 ACK。
             envelope.sessionId?.let { sessionId ->
                 if (envelope.type in REMOTE_SESSION_EVENTS) {
                     ensureRemoteConversation(serverId, sessionId, updatedAt)
                 }
             }
-            applyEventContent(serverId, envelope, delivered, updatedAt)
-            delivered?.let { event ->
-                database.pendingMessageNotifications().upsert(
-                    PendingMessageNotificationEntity(
-                        messageId = event.messageId,
-                        serverId = serverId,
-                        sessionId = event.sessionId,
-                        content = event.content,
-                        hasAttachments = event.hasAttachments,
-                        attention = event.attention.name,
-                        createdAt = updatedAt,
-                    ),
-                )
-            }
+            applyEventContent(serverId, envelope, updatedAt)
             val changed = database.realtimeCursors().advance(
                 deviceId = deviceId,
                 throughEventSeq = eventSeq,
@@ -461,6 +436,25 @@ class LocalDeliveryStore(
         }
     }
 
+    /** 应用当前连接的非 durable Message 订阅页，不推进 durable event cursor。 */
+    suspend fun applyMessagePage(serverId: String, sessionId: String, payload: JsonObject) =
+        projectionStateMutex.withLock {
+            database.withTransaction {
+                val page = ProtocolCodec.decodePayload<HistoryPagePayload>(payload)
+                applyHistoryPage(
+                    serverId,
+                    WireEnvelope(
+                        v = 1,
+                        kind = WireKind.CONTROL,
+                        type = "history.page",
+                        sessionId = sessionId,
+                        payload = payload,
+                    ),
+                    notificationMessageIds = page.items.mapTo(linkedSetOf()) { it.id },
+                )
+            }
+        }
+
     suspend fun markOutboxAttempt(commandId: String, attemptedAt: Long) {
         val changed = database.outbox().markInFlight(commandId, attemptedAt)
         check(changed == 1) { "Outbox command is not pending: $commandId" }
@@ -471,16 +465,33 @@ class LocalDeliveryStore(
         check(changed == 1) { "Outbox command is not in flight: $commandId" }
     }
 
-    suspend fun acknowledgeOutbox(commandId: String, updatedAt: Long): List<String> =
+    suspend fun acknowledgeOutbox(
+        commandId: String,
+        acknowledgedClientMessageId: String,
+        updatedAt: Long,
+    ): List<String> =
         database.withTransaction {
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+            require(acknowledgedClientMessageId == payload.clientMessageId) {
+                "Outbox ACK client_message_id mismatch"
+            }
             check(database.conversations().markRemoteKnown(requireNotNull(envelope.sessionId)) == 1) {
                 "Outbox ACK 对应的会话投影不存在: ${envelope.sessionId}"
             }
-            val changed = database.messages().updateDelivery(payload.clientMessageId, "sent", updatedAt)
-            check(changed == 1) { "Outbox message is missing: ${payload.clientMessageId}" }
+            val message = requireNotNull(database.messages().getByClientMessageId(payload.clientMessageId)) {
+                "Outbox message is missing: ${payload.clientMessageId}"
+            }
+            if (message.serverSeq == null) {
+                check(database.messages().markInputAccepted(payload.clientMessageId, updatedAt) == 1) {
+                    "Outbox message is not pending: ${payload.clientMessageId}"
+                }
+            } else {
+                require(message.role == "user" && message.deliveryState == "complete") {
+                    "Canonical Input has invalid delivery state"
+                }
+            }
             if (payload.mediaRefs.isNotEmpty()) {
                 payload.mediaRefs.forEach { attachmentId ->
                     val transfer = requireNotNull(database.attachmentTransfers().get(attachmentId)) {
@@ -490,7 +501,9 @@ class LocalDeliveryStore(
                 }
                 check(database.attachmentTransfers().markSent(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
             }
-            check(database.outbox().markAccepted(commandId) == 1) { "Outbox command disappeared: $commandId" }
+            check(database.outbox().deleteAcknowledged(commandId) == 1) {
+                "Outbox command disappeared: $commandId"
+            }
             payload.mediaRefs
         }
 
@@ -603,23 +616,79 @@ class LocalDeliveryStore(
     private suspend fun applyEventContent(
         serverId: String,
         envelope: WireEnvelope,
-        delivered: FinalMessageEvent?,
         updatedAt: Long,
     ) {
         when (envelope.type) {
             "session.list" -> applySessionList(serverId, envelope)
-            "session.created", "session.updated" -> upsertConversation(serverId, envelope, updatedAt)
-            "history.page" -> applyHistoryPage(serverId, envelope)
-            "turn.started" -> applyTurnStarted(envelope, updatedAt)
-            "react.thinking.delta" -> appendThinking(envelope, updatedAt)
-            "react.tool.started" -> startTool(envelope, updatedAt)
-            "react.tool.completed" -> completeTool(envelope, updatedAt)
-            "answer.delta" -> appendAnswer(envelope, updatedAt)
-            "message.final" -> finalizeMessage(envelope, requireNotNull(delivered), updatedAt)
-            "turn.interrupted" -> interruptTurn(envelope, updatedAt)
+            "session.created" -> upsertConversation(serverId, envelope, updatedAt)
+            "session.updated" -> applySessionUpdated(serverId, envelope, updatedAt)
+            "history.page" -> {
+                val sessionId = requireNotNull(envelope.sessionId)
+                val notificationIds = database.pendingMessageNotifications()
+                    .pendingHintsForSession(sessionId).mapTo(linkedSetOf()) { it.messageId }
+                applyHistoryPage(serverId, envelope, notificationIds)
+            }
+            "turn.started", "react.thinking.delta", "react.tool.started",
+            "react.tool.completed", "answer.delta", "message.final",
+            "turn.interrupted", "turn.output.completed" -> Unit
             "attachment.progress" -> applyAttachmentProgress(envelope, updatedAt)
             "attachment.ready" -> applyAttachmentReady(envelope, updatedAt)
             else -> Unit
+        }
+    }
+
+    /** 同一事务保存会话更新与主动通知 hint，随后才推进 durable cursor。 */
+    private suspend fun applySessionUpdated(
+        serverId: String,
+        envelope: WireEnvelope,
+        updatedAt: Long,
+    ) {
+        upsertConversation(serverId, envelope, updatedAt)
+        val rawMessageId = envelope.payload["message_id"]
+        val rawHeadSeq = envelope.payload["head_seq"]
+        if (rawMessageId == null && rawHeadSeq == null) return
+        val sessionId = requireNotNull(envelope.sessionId)
+        require(envelope.payload["session_id"]?.jsonPrimitive?.content == sessionId) {
+            "session.updated hint session_id mismatch"
+        }
+        val messageId = rawMessageId?.jsonPrimitive?.content
+            ?: error("session.updated hint 缺少 message_id")
+        require(messageId.isNotBlank() && messageId.length <= 512) {
+            "session.updated hint message_id 无效"
+        }
+        val headSeq = rawHeadSeq?.jsonPrimitive?.longOrNull
+            ?: error("session.updated hint 缺少 head_seq")
+        require(headSeq >= 0) { "session.updated hint head_seq 无效" }
+        database.pendingMessageNotifications().insertHint(
+            PendingMessageNotificationEntity(
+                messageId = messageId,
+                serverId = serverId,
+                sessionId = sessionId,
+                content = "",
+                hasAttachments = false,
+                attention = "COMPLETE",
+                ready = false,
+                headSeq = headSeq,
+                createdAt = updatedAt,
+            ),
+        )
+        val existing = database.messages().get(messageId)
+        if (existing?.serverSeq != null && existing.sessionId == sessionId) {
+            val body = ProtocolCodec.json().parseToJsonElement(existing.bodyJson).jsonObject
+            if (
+                body["kind"]?.jsonPrimitive?.contentOrNull == "output" &&
+                body["finish"]?.jsonPrimitive?.contentOrNull == "complete"
+            ) {
+                val metadata = ProtocolCodec.json().parseToJsonElement(existing.metadataJson).jsonObject
+                val attachments = ProtocolCodec.json().parseToJsonElement(existing.attachmentsJson) as JsonArray
+                database.pendingMessageNotifications().markReady(
+                    messageId = messageId,
+                    content = timelineText(body),
+                    hasAttachments = attachments.isNotEmpty(),
+                    attention = finalMessageAttention(metadata).name,
+                    createdAt = existing.createdAt,
+                )
+            }
         }
     }
 
@@ -683,170 +752,178 @@ class LocalDeliveryStore(
     private suspend fun applyHistoryPage(
         serverId: String,
         envelope: WireEnvelope,
+        notificationMessageIds: Set<String>,
     ) {
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
+        require(payload.version == 2) { "History page message version mismatch" }
         val current = database.conversations().get(sessionId)
-        val title = payload.title?.let { requireSessionTitle(it, "History page") }
         if (current == null) {
             database.conversations().upsert(
                 ConversationEntity(
                     sessionId,
                     serverId,
-                    title ?: "新对话",
+                    "新对话",
                     System.currentTimeMillis(),
                     remoteKnown = true,
                 ),
             )
         } else {
             require(current.serverId == serverId) { "History session belongs to another server" }
-            if (title != null && current.title != title) {
-                database.conversations().upsert(current.copy(title = title, remoteKnown = true))
-            } else {
-                check(database.conversations().markRemoteKnown(sessionId) == 1)
-            }
+            check(database.conversations().markRemoteKnown(sessionId) == 1)
         }
         payload.items.forEach { remote ->
-            require(remote.sessionKey == sessionId) { "History item session mismatch" }
-            require(remote.role in setOf("user", "assistant")) { "Unsupported history role: ${remote.role}" }
-            require((remote.content == null) != (remote.contentRef == null)) {
-                "History item must carry exactly one of content or content_ref"
+            require(remote.sessionId == sessionId) { "History item session mismatch" }
+            require((remote.body == null) != (remote.messageRef == null)) {
+                "History item must carry exactly one of body or message_ref"
             }
-            val completedAt = parseServerInstant(remote.ts, "history.page.ts")
-            val duration = remote.extra["turn_duration_ms"]?.jsonPrimitive?.longOrNull ?: 0L
             require(remote.id.isNotBlank() && remote.id.length <= 512) { "History message id is invalid" }
-            remote.clientMessageId?.let(::requireFrameId)
-            val controlTurnId = remote.extra["control_turn_id"]?.jsonPrimitive?.contentOrNull
-            controlTurnId?.let { turnId ->
-                require(remote.role == "assistant") { "History control turn belongs to a non-assistant message" }
-                require(turnId.isNotBlank() && turnId.length <= 512) { "History control turn id is invalid" }
-            }
-            val messageId = remote.id
-            val existingCanonical = database.messages().get(messageId)
-            val restoredContent = remote.contentRef?.let { reference ->
-                require(reference.version == 1 && reference.encoding == "utf-8") {
-                    "Unsupported history content reference"
-                }
-                require(reference.byteLength > 0 && SHA256.matches(reference.sha256.lowercase())) {
-                    "History content reference metadata is invalid"
-                }
-                existingCanonical?.text?.takeIf { local ->
-                    val encoded = local.toByteArray(Charsets.UTF_8)
-                    encoded.size.toLong() == reference.byteLength &&
-                        sha256(encoded) == reference.sha256.lowercase()
-                }
-            }
-            val canonical = MessageEntity(
-                messageId = messageId,
-                clientMessageId = remote.clientMessageId.takeIf { remote.role == "user" },
-                sessionId = sessionId,
-                role = remote.role,
-                text = remote.content ?: restoredContent ?: remote.contentRef!!.preview,
-                deliveryState = "complete",
-                createdAt = (completedAt - duration).coerceAtMost(completedAt),
-                updatedAt = completedAt,
-                serverSeq = remote.seq.toLong(),
-                replyToMessageId = remote.replyToMessageId,
-                replyRole = remote.replyRole,
-                replyPreview = remote.replyPreview,
-                turnClientMessageId = remote.clientMessageId.takeIf { remote.role == "assistant" },
-                controlTurnId = controlTurnId,
-            )
-            val proactive = remote.extra["proactive"]?.jsonPrimitive?.booleanOrNull == true
-            val deliveryId = remote.extra["delivery_id"]?.jsonPrimitive?.contentOrNull
-            if (deliveryId != null) {
-                require(remote.role == "assistant" && proactive) {
-                    "Proactive delivery id belongs to a non-proactive history message"
-                }
-            }
-            val activeTurnSourceId = controlTurnId?.let { logicalTurnId ->
-                val exactSourceId = "assistant:$logicalTurnId"
-                val exactSource = database.messages().get(exactSourceId)
-                if (
-                    exactSource?.sessionId == sessionId &&
-                    exactSource.role == "assistant" &&
-                    exactSource.deliveryState == "streaming"
-                ) {
-                    exactSourceId
-                } else {
-                    val activeTurns = database.messages().activeAssistantTurnsForSession(sessionId)
-                    activeTurns.singleOrNull()
-                        ?.takeIf { active -> active.controlTurnId == logicalTurnId }
-                        ?.messageId
-                }
-            }
-            val sourceId = if (activeTurnSourceId != null) {
-                activeTurnSourceId
-            } else if (existingCanonical != null) {
-                require(
-                    existingCanonical.sessionId == canonical.sessionId &&
-                        existingCanonical.role == canonical.role
-                ) { "Canonical message identity belongs to another message" }
-                null
+            require(remote.seq >= 0) { "History message seq is invalid" }
+            if (remote.messageRef != null) {
+                stageMessageReference(serverId, sessionId, remote, remote.id in notificationMessageIds)
             } else {
-                remote.clientMessageId?.takeIf { remote.role == "user" }?.let {
-                    database.messages().getByClientMessageId(it)?.messageId
-                }
+                commitMessageRow(serverId, sessionId, remote, remote.id in notificationMessageIds)
             }
-            val canonicalWithTurnIdentity = if (
-                remote.role == "assistant" &&
-                (canonical.turnClientMessageId == null || canonical.controlTurnId == null)
-            ) {
-                val activeTurn = activeTurnSourceId?.let { database.messages().get(it) }
-                canonical.copy(
-                    turnClientMessageId = canonical.turnClientMessageId
-                        ?: activeTurn?.turnClientMessageId
-                        ?: existingCanonical?.turnClientMessageId,
-                    controlTurnId = canonical.controlTurnId
-                        ?: activeTurn?.controlTurnId
-                        ?: existingCanonical?.controlTurnId,
+        }
+    }
+
+    /** 保存整条 Message 下载任务；不完整行不进入任何 UI 投影。 */
+    private suspend fun stageMessageReference(
+        serverId: String,
+        sessionId: String,
+        remote: RemoteHistoryMessage,
+        notifyWhenReady: Boolean,
+    ) {
+        val reference = requireNotNull(remote.messageRef)
+        require(
+            reference.version == 2 &&
+                reference.encoding == "utf-8" &&
+                reference.mediaType == "application/json" &&
+                reference.byteLength > 0 &&
+                reference.sha256.matches(Regex("[0-9a-fA-F]{64}"))
+        ) { "History message_ref is invalid" }
+        val existing = database.messages().get(remote.id)
+        val alreadyRestored = existing?.serverSeq == remote.seq &&
+            existing.recordedAt.isNotEmpty() && existing.bodyJson != "{}"
+        if (existing != null) {
+            require(existing.sessionId == sessionId) { "History message identity belongs to another session" }
+            require(existing.serverSeq == null || existing.serverSeq == remote.seq) {
+                "History message identity changed seq"
+            }
+        } else {
+            database.messages().upsert(
+                MessageEntity(
+                    messageId = remote.id,
+                    clientMessageId = null,
+                    sessionId = sessionId,
+                    role = "restoring",
+                    text = "",
+                    deliveryState = "restoring",
+                    createdAt = System.currentTimeMillis(),
+                    updatedAt = System.currentTimeMillis(),
+                ),
+            )
+        }
+        reconcileMessageContentTransfer(
+            serverId = serverId,
+            sessionId = sessionId,
+            messageId = remote.id,
+            messageSeq = remote.seq,
+            reference = reference,
+            alreadyRestored = alreadyRestored,
+            notifyWhenReady = notifyWhenReady,
+            updatedAt = System.currentTimeMillis(),
+        )
+    }
+
+    /** 校验并提交一条完整 Message v2 记录。 */
+    private suspend fun commitMessageRow(
+        serverId: String,
+        sessionId: String,
+        remote: RemoteHistoryMessage,
+        notifyNewOutput: Boolean,
+    ) {
+        val body = requireNotNull(remote.body) { "History Message has no body" }
+        val timestamp = requireNotNull(remote.timestamp) { "History Message has no timestamp" }
+        val author = requireNotNull(remote.author) { "History Message has no author" }
+        val source = requireNotNull(remote.source) { "History Message has no source" }
+        require(author.isNotBlank() && source.isNotBlank()) { "History Message attribution is invalid" }
+        val metadata = remote.metadata ?: JsonObject(emptyMap())
+        val completedAt = parseServerInstant(timestamp, "history.page.timestamp")
+        val clientMessageId = metadata["client_message_id"]?.jsonPrimitive?.contentOrNull
+        clientMessageId?.let(::requireFrameId)
+        val kind = body["kind"]?.jsonPrimitive?.contentOrNull ?: error("History body has no kind")
+        val canonical = MessageEntity(
+            messageId = remote.id,
+            clientMessageId = clientMessageId.takeIf { kind == "input" },
+            sessionId = sessionId,
+            role = if (kind == "input") "user" else "assistant",
+            text = timelineText(body),
+            deliveryState = "complete",
+            createdAt = completedAt,
+            updatedAt = completedAt,
+            serverSeq = remote.seq,
+            recordedAt = timestamp,
+            author = author,
+            source = source,
+            bodyJson = body.toString(),
+            metadataJson = metadata.toString(),
+            attachmentsJson = JsonArray(
+                remote.attachments.map {
+                    ProtocolCodec.json().encodeToJsonElement(
+                        com.akashic.mobile.data.realtime.TimelineAttachmentDescriptor.serializer(),
+                        it,
+                    )
+                },
+            ).toString(),
+        )
+        val prior = database.messages().get(remote.id)
+        val isNewServerMessage = prior?.serverSeq != remote.seq
+        val localSource = clientMessageId?.takeIf { kind == "input" }
+            ?.let { database.messages().getByClientMessageId(it)?.messageId }
+        mergeCanonicalMessage(localSource, canonical)
+        upsertMessageAttachments(
+            serverId = serverId,
+            sessionId = sessionId,
+            messageId = remote.id,
+            descriptors = remote.attachments.map {
+                AttachmentDescriptor(
+                    it.artifactId,
+                    it.filename ?: it.artifactId,
+                    it.mediaType ?: "application/octet-stream",
+                    it.sizeBytes,
+                    it.sha256,
                 )
-            } else {
-                canonical
-            }
-            if (activeTurnSourceId != null) {
-                val source = requireNotNull(database.messages().get(activeTurnSourceId))
-                if (source.turnClientMessageId == null && canonicalWithTurnIdentity.turnClientMessageId != null) {
-                    check(
-                        database.messages().bindTurnClientMessageId(
-                            activeTurnSourceId,
-                            canonicalWithTurnIdentity.turnClientMessageId,
-                        ) == 1,
-                    ) { "History turn client id 补写失败: $controlTurnId" }
-                }
-                if (source.controlTurnId == null && canonicalWithTurnIdentity.controlTurnId != null) {
-                    check(
-                        database.messages().bindControlTurnId(
-                            activeTurnSourceId,
-                            canonicalWithTurnIdentity.controlTurnId,
-                        ) == 1,
-                    ) { "History control turn id 补写失败: $controlTurnId" }
-                }
-            }
-            mergeCanonicalMessage(sourceId, canonicalWithTurnIdentity)
-            reconcileMessageContentTransfer(
-                serverId = serverId,
-                sessionId = sessionId,
-                messageId = messageId,
-                reference = remote.contentRef,
-                alreadyRestored = restoredContent != null,
-                updatedAt = completedAt,
+            },
+            updatedAt = completedAt,
+        )
+        database.messages().deleteBlocks(remote.id)
+        if (
+            notifyNewOutput && kind == "output" &&
+            body["finish"]?.jsonPrimitive?.contentOrNull == "complete"
+        ) {
+            val notifications = database.pendingMessageNotifications()
+            val changed = notifications.markReady(
+                messageId = remote.id,
+                content = timelineText(body),
+                hasAttachments = remote.attachments.isNotEmpty(),
+                attention = finalMessageAttention(metadata).name,
+                createdAt = completedAt,
             )
-            upsertMessageAttachments(
-                serverId = serverId,
-                sessionId = sessionId,
-                messageId = messageId,
-                descriptors = remote.attachments,
-                updatedAt = completedAt,
-            )
-            if (
-                remote.role == "assistant" &&
-                (remote.toolChain != null || remote.extra["reasoning_content"] != null)
-            ) {
-                database.messages().deleteBlocks(messageId)
-                database.messages().upsertBlocks(historyBlocks(messageId, remote, completedAt))
-            } else if (remote.role == "assistant") {
-                database.messages().completeRunningBlocks(messageId, completedAt)
+            if (changed == 0 && isNewServerMessage) {
+                notifications.upsert(
+                    PendingMessageNotificationEntity(
+                        messageId = remote.id,
+                        serverId = serverId,
+                        sessionId = sessionId,
+                        content = timelineText(body),
+                        hasAttachments = remote.attachments.isNotEmpty(),
+                        attention = finalMessageAttention(metadata).name,
+                        ready = true,
+                        headSeq = remote.seq,
+                        createdAt = completedAt,
+                    ),
+                )
             }
         }
     }
@@ -857,7 +934,7 @@ class LocalDeliveryStore(
         return title
     }
 
-    /** 把摘要一致的完整正文与恢复任务在一个 Room 事务中提交。 */
+    /** 把摘要一致的完整 Message JSON 与恢复任务在一个 Room 事务中提交。 */
     suspend fun commitRestoredMessageContent(
         transfer: MessageContentTransferEntity,
         content: String,
@@ -880,9 +957,12 @@ class LocalDeliveryStore(
         require(
             encoded.size.toLong() == current.byteLength && sha256(encoded) == current.sha256
         ) { "消息正文恢复内容与 manifest 不一致" }
-        check(database.messages().updateRestoredContent(current.messageId, content, updatedAt) == 1) {
-            "消息正文投影已消失: ${current.messageId}"
-        }
+        val remote = ProtocolCodec.json().decodeFromString<RemoteHistoryMessage>(content)
+        require(
+            remote.id == current.messageId && remote.sessionId == current.sessionId &&
+                remote.seq == current.messageSeq && remote.messageRef == null && remote.body != null
+        ) { "下载的 Message 与 manifest 身份不一致" }
+        commitMessageRow(current.serverId, current.sessionId, remote, current.notifyWhenReady)
         check(database.messageContentTransfers().delete(current.messageId) == 1) {
             "消息正文恢复记录提交时已消失: ${current.messageId}"
         }
@@ -892,8 +972,10 @@ class LocalDeliveryStore(
         serverId: String,
         sessionId: String,
         messageId: String,
+        messageSeq: Long,
         reference: com.akashic.mobile.data.realtime.MessageContentRef?,
         alreadyRestored: Boolean,
+        notifyWhenReady: Boolean,
         updatedAt: Long,
     ) {
         val dao = database.messageContentTransfers()
@@ -910,6 +992,7 @@ class LocalDeliveryStore(
             require(
                 existing.serverId == serverId &&
                     existing.sessionId == sessionId &&
+                    existing.messageSeq == messageSeq &&
                     existing.byteLength == reference.byteLength &&
                     existing.sha256 == sha256
             ) { "History content reference changed for an existing message" }
@@ -923,6 +1006,11 @@ class LocalDeliveryStore(
                     ) == 1,
                 ) { "消息正文恢复记录已消失: $messageId" }
             }
+            if (notifyWhenReady && !existing.notifyWhenReady) {
+                check(dao.markNotifyWhenReady(messageId) == 1) {
+                    "消息正文恢复通知标记已消失: $messageId"
+                }
+            }
             return
         }
         dao.upsert(
@@ -930,72 +1018,16 @@ class LocalDeliveryStore(
                 messageId = messageId,
                 serverId = serverId,
                 sessionId = sessionId,
+                messageSeq = messageSeq,
                 byteLength = reference.byteLength,
                 sha256 = sha256,
                 transferredBytes = 0,
                 state = "pending",
+                notifyWhenReady = notifyWhenReady,
                 updatedAt = updatedAt,
             ),
         )
     }
-
-    private fun historyBlocks(
-        messageId: String,
-        remote: RemoteHistoryMessage,
-        updatedAt: Long,
-    ): List<TurnBlockEntity> {
-        val blocks = mutableListOf<TurnBlockEntity>()
-        val turnId = remote.id
-
-        fun addThinking(content: String) {
-            if (content.isBlank()) return
-            val ordinal = blocks.size
-            blocks += TurnBlockEntity(
-                blockId = "history:$turnId:$ordinal",
-                messageId = messageId,
-                turnId = turnId,
-                ordinal = ordinal,
-                kind = "thinking",
-                status = "completed",
-                content = content,
-                updatedAt = updatedAt,
-            )
-        }
-
-        (remote.toolChain as? JsonArray)?.forEach { rawGroup ->
-            val group = rawGroup.jsonObject
-            addThinking(jsonText(group, "reasoning_content") ?: jsonText(group, "text") ?: "")
-            (group["calls"] as? JsonArray)?.forEach { rawCall ->
-                val call = rawCall.jsonObject
-                val name = jsonText(call, "name") ?: return@forEach
-                val arguments = (call["final_arguments"] ?: call["arguments"]) as? JsonObject
-                val ordinal = blocks.size
-                blocks += TurnBlockEntity(
-                    blockId = "history:$turnId:$ordinal",
-                    messageId = messageId,
-                    turnId = turnId,
-                    ordinal = ordinal,
-                    kind = "tool",
-                    status = if (jsonText(call, "status") == "success") "completed" else "failed",
-                    content = encodeStoredToolBlock(
-                        StoredToolBlock(
-                            name = name,
-                            description = arguments?.let { jsonText(it, "description") }
-                                ?: jsonText(call, "description"),
-                            arguments = arguments,
-                            resultPreview = jsonText(call, "result_preview"),
-                        ),
-                    ),
-                    updatedAt = updatedAt,
-                )
-            }
-        }
-        addThinking(jsonText(remote.extra, "reasoning_content") ?: "")
-        return blocks
-    }
-
-    private fun jsonText(payload: JsonObject, key: String): String? =
-        (payload[key] as? JsonPrimitive)?.contentOrNull
 
     private suspend fun upsertConversation(serverId: String, envelope: WireEnvelope, updatedAt: Long) {
         val sessionId = envelope.sessionId ?: payloadText(envelope, "session_id")
@@ -1026,387 +1058,18 @@ class LocalDeliveryStore(
         }
     }
 
-    /** 把远端 Turn 的用户输入与 assistant 流投影到同一条消息链。 */
-    private suspend fun applyTurnStarted(envelope: WireEnvelope, updatedAt: Long) {
-        val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
-        val clientMessageId = payloadText(envelope, "client_message_id")
-        val content = payloadText(envelope, "content")
-        if (clientMessageId != null) {
-            requireFrameId(clientMessageId)
-            val userContent = content ?: ""
-            val existing = database.messages().getByClientMessageId(clientMessageId)
-            if (existing == null) {
-                database.messages().upsert(
-                    MessageEntity(
-                        messageId = "user:$clientMessageId",
-                        clientMessageId = clientMessageId,
-                        sessionId = sessionId,
-                        role = "user",
-                        text = userContent,
-                        deliveryState = "complete",
-                        createdAt = (updatedAt - 1).coerceAtLeast(0),
-                        updatedAt = updatedAt,
-                    ),
-                )
-            } else {
-                require(existing.sessionId == sessionId && existing.role == "user") {
-                    "Turn client_message_id 已属于其他消息: $clientMessageId"
-                }
-            }
-        }
-        ensureAssistantTurn(envelope, updatedAt)
-    }
-
-    private data class AssistantTurnTarget(
-        val sessionId: String,
-        val turnId: String,
-        val messageId: String,
-        val controlTurnId: String?,
-        val clientMessageId: String?,
-    )
-
-    /** 提取并校验流式事件指向的唯一 assistant turn 身份。 */
-    private fun assistantTurnTarget(envelope: WireEnvelope): AssistantTurnTarget {
-        val sessionId = requireNotNull(envelope.sessionId) { "Turn event has no session_id" }
-        val turnId = requireNotNull(envelope.turnId) { "Turn event has no turn_id" }
-        val controlTurnId = payloadText(envelope, "control_turn_id")
-        controlTurnId?.let(::requireControlTurnId)
-        // 1. 显式 client_message_id 绑定 turn 关联列；用户 outbox 身份继续独占 clientMessageId
-        val clientMessageId = payloadText(envelope, "client_message_id")
-        clientMessageId?.let(::requireFrameId)
-        // TODO(deprecated): 流式阶段的本地临时 ID 命名空间，final/history 到达后原子迁移
-        // 为服务端 message_id；未来以服务端下发的稳定身份取代前缀拼接。
-        return AssistantTurnTarget(
-            sessionId = sessionId,
-            turnId = turnId,
-            messageId = "assistant:$turnId",
-            controlTurnId = controlTurnId,
-            clientMessageId = clientMessageId,
-        )
-    }
-
-    private suspend fun ensureAssistantTurn(envelope: WireEnvelope, updatedAt: Long): MessageEntity {
-        val target = assistantTurnTarget(envelope)
-        val existing = database.messages().get(target.messageId)
-        if (existing != null) {
-            // 2. 只有显式 wire 身份才能补写或校验；旧增量缺字段不产生第二套本地事实
-            if (target.controlTurnId != null && existing.controlTurnId == null) {
-                check(database.messages().bindControlTurnId(target.messageId, target.controlTurnId) == 1) {
-                    "Control turn id 补写失败: ${target.controlTurnId}"
-                }
-            } else if (target.controlTurnId != null) {
-                require(existing.controlTurnId == target.controlTurnId) {
-                    "Control turn id 在重放中变化: ${target.controlTurnId}"
-                }
-            }
-            if (target.clientMessageId != null && existing.turnClientMessageId == null) {
-                check(database.messages().bindTurnClientMessageId(target.messageId, target.clientMessageId) == 1) {
-                    "Turn client_message_id 补写失败: ${target.turnId}"
-                }
-            }
-            if (target.clientMessageId != null) {
-                require(
-                    existing.turnClientMessageId == null ||
-                        existing.turnClientMessageId == target.clientMessageId,
-                ) {
-                    "Turn client_message_id 在重放中变化: ${target.turnId}"
-                }
-            }
-            return existing.copy(
-                turnClientMessageId = target.clientMessageId ?: existing.turnClientMessageId,
-                controlTurnId = target.controlTurnId ?: existing.controlTurnId,
-            )
-        }
-        val active = database.messages().activeAssistantTurn(target.sessionId)
-        if (active != null) {
-            throw IllegalArgumentException(
-                "同一会话出现重叠 turn: ${active.messageId.removePrefix("assistant:")} -> ${target.turnId}",
-            )
-        }
-        // 3. 没有 turn.started 的 legacy 恢复流才以 attempt 身份创建首个本地投影
-        val controlTurnId = target.controlTurnId ?: target.turnId
-        requireControlTurnId(controlTurnId)
-        val message = MessageEntity(
-            messageId = target.messageId,
-            clientMessageId = null,
-            sessionId = target.sessionId,
-            role = "assistant",
-            text = "",
-            deliveryState = "streaming",
-            createdAt = updatedAt,
-            updatedAt = updatedAt,
-            turnClientMessageId = target.clientMessageId,
-            controlTurnId = controlTurnId,
-        )
-        database.messages().upsert(message)
-        return message
-    }
-
-    /** 已建立的 thinking 块走单次 UPDATE；首段与 legacy 补绑走完整校验。 */
-    private suspend fun appendThinking(envelope: WireEnvelope, updatedAt: Long) {
-        val target = assistantTurnTarget(envelope)
-        val blockId = requireNotNull(payloadText(envelope, "block_id")) {
-            "Thinking delta has no block_id"
-        }
-        val ordinal = requireNotNull(payloadLong(envelope, "ordinal")) {
-            "Thinking delta has no ordinal"
-        }.toInt()
-        val delta = requireNotNull(payloadText(envelope, "delta"))
-        // 1. 正常增量不读回不断增长的整块正文。
-        val changed = database.messages().appendThinkingDelta(
-            blockId = blockId,
-            messageId = target.messageId,
-            sessionId = target.sessionId,
-            turnId = target.turnId,
-            ordinal = ordinal,
-            controlTurnId = target.controlTurnId,
-            clientMessageId = target.clientMessageId,
-            delta = delta,
-            updatedAt = updatedAt,
-        )
-        if (changed == 0) {
-            // 2. 首段建立块；legacy 迟到身份先补绑，再重试同一条受约束 UPDATE。
-            val message = ensureAssistantTurn(envelope, updatedAt)
-            val retried = database.messages().appendThinkingDelta(
-                blockId = blockId,
-                messageId = target.messageId,
-                sessionId = target.sessionId,
-                turnId = target.turnId,
-                ordinal = ordinal,
-                controlTurnId = target.controlTurnId,
-                clientMessageId = target.clientMessageId,
-                delta = delta,
-                updatedAt = updatedAt,
-            )
-            if (retried == 1) return
-            check(database.messages().getBlock(blockId) == null) {
-                "Thinking delta block identity mismatch after turn binding: $blockId"
-            }
-            database.messages().upsertBlocks(
-                listOf(
-                    TurnBlockEntity(
-                        blockId = blockId,
-                        messageId = message.messageId,
-                        turnId = target.turnId,
-                        ordinal = ordinal,
-                        kind = "thinking",
-                        status = "running",
-                        content = delta,
-                        updatedAt = updatedAt,
-                    ),
-                ),
-            )
-        }
-    }
-
-    private suspend fun startTool(envelope: WireEnvelope, updatedAt: Long) {
-        val message = ensureAssistantTurn(envelope, updatedAt)
-        val turnId = requireNotNull(envelope.turnId)
-        val callId = toolCallId(envelope)
-        val blockId = payloadText(envelope, "block_id") ?: "tool:$callId"
-        val previous = database.messages().getBlock(blockId)
-        val toolName = requireNotNull(payloadText(envelope, "tool_name")) {
-            "Tool start has no tool_name"
-        }
-        val arguments = requireNotNull(envelope.payload["arguments"] as? JsonObject) {
-            "Tool start arguments must be an object"
-        }
-        database.messages().completeRunningThinking(message.messageId, updatedAt)
-        database.messages().upsertBlocks(
-            listOf(
-                TurnBlockEntity(
-                    blockId = blockId,
-                    messageId = message.messageId,
-                    turnId = turnId,
-                    ordinal = previous?.ordinal ?: requireNotNull(payloadLong(envelope, "ordinal")) {
-                        "Tool start has no ordinal"
-                    }.toInt(),
-                    kind = "tool",
-                    status = "running",
-                    content = encodeStoredToolBlock(
-                        StoredToolBlock(
-                            name = toolName,
-                            description = payloadText(arguments, "description"),
-                            arguments = arguments,
-                        ),
-                    ),
-                    updatedAt = updatedAt,
-                ),
-            ),
-        )
-    }
-
-    private suspend fun completeTool(envelope: WireEnvelope, updatedAt: Long) {
-        val message = ensureAssistantTurn(envelope, updatedAt)
-        val turnId = requireNotNull(envelope.turnId)
-        val callId = toolCallId(envelope)
-        val blockId = payloadText(envelope, "block_id") ?: "tool:$callId"
-        val previous = requireNotNull(database.messages().getBlock(blockId)) {
-            "Tool completion arrived before start: $callId"
-        }
-        val stored = decodeStoredToolBlock(previous.content)
-        val toolName = requireNotNull(payloadText(envelope, "tool_name")) {
-            "Tool completion has no tool_name"
-        }
-        require(toolName == stored.name) { "Tool completion name mismatch: $toolName != ${stored.name}" }
-        val finalArguments = when (val value = envelope.payload["arguments"]) {
-            null -> stored.arguments
-            is JsonObject -> value
-            else -> error("Tool completion arguments must be an object")
-        }
-        val succeeded = payloadText(envelope, "status") == "success"
-        val durationMillis = envelope.payload["duration_ms"]?.let {
-            requireNotNull(payloadLong(envelope, "duration_ms")) {
-                "Tool completion duration_ms must be an integer"
-            }
-        }
-        require(durationMillis == null || durationMillis >= 0) {
-            "Tool completion duration_ms must be non-negative"
-        }
-        database.messages().upsertBlocks(
-            listOf(
-                TurnBlockEntity(
-                    blockId = blockId,
-                    messageId = message.messageId,
-                    turnId = turnId,
-                    ordinal = previous.ordinal,
-                    kind = "tool",
-                    status = if (succeeded) "completed" else "failed",
-                    content = encodeStoredToolBlock(
-                        stored.copy(
-                            description = finalArguments?.let { payloadText(it, "description") }
-                                ?: stored.description,
-                            resultPreview = payloadText(envelope, "result_preview"),
-                            arguments = finalArguments,
-                            durationMillis = durationMillis,
-                        ),
-                    ),
-                    updatedAt = updatedAt,
-                ),
-            ),
-        )
-    }
-
-    /** 已建立的 answer 走单次 UPDATE；缺失投影或 legacy 补绑再走恢复路径。 */
-    private suspend fun appendAnswer(envelope: WireEnvelope, updatedAt: Long) {
-        val target = assistantTurnTarget(envelope)
-        val delta = requireNotNull(payloadText(envelope, "delta"))
-        // 1. 正常增量由 SQLite 原子追加，不把完整旧正文搬回 Kotlin。
-        val changed = database.messages().appendAnswerDelta(
-            messageId = target.messageId,
-            sessionId = target.sessionId,
-            controlTurnId = target.controlTurnId,
-            clientMessageId = target.clientMessageId,
-            delta = delta,
-            updatedAt = updatedAt,
-        )
-        if (changed == 0) {
-            // 2. 只有缺失 turn 或迟到身份才读取、校验并重试。
-            val current = ensureAssistantTurn(envelope, updatedAt)
-            check(
-                database.messages().appendAnswerDelta(
-                    messageId = current.messageId,
-                    sessionId = current.sessionId,
-                    controlTurnId = target.controlTurnId,
-                    clientMessageId = target.clientMessageId,
-                    delta = delta,
-                    updatedAt = updatedAt,
-                ) == 1,
-            ) { "Answer delta target is not the active assistant message: ${current.messageId}" }
-        }
-    }
-
-    private suspend fun finalizeMessage(
-        envelope: WireEnvelope,
-        delivered: FinalMessageEvent,
-        updatedAt: Long,
-    ) {
-        completeOptimisticUser(envelope, updatedAt)
-        val current = ensureAssistantTurn(envelope, updatedAt)
-        val legacyIdentity = current.controlTurnId ?: envelope.turnId?.let { turnId ->
-            // legacy 流式行没有 wire 身份列时，final 以权威 attempt ID 补写一次
-            requireControlTurnId(turnId)
-            check(database.messages().bindControlTurnId(current.messageId, turnId) == 1) {
-                "Legacy control turn id 补写失败: $turnId"
-            }
-            turnId
-        }
-        val blocks = database.messages().getBlocks(current.messageId)
-        val finalThinking = payloadText(envelope, "thinking")?.trim().orEmpty()
-        if (finalThinking.isNotEmpty() && blocks.none { it.kind == "thinking" }) {
-            val turnId = requireNotNull(envelope.turnId)
-            database.messages().upsertBlocks(
-                listOf(
-                    TurnBlockEntity(
-                        blockId = "thinking:$turnId:final",
-                        messageId = current.messageId,
-                        turnId = turnId,
-                        ordinal = -1,
-                        kind = "thinking",
-                        status = "completed",
-                        content = finalThinking,
-                        updatedAt = updatedAt,
-                    ),
-                ),
-            )
-        }
-        val canonicalId = delivered.messageId
-        require(canonicalId.isNotBlank() && canonicalId.length <= 512) { "Canonical message id is invalid" }
-        val canonical = current.copy(
-            messageId = canonicalId,
-            text = delivered.content.ifEmpty { current.text },
-            deliveryState = "complete",
-            updatedAt = updatedAt,
-            controlTurnId = current.controlTurnId ?: legacyIdentity,
-        )
-        mergeCanonicalMessage(current.messageId, canonical)
-        upsertMessageAttachments(
-            serverId = requireNotNull(database.conversations().get(current.sessionId)).serverId,
-            sessionId = current.sessionId,
-            messageId = canonicalId,
-            descriptors = envelope.payload["attachments"]?.let {
-                ProtocolCodec.json().decodeFromJsonElement(it)
-            } ?: emptyList(),
-            updatedAt = updatedAt,
-        )
-        database.messages().completeRunningBlocks(canonicalId, updatedAt)
-    }
-
-    /** final 终态把乐观用户消息推进为 complete；canonical 身份仍由服务端 history 投影迁移。 */
-    private suspend fun completeOptimisticUser(envelope: WireEnvelope, updatedAt: Long) {
-        val clientMessageId = payloadText(envelope, "client_message_id") ?: return
-        requireFrameId(clientMessageId)
-        val source = database.messages().getByClientMessageId(clientMessageId) ?: return
-        if (source.role != "user" || source.deliveryState !in setOf("pending", "sent")) return
-        check(database.messages().updateDelivery(clientMessageId, "complete", updatedAt) == 1) {
-            "Optimistic user message disappeared"
-        }
-        database.outbox().get(clientMessageId)?.let { command ->
-            check(command.state == "accepted") { "Terminal user outbox is not accepted: ${command.state}" }
-            check(database.outbox().deleteAcknowledged(clientMessageId) == 1) {
-                "Terminal user outbox disappeared: $clientMessageId"
-            }
-        }
-    }
-
-    /** 把流式或 optimistic 消息原子迁移到服务端 canonical identity。 */
+    /** 保存服务端 Message，并把同一 Input 的本地发送身份迁到正式 ID。 */
     private suspend fun mergeCanonicalMessage(sourceId: String?, canonical: MessageEntity) {
         val messages = database.messages()
         val media = database.mediaAttachments()
-        val existingCanonical = messages.get(canonical.messageId)
-        if (existingCanonical != null) {
-            require(
-                existingCanonical.sessionId == canonical.sessionId && existingCanonical.role == canonical.role
-            ) { "Canonical message identity belongs to another message" }
-            if (canonical.turnClientMessageId != null && existingCanonical.turnClientMessageId != null) {
-                require(existingCanonical.turnClientMessageId == canonical.turnClientMessageId) {
-                    "Canonical turn client id mismatch"
-                }
+        val existing = messages.get(canonical.messageId)
+        if (existing != null && existing.role != "restoring") {
+            require(existing.sessionId == canonical.sessionId) {
+                "Message identity belongs to another session"
             }
-            if (canonical.controlTurnId != null && existingCanonical.controlTurnId != null) {
-                require(existingCanonical.controlTurnId == canonical.controlTurnId) {
-                    "Canonical control turn id mismatch"
-                }
+            if (existing.serverSeq != null) {
+                require(existing == canonical) { "Saved Message facts changed during replay" }
+                return
             }
         }
         val source = sourceId?.let { messages.get(it) }
@@ -1414,37 +1077,18 @@ class LocalDeliveryStore(
             messages.upsert(canonical)
             return
         }
-        require(source.sessionId == canonical.sessionId && source.role == canonical.role) {
-            "Source message identity belongs to another message"
-        }
-        if (canonical.clientMessageId != null) {
-            require(source.clientMessageId == canonical.clientMessageId) { "Optimistic client id mismatch" }
-        }
-        if (canonical.turnClientMessageId != null) {
-            require(source.turnClientMessageId == canonical.turnClientMessageId) {
-                "Streaming turn client id mismatch"
-            }
-        }
-        if (canonical.controlTurnId != null) {
-            require(source.controlTurnId == canonical.controlTurnId) {
-                "Streaming control turn id mismatch"
-            }
-        }
+        require(
+            canonical.role == "user" && canonical.clientMessageId != null &&
+                source.sessionId == canonical.sessionId && source.role == "user" &&
+                source.clientMessageId == canonical.clientMessageId
+        ) { "Local Input identity does not match the saved Message" }
 
-        // 1. 清理已同步 canonical 子项，并释放 optimistic client id 唯一约束
-        messages.deleteBlocks(canonical.messageId)
-        media.deleteLinks(canonical.messageId)
-        if (canonical.clientMessageId != null) {
-            check(messages.clearClientMessageId(sourceId) == 1) { "Optimistic message disappeared" }
-        }
+        check(messages.clearClientMessageId(sourceId) == 1) { "Local Input disappeared" }
         messages.upsert(canonical)
-
-        // 2. 将阅读位置与流式子项迁移后删除旧身份
         database.conversationReadStates().moveAnchor(source.sessionId, sourceId, canonical.messageId)
         database.composerDrafts().moveReplyTarget(source.sessionId, sourceId, canonical.messageId)
-        messages.moveBlocks(sourceId, canonical.messageId)
         media.moveLinks(sourceId, canonical.messageId)
-        check(messages.delete(sourceId) == 1) { "Source message disappeared during canonical merge" }
+        check(messages.delete(sourceId) == 1) { "Local Input disappeared during Message save" }
         canonicalMessageAliases.entries.forEach { alias ->
             if (alias.value == sourceId) alias.setValue(canonical.messageId)
         }
@@ -1454,58 +1098,6 @@ class LocalDeliveryStore(
         }
     }
 
-    private suspend fun interruptTurn(envelope: WireEnvelope, updatedAt: Long) {
-        val terminalStatus = requireNotNull(payloadText(envelope, "status")) {
-            "turn.interrupted 缺少 status"
-        }
-        require(terminalStatus in setOf("failed", "cancelled", "interrupted")) {
-            "turn.interrupted status 不受支持: $terminalStatus"
-        }
-        settleInterruptedOptimisticUser(envelope, terminalStatus, updatedAt)
-        val current = ensureAssistantTurn(envelope, updatedAt)
-        database.messages().upsert(current.copy(deliveryState = terminalStatus, updatedAt = updatedAt))
-        database.messages().completeRunningBlocks(current.messageId, updatedAt)
-    }
-
-    /** Provider 终态负责释放 ACK 后保留的 outbox，并只为明确可重试失败恢复入口。 */
-    private suspend fun settleInterruptedOptimisticUser(
-        envelope: WireEnvelope,
-        terminalStatus: String,
-        updatedAt: Long,
-    ) {
-        val clientMessageId = payloadText(envelope, "client_message_id") ?: return
-        requireFrameId(clientMessageId)
-        val source = database.messages().getByClientMessageId(clientMessageId) ?: return
-        if (source.role != "user" || source.deliveryState !in setOf("pending", "sent")) return
-        val command = database.outbox().get(clientMessageId)
-        if (command != null) require(command.state == "accepted") {
-            "Terminal user outbox is not accepted: ${command.state}"
-        }
-        if (terminalStatus != "failed") {
-            check(database.messages().updateDelivery(clientMessageId, "complete", updatedAt) == 1)
-            if (command != null) check(database.outbox().deleteAcknowledged(clientMessageId) == 1)
-            return
-        }
-
-        val retryable = envelope.payload["retryable"]?.jsonPrimitive?.booleanOrNull
-            ?: error("failed terminal 缺少 retryable")
-        val state = if (retryable) "failed_retryable" else "failed"
-        check(database.messages().updateDelivery(clientMessageId, state, updatedAt) == 1)
-        if (command == null) return
-        val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(
-            ProtocolCodec.decode(command.envelopeJson).payload,
-        )
-        if (payload.mediaRefs.isNotEmpty()) {
-            check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
-        }
-        if (retryable) {
-            check(database.outbox().markAcceptedFailed(clientMessageId, state) == 1)
-        } else {
-            check(database.outbox().deleteAcknowledged(clientMessageId) == 1)
-        }
-    }
-
-    /** 持久化附件元数据并幂等关联消息。 */
     private suspend fun upsertMessageAttachments(
         serverId: String,
         sessionId: String,

@@ -56,8 +56,8 @@ class IsolatedGatewayDeviceTest {
             installFrameRecorder(scenario)
             val startedAt = SystemClock.elapsedRealtime()
             session.sendMessage("Android 流式性能基准")
-            withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId != null } }
-            withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId == null } }
+            withTimeout(TIMEOUT_MILLIS) { session.state.first { hasActiveReply(it.replyStatus) } }
+            withTimeout(TIMEOUT_MILLIS) { session.state.first { !hasActiveReply(it.replyStatus) } }
             val completedGraph = graph(app, sessionId) { messages ->
                 messages.count { message ->
                     message.message.role == "assistant" &&

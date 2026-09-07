@@ -309,6 +309,7 @@ interface MessageDao {
         """
         SELECT * FROM messages AS local
         WHERE local.sessionId = :sessionId
+          AND local.deliveryState != 'restoring'
         ORDER BY
           CASE WHEN local.serverSeq IS NOT NULL THEN local.serverSeq ELSE COALESCE(
             (
@@ -381,7 +382,24 @@ interface MessageDao {
 
     @Query(
         """
-        SELECT COUNT(*) AS messageCount, MAX(serverSeq) AS maxServerSeq
+        SELECT COUNT(*) AS messageCount,
+          CASE
+            WHEN (
+              SELECT MIN(pending.messageSeq)
+              FROM message_content_transfers AS pending
+              WHERE pending.sessionId = :sessionId
+                AND pending.state IN ('pending', 'downloading', 'failed')
+            ) IS NULL THEN MAX(serverSeq)
+            ELSE MIN(
+              COALESCE(MAX(serverSeq), -1),
+              (
+                SELECT MIN(pending.messageSeq) - 1
+                FROM message_content_transfers AS pending
+                WHERE pending.sessionId = :sessionId
+                  AND pending.state IN ('pending', 'downloading', 'failed')
+              )
+            )
+          END AS maxServerSeq
         FROM messages
         WHERE sessionId = :sessionId
           AND serverSeq IS NOT NULL
@@ -440,6 +458,17 @@ interface MessageDao {
 
     @Query("UPDATE messages SET deliveryState = :state, updatedAt = :updatedAt WHERE clientMessageId = :clientMessageId")
     suspend fun updateDelivery(clientMessageId: String, state: String, updatedAt: Long): Int
+
+    @Query(
+        """
+        UPDATE messages
+        SET deliveryState = 'sent', updatedAt = :updatedAt
+        WHERE clientMessageId = :clientMessageId
+          AND serverSeq IS NULL
+          AND deliveryState = 'pending'
+        """,
+    )
+    suspend fun markInputAccepted(clientMessageId: String, updatedAt: Long): Int
 
     @Query("UPDATE messages SET text = :text, updatedAt = :updatedAt WHERE messageId = :messageId")
     suspend fun updateRestoredContent(messageId: String, text: String, updatedAt: Long): Int
@@ -556,6 +585,9 @@ interface MessageContentTransferDao {
         updatedAt: Long,
     ): Int
 
+    @Query("UPDATE message_content_transfers SET notifyWhenReady = 1 WHERE messageId = :messageId")
+    suspend fun markNotifyWhenReady(messageId: String): Int
+
     @Query("DELETE FROM message_content_transfers WHERE messageId = :messageId")
     suspend fun delete(messageId: String): Int
 }
@@ -565,10 +597,42 @@ interface PendingMessageNotificationDao {
     @Upsert
     suspend fun upsert(notification: PendingMessageNotificationEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertHint(notification: PendingMessageNotificationEntity): Long
+
     @Query(
-        "SELECT * FROM pending_message_notifications WHERE serverId = :serverId ORDER BY createdAt, messageId",
+        "SELECT * FROM pending_message_notifications WHERE serverId = :serverId AND ready = 1 ORDER BY createdAt, messageId",
     )
     fun observeForServer(serverId: String): Flow<List<PendingMessageNotificationEntity>>
+
+    @Query(
+        "SELECT * FROM pending_message_notifications WHERE serverId = :serverId AND ready = 0 ORDER BY createdAt, messageId",
+    )
+    suspend fun pendingHints(serverId: String): List<PendingMessageNotificationEntity>
+
+    @Query(
+        "SELECT * FROM pending_message_notifications WHERE sessionId = :sessionId AND ready = 0 ORDER BY createdAt, messageId",
+    )
+    suspend fun pendingHintsForSession(sessionId: String): List<PendingMessageNotificationEntity>
+
+    @Query(
+        """
+        UPDATE pending_message_notifications
+        SET content = :content,
+            hasAttachments = :hasAttachments,
+            attention = :attention,
+            ready = 1,
+            createdAt = :createdAt
+        WHERE messageId = :messageId AND ready = 0
+        """,
+    )
+    suspend fun markReady(
+        messageId: String,
+        content: String,
+        hasAttachments: Boolean,
+        attention: String,
+        createdAt: Long,
+    ): Int
 
     @Query("DELETE FROM pending_message_notifications WHERE messageId = :messageId")
     suspend fun delete(messageId: String): Int
