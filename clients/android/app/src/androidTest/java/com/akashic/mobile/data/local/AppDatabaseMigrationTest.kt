@@ -1177,12 +1177,13 @@ class AppDatabaseMigrationTest {
             db.query("SELECT deliveryState, text FROM messages WHERE messageId = ?", arrayOf(failed)).use {
                 check(it.moveToFirst()); assertEquals("failed", it.getString(0)); assertEquals("保留失败正文", it.getString(1))
             }
-            db.execSQL("DELETE FROM conversations WHERE sessionId = 'akashic:test'")
-            db.query("SELECT COUNT(*) FROM media_attachments").use { check(it.moveToFirst()); assertEquals(1, it.getInt(0)) }
             db.query("PRAGMA foreign_key_check").use { assertEquals(false, it.moveToFirst()) }
         }
         val reopened = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_18_19).build()
         try {
+            assertEquals(1, reopened.conversations().delete("server", "akashic:test"))
+            assertEquals(1, reopened.mediaAttachments().all().size)
+            reopened.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use { assertEquals(false, it.moveToFirst()) }
             MediaCacheStore(cacheRoot, reopened.mediaAttachments()).reconcile()
             assertEquals("cached", reopened.mediaAttachments().get(artifactCacheId("server", artifact))?.state)
             assertEquals(true, oldFile.isFile)
