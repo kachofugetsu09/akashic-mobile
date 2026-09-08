@@ -36,7 +36,7 @@
 |---|---|---|
 | `App.kt` / `AppContainer` | 组装数据库、文件 store、密钥和 realtime | 移动端 |
 | `RealtimeSession` | 配对、连接、同步、投递、附件、插件 UI 与 WebUI Resolve/Ensure 的 WebSocket/HTTPS 协调 | 移动端消费协议；核心拥有远端事实与 WebUI 选择 |
-| `AppDatabase` | Room v15 schema 与迁移；v13 增加 WebUI 派生 metadata，v14/v15 分离 user/outbox、assistant client 和 control turn 身份 | 移动端 |
+| `AppDatabase` | Room v18 schema 与迁移；v17→v18 统一本地发送与 Core Input 的 Message ID，并保留 restoring 下载进度 | 移动端 |
 | `MobileConnectionService` | 后台连接和持久通知消费 | 移动端 |
 | `protocol/mobile-realtime-v1.json` | 客户端历史协议快照 | 核心 schema 是真源 |
 | `runtime-gate/` | 固定核心组合并验证跨仓库语义 | 移动端维护消费者契约；核心提供 provider 测试 |
@@ -98,26 +98,34 @@ embedded baseline 没有远端 generation，`generationRef=null` 本身就是它
 
 ## 历史同步进度
 
-正常重连时，`RealtimeSession` 使用服务端冻结的 `snapshot_max_seq` 和 `after_seq` 游标读取历史；同步期间追加的新消息留给下一轮，不改变当前快照。旧核心仍使用 page/page_size 兼容路径。投影不连续、数量异常或收到 `sync.reset_required` 时从头重建。核心 SessionDB 仍是权威事实，本地进度只决定可重建投影的读取起点。
+正常重连时，`RealtimeSession` 分页读取 Message v2 Session 目录，并分别核对每个会话的 `message_count` 与 `head_seq`。历史读取使用 `after_seq + through_seq` 冻结前缀；同步期间追加的新消息留给 follow 或下一轮。`seq` 可以有空洞，数量不能代替高水位。数量、head 或本地投影不匹配，以及收到 `sync.reset_required` 时，从头重建服务端投影。核心 Message 日志仍是权威事实，本地进度只决定可重建投影的读取起点。
 
-历史消息正文超过 WebSocket 事件预算时，历史页只携带带长度、摘要和预览的 `content_ref`，thinking、tool block、顺序和消息身份仍随历史页落库。客户端通过 WebSocket 申请与当前设备、连接和消息绑定的短期 ticket，再从同源 HTTPS Range route 分段写入私有文件。每段先落盘后推进 Room 偏移，完整摘要与 UTF-8 校验通过后才原子替换预览。
+旧 durable Turn 事件只推进事件 ACK，不再生成正文或可见流式投影。此前按 delta 次数和 `assistant:<turn_id>` DOM 节点测量渲染频率的设备性能用例已删除；当前设备 Gate 只验收 `reply.status` 的生成状态与 `messages.appended` 提交的完整 Message。
+
+单条 Message JSON 超过 WebSocket 事件预算时，历史页只携带 `message_ref` 的版本、长度和摘要。客户端先保存不进入 UI 的 restoring 行和持久传输 owner，通过 WebSocket 申请与当前设备、连接和 Message 绑定的短期 ticket，再从同源 HTTPS Range route 分段写入私有文件。每段先落盘后推进 Room 偏移；只有完整长度、SHA-256、UTF-8、Message 身份、Session 和 `seq` 全部匹配，才原子提交整条 Message 并删除传输 owner。部分正文、预览或并行 block 不构成第二份消息事实。
 
 ```text
-┌──────────────┐  history.page + content_ref  ┌─────────────────┐
-│ Core SessionDB│ ───────────────────────────▶ │ Room projection │
-└──────┬───────┘                              └────────┬────────┘
-       │ WSS prepare / short ticket                     │ preview + blocks
-       └──────────────────────┐                         │
-                              ▼                         ▼
-                       ┌──────────────┐  verified   ┌──────────────┐
-                       │ HTTPS Range  │ ───────────▶ │ full content │
-                       │ <= 256 KiB   │  fsync/hash │ same message │
-                       └──────────────┘             └──────────────┘
+┌──────────────────┐  history.page + message_ref  ┌──────────────────┐
+│ Core Message log │ ────────────────────────────▶ │ hidden restoring │
+└────────┬─────────┘                              │ row + transfer   │
+         │ WSS prepare / short ticket              └────────┬─────────┘
+         └──────────────────────┐                           │
+                                ▼                           ▼
+                         ┌──────────────┐  verified   ┌──────────────┐
+                         │ HTTPS Range  │ ───────────▶ │ whole Message│
+                         │ <= 256 KiB   │ fsync/hash  │ one Room row  │
+                         └──────────────┘             └──────────────┘
 ```
 
 ## 主动消息投影身份
 
-核心先把主动 assistant 消息提交到 SessionDB，再发送只含 canonical `message_id` 与 `head_seq` 的更新通知。Android 不保存第二份实时正文；它比较 Room 中连续最大 `serverSeq` 与 Session snapshot，并通过 `history.get(after_seq)` 拉取缺少的尾部。引用始终使用 canonical `reply_to.message_id`，不保留 delivery ID、临时消息身份或按正文与时间猜测的兼容路径。
+核心先把主动 Output 提交到 Message 日志，再发送只含 canonical `message_id` 与 `head_seq` 的 `session.updated`。Android 不保存第二份实时正文；它在推进 durable event cursor 的同一 Room 事务保存未就绪通知，按 `head_seq` 请求缺尾。精确 `message_id` 的完整 `Output(finish=complete)` 落地后，原位把通知标为 ready；进程重启继续拉取未就绪项。引用始终使用 canonical `reply_to.message_id`，不保留 delivery ID、临时消息身份或按正文与时间猜测的兼容路径。
+
+## Input 发送身份
+
+Android 为每次 `message.send` 生成一个 ID，并同时用作 frame ID、`client_message_id`、本地 user `messageId` 和 outbox `commandId`；Core 接纳后保留该值作为 Input `Message.id`。因此 append 可以原位完成本地行，随后到达的 ACK 只结算 outbox 与附件状态。明确失败重试生成新 ID，并在一个 Room 事务中移动本地引用；结果未知仍用原 ID 核对。
+
+Room v17→v18 把旧版保留的 `user:<首次 clientMessageId>` 视觉身份合到当前 `clientMessageId`；明确失败重试可能让两者不同。迁移只移动没有服务端序号、Message v2 正文和来源的 `user:` 本地行。若当前 ID 的完整远端 Input 已存在，它的正文和附件投影优先，并补结算对应 outbox；若同 ID 仍在 restoring，则保留 manifest、下载文件和确认偏移，失败或结果未知的原命令以同 ID 重新核对，ACK 与正文下载无论谁先完成都收敛到同一行。旧协议已经取得 `<sessionId>:<seq>` canonical ID 的 Input 保留原 ID，只清除 `clientMessageId`，等待 history 按同 ID 原位补全；该 ID 同时作为接纳证据，把投递状态收敛为 `sent`，并补结算 ACK 前断线残留的 outbox 与待发附件。其他身份形状或与 Output/别 Session 的碰撞会中止迁移，不用 metadata 或内容猜测。
 
 ## 未定义而不得猜测
 

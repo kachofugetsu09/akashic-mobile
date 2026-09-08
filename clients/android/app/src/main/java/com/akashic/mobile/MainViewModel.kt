@@ -5,7 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.akashic.mobile.data.local.AppSettings
-import com.akashic.mobile.data.local.MessageWithBlocks
+import com.akashic.mobile.data.local.MessageWithAttachments
 import com.akashic.mobile.data.local.PreparedComposerDraftResult
 import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.AttachmentTransferEntity
@@ -29,23 +29,19 @@ import com.akashic.mobile.ui.conversation.ComposerAttachmentState
 import com.akashic.mobile.ui.conversation.ComposerAttachmentUi
 import com.akashic.mobile.ui.conversation.ComposerDraftUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
-import com.akashic.mobile.ui.conversation.AssistantTurnStatus
-import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.ui.conversation.ModelCatalogUi
 import com.akashic.mobile.ui.conversation.ModelRuntimeUi
 import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
 import com.akashic.mobile.ui.conversation.MessageReplyUi
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
-import com.akashic.mobile.ui.conversation.ProcessBlockKind
-import com.akashic.mobile.ui.conversation.ProcessBlockState
-import com.akashic.mobile.ui.conversation.ProcessBlockUi
 import com.akashic.mobile.ui.conversation.ReadingPositionUi
-import com.akashic.mobile.ui.conversation.TurnProjectionObserver
 import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.PendingMessageUi
 import com.akashic.mobile.ui.conversation.SessionUi
 import com.akashic.mobile.ui.conversation.TransferStatusUi
+import com.akashic.mobile.ui.conversation.TimelineMessageUi
+import com.akashic.mobile.ui.conversation.TimelineAttachmentUi
 import com.akashic.mobile.ui.conversation.RuntimeDetailUi
 import com.akashic.mobile.ui.conversation.RuntimeDocumentUi
 import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
@@ -62,14 +58,20 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.plus
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.plus
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlin.math.ceil
 
 private const val LARGE_TRANSFER_BYTES = 10L * 1024 * 1024
@@ -196,10 +198,32 @@ private data class ComposerLocalState(
 
 private data class ConversationProjection(
     val session: MobileSessionState,
-    val messages: List<MessageUi>,
+    val timelineMessages: List<TimelineMessageUi>,
+    val downloads: List<MessageAttachmentUi>,
+    val pendingMessages: List<PendingMessageUi>,
     val conversations: List<ConversationSummary>,
     val composer: ComposerLocalState,
 )
+
+private data class ConversationData(
+    val serverId: String?,
+    val sessionId: String?,
+    val projectionGeneration: Long,
+    val messages: ProjectedMessageState,
+    val conversations: List<ConversationSummary>,
+    val composer: ComposerLocalState,
+)
+
+internal fun projectionIdentityMatches(
+    dataServerId: String?,
+    dataSessionId: String?,
+    dataGeneration: Long,
+    stateServerId: String?,
+    stateSessionId: String?,
+    stateGeneration: Long,
+): Boolean = dataServerId == stateServerId &&
+    dataSessionId == stateSessionId &&
+    dataGeneration == stateGeneration
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(
@@ -233,10 +257,8 @@ class MainViewModel(
         null,
     )
     private val incomingShareQueue = MutableStateFlow<List<QueuedIncomingShare>>(emptyList())
-    private var projectedGraph = emptyList<MessageWithBlocks>()
-    private var projectedMessages = emptyList<MessageUi>()
-    val turnTrace = container.turnTrace
-    private val turnProjectionObserver = TurnProjectionObserver()
+    private var projectedSessionId: String? = null
+    private val timelineProjectionCache = mutableMapOf<String, CachedTimelineProjection>()
     val incomingShare = incomingShareQueue.map { queue ->
         queue.firstOrNull()?.let { share ->
             IncomingShareUi(
@@ -305,53 +327,67 @@ class MainViewModel(
         viewModelScope.launch { container.preferences.setTheme(themeId) }
     }
 
-    private val conversationProjection = sessionState
-        .map { Triple(it.serverId, it.currentSessionId, it.activeTurnId) }
+    private val conversationData = sessionState
+        .map { state -> Triple(state.serverId, state.currentSessionId, state.projectionGeneration) }
         .distinctUntilChanged()
-        .flatMapLatest { (serverId, sessionId, activeTurnId) ->
-            // 只在查询范围变化时重建订阅；连接、下载和停止状态独立更新。
-            val messages = when {
-                sessionId == null -> flowOf(emptyList())
-                activeTurnId == null -> container.database.messages()
-                    .observeMessageGraph(sessionId)
-                    .distinctUntilChanged()
-                    .map(::projectMessages)
-                else -> flow {
-                    val initial = container.database.messages().observeMessageGraph(sessionId).first()
-                    val activeIndex = activeTurnIndex(initial, activeTurnId)
-                    check(activeIndex >= 0) {
-                        "活动 turn $activeTurnId 缺少已持久化的助手投影"
-                    }
-                    val activeCreatedAt = initial[activeIndex].message.createdAt
-                    val frozenPrefix = initial.take(activeIndex).map(::toMessageUi)
-                    emitAll(
-                        container.database.messages()
-                            .observeMessageGraphFrom(sessionId, activeCreatedAt, activeTurnId)
-                            .distinctUntilChanged()
-                            .map { liveTail -> mergeStreamingTail(frozenPrefix, projectMessages(liveTail)) },
-                    )
-                }
-            }
-            val conversations = serverId?.let {
-                container.database.conversations().observeSummaries(it).distinctUntilChanged()
-            } ?: flowOf(emptyList())
-            val composer = if (serverId == null || sessionId == null) {
-                flowOf(ComposerLocalState(emptyList(), null))
-            } else {
-                combine(
-                    container.database.attachmentTransfers().observeDrafts(serverId, sessionId),
-                    container.database.composerDrafts().observe(serverId, sessionId),
-                ) { attachments, draft ->
-                    ComposerLocalState(attachments, draft)
-                }
-            }
-            val currentSession = sessionState.filter {
-                it.serverId == serverId && it.currentSessionId == sessionId && it.activeTurnId == activeTurnId
-            }
-            combine(messages, conversations, composer, currentSession) { currentMessages, currentConversations, currentComposer, state ->
-                ConversationProjection(state, currentMessages, currentConversations, currentComposer)
+        .flatMapLatest { (serverId, sessionId, projectionGeneration) ->
+        val messages = if (sessionId == null) flowOf(emptyList()) else {
+            container.database.messages().observeMessageGraph(sessionId).distinctUntilChanged()
+        }.map { graph -> projectMessageState(sessionId, graph) }
+        val conversations = serverId?.let {
+            container.database.conversations().observeSummaries(it).distinctUntilChanged()
+        } ?: flowOf(emptyList())
+        val composer = if (serverId == null || sessionId == null) {
+            flowOf(ComposerLocalState(emptyList(), null))
+        } else {
+            combine(
+                container.database.attachmentTransfers().observeDrafts(serverId, sessionId),
+                container.database.composerDrafts().observe(serverId, sessionId),
+            ) { attachments, draft ->
+                ComposerLocalState(attachments, draft)
             }
         }
+        combine(messages, conversations, composer) { currentMessages, currentConversations, currentComposer ->
+            ConversationData(
+                serverId,
+                sessionId,
+                projectionGeneration,
+                currentMessages,
+                currentConversations,
+                currentComposer,
+            )
+        }
+    }
+
+    private val conversationProjection = combine(sessionState, conversationData) { state, data ->
+        val currentData = if (projectionIdentityMatches(
+                data.serverId,
+                data.sessionId,
+                data.projectionGeneration,
+                state.serverId,
+                state.currentSessionId,
+                state.projectionGeneration,
+            )) {
+            data
+        } else {
+            ConversationData(
+                serverId = state.serverId,
+                sessionId = state.currentSessionId,
+                projectionGeneration = state.projectionGeneration,
+                messages = ProjectedMessageState(emptyList(), emptyList(), emptyList()),
+                conversations = emptyList(),
+                composer = ComposerLocalState(emptyList(), null),
+            )
+        }
+        ConversationProjection(
+            state,
+            currentData.messages.timelineMessages,
+            currentData.messages.downloads,
+            currentData.messages.pendingMessages,
+            currentData.conversations,
+            currentData.composer,
+        )
+    }
 
     val conversationState = combine(
         conversationProjection,
@@ -360,32 +396,11 @@ class MainViewModel(
         modelCatalog,
     ) { projection, target, runtime, models ->
         val session = projection.session
-        val messages = projection.messages
         val conversations = projection.conversations
         val composerLocal = projection.composer
         val attachments = composerLocal.attachments
         val draft = composerLocal.draft
         val sessionId = session.currentSessionId
-        val observation = turnProjectionObserver.observe(messages, sessionId, session.activeTurnId)
-        // 1. 只观测活动或刚关闭 turn 的 UI 投影；空 thinking 块不是可见首字
-        if (sessionId != null && observation.targetTurnId != null && observation.observed != null) {
-            turnTrace.onUiProjected(
-                sessionId = sessionId,
-                turnId = observation.targetTurnId,
-                clientMessageId = observation.observed.clientMessageId,
-                hasThinking = observation.hasThinking,
-                hasAnswer = observation.hasAnswer,
-                streaming = observation.streaming,
-            )
-        }
-        // 2. coordinator 清理后 canStop 回 false、权威终态投影后 composer 可发送的观测
-        if (sessionId != null && observation.canStopFalse) {
-            val closedTurnId = requireNotNull(observation.targetTurnId)
-            turnTrace.onCanStopFalse(sessionId, closedTurnId)
-            if (observation.composerReady) {
-                turnTrace.onComposerReady(sessionId, closedTurnId)
-            }
-        }
         val connection = connectionPresentation(session.connection, session.errorMessage)
         val composerAttachments = attachments.map { attachment ->
             val waitingForConnection = session.connection.phase != ConnectionPhase.READY &&
@@ -435,8 +450,9 @@ class MainViewModel(
             .firstOrNull { it.sessionId == session.currentSessionId }
             ?.isRemoteMissingIn(session.remoteSessionIds) == true
 
-        // 3. 所选会话的流式状态（per-session，与观测同源）
-        val isStreaming = messages.any { it is MessageUi.AssistantTurn && it.isStreaming }
+        val isStreaming = session.replyStatus?.get("items")?.jsonArray?.any { item ->
+            item.jsonObject["active"]?.jsonPrimitive?.booleanOrNull == true
+        } == true
 
         ConversationUiState(
             connectionLabel = connection.label,
@@ -451,7 +467,7 @@ class MainViewModel(
                         lastMessagePreview = it.lastMessagePreview?.take(160),
                         lastMessageAtMillis = it.lastMessageAt,
                         unreadCount = it.unreadCount,
-                        isRunning = it.sessionId in session.activeSessionIds,
+                        isRunning = it.sessionId == session.currentSessionId && isStreaming,
                         isAvailable = !it.isRemoteMissingIn(session.remoteSessionIds),
                         canRemove = it.canRemoveFrom(session.remoteSessionIds),
                     )
@@ -464,22 +480,15 @@ class MainViewModel(
                 },
             navigationTarget = target,
             projectionGeneration = session.projectionGeneration,
-            messages = messages,
+            downloads = projection.downloads,
+            timelineMessages = projection.timelineMessages,
+            replyStatus = session.replyStatus,
             composerDraft = ComposerDraftUi(
                 text = draft?.text.orEmpty(),
                 replyToMessageId = draft?.replyToMessageId,
                 updatedAt = draft?.updatedAt,
             ),
-            pendingMessages = messages.filterIsInstance<MessageUi.User>()
-                .filter { it.deliveryLabel == "待发送" }
-                .map {
-                    PendingMessageUi(
-                        messageId = it.id,
-                        preview = it.text.trim().replace(Regex("\\s+"), " ").take(120)
-                            .ifBlank { "[附件]" },
-                        createdAtMillis = it.createdAtMillis,
-                    )
-                },
+            pendingMessages = projection.pendingMessages,
             attachments = composerAttachments,
             transferStatus = transferStatus,
             commands = session.commands.map { CommandUi(it.command, it.description) },
@@ -487,11 +496,8 @@ class MainViewModel(
             isResyncing = session.connection.phase == ConnectionPhase.SYNCING ||
                 session.isReloadingHistory,
             canResync = canReloadServerProjection(session),
-            isStopping = session.isStopping,
-            canStop = session.activeTurnId != null &&
-                session.connection.phase == ConnectionPhase.READY &&
-                !session.isStopping &&
-                !session.outputCompleted,
+            isStopping = false,
+            canStop = isStreaming && session.connection.phase == ConnectionPhase.READY,
             canSend = session.hasProfile &&
                 session.currentSessionId != null &&
                 !selectedRemoteMissing &&
@@ -512,7 +518,9 @@ class MainViewModel(
             readingPosition = null,
             navigationTarget = null,
             projectionGeneration = 0,
-            messages = emptyList(),
+            downloads = emptyList(),
+            timelineMessages = emptyList(),
+            replyStatus = null,
             attachments = emptyList(),
             composerDraft = ComposerDraftUi("", null),
             pendingMessages = emptyList(),
@@ -925,118 +933,112 @@ class MainViewModel(
 
     fun reloadFromServer() = container.realtimeSession.reloadFromServer()
 
-    /** 按查询顺序复用未变化的行，不为每次增量重建 ID 集合。 */
-    private fun projectMessages(graph: List<MessageWithBlocks>): List<MessageUi> {
-        // 1. 顺序或来源变化就重新投影；来源相等包含 sessionId，不跨会话复用。
-        val projected = graph.mapIndexed { index, source ->
-            if (projectedGraph.getOrNull(index) == source) projectedMessages[index] else toMessageUi(source)
-        }
-        // 2. 单一收集器无挂起地提交等长的来源与 UI，两份列表始终逐项对应。
-        projectedGraph = graph
-        projectedMessages = projected
-        return projected
-    }
-
-    private fun toMessageUi(graph: MessageWithBlocks): MessageUi {
-        val message = graph.message
-        if (message.role == "user") {
-            return MessageUi.User(
-                id = message.messageId,
-                sessionId = message.sessionId,
-                text = message.text,
+    /** 把一份 Room Message 图投影为 WebUI 消息、下载状态和本地待发送提示。 */
+    private fun projectMessageState(
+        sessionId: String?,
+        graph: List<MessageWithAttachments>,
+    ): ProjectedMessageState {
+        val timelineMessages = graph.mapNotNull { row -> projectTimelineMessage(sessionId, row) }
+        val downloads = graph.asSequence()
+            .flatMap { it.attachmentLinks.toMessageAttachmentUi().asSequence() }
+            .distinctBy(MessageAttachmentUi::id)
+            .toList()
+        val pendingMessages = graph.mapNotNull { row ->
+            val message = row.message
+            if (
+                message.sessionId != sessionId ||
+                (message.serverSeq != null && message.deliveryState != "restoring") ||
+                message.role != "user" || message.deliveryState !in setOf(
+                    "pending", "sent", "failed", "failed_retryable", "outcome_unknown", "restoring",
+                )
+            ) return@mapNotNull null
+            PendingMessageUi(
+                messageId = message.messageId,
+                preview = message.text.trim().replace(Regex("\\s+"), " ").take(120)
+                    .ifBlank { "[附件]" },
+                createdAtMillis = message.createdAt,
                 deliveryLabel = when (message.deliveryState) {
                     "pending" -> "待发送"
-                    "sent", "complete" -> "已发送"
-                    "failed" -> "发送失败"
-                    "failed_retryable" -> "发送失败"
+                    "sent", "restoring" -> "正在确认"
+                    "failed", "failed_retryable" -> "发送失败"
                     "outcome_unknown" -> "结果待确认"
-                    else -> error("未知用户消息状态: ${message.deliveryState}")
+                    else -> error("未知本地消息状态: ${message.deliveryState}")
                 },
                 deliveryAction = when (message.deliveryState) {
                     "failed_retryable" -> MessageDeliveryActionUi.RETRY
                     "outcome_unknown" -> MessageDeliveryActionUi.VERIFY
                     else -> null
                 },
-                replyable = userMessageCanReply(message.deliveryState),
-                createdAtMillis = message.createdAt,
-                reply = message.toReplyUi(),
-                attachments = graph.attachmentLinks.toMessageAttachmentUi(),
-                updatedAtMillis = message.updatedAt,
-                clientMessageId = message.clientMessageId,
             )
         }
-        return MessageUi.AssistantTurn(
+        timelineProjectionCache.keys.retainAll(timelineMessages.mapTo(hashSetOf()) { it.id })
+        return ProjectedMessageState(timelineMessages, downloads, pendingMessages)
+    }
+
+    /** 历史前缀按 Message 实体复用；附件下载进度不会触发正文 JSON 重解析。 */
+    private fun projectTimelineMessage(
+        sessionId: String?,
+        row: MessageWithAttachments,
+    ): TimelineMessageUi? {
+        val message = row.message
+        if (message.deliveryState == "restoring") return null
+        val seq = message.serverSeq ?: return null
+        if (message.sessionId != sessionId) return null
+        require(message.recordedAt.isNotEmpty() && message.author.isNotEmpty() && message.source.isNotEmpty()) {
+            "Message v2 projection is incomplete: ${message.messageId}"
+        }
+        timelineProjectionCache[message.messageId]
+            ?.takeIf { it.source == message }
+            ?.let { return it.message }
+        val attachments = Json.parseToJsonElement(message.attachmentsJson).jsonArray.map { value ->
+            val attachment = value.jsonObject
+            TimelineAttachmentUi(
+                artifactId = requireNotNull(attachment["artifact_id"]?.jsonPrimitive?.contentOrNull),
+                kind = requireNotNull(attachment["kind"]?.jsonPrimitive?.contentOrNull),
+                filename = attachment["filename"]?.jsonPrimitive?.contentOrNull,
+                mediaType = attachment["media_type"]?.jsonPrimitive?.contentOrNull,
+                sizeBytes = requireNotNull(attachment["size_bytes"]?.jsonPrimitive?.longOrNull),
+                sha256 = requireNotNull(attachment["sha256"]?.jsonPrimitive?.contentOrNull),
+            )
+        }
+        return TimelineMessageUi(
             id = message.messageId,
             sessionId = message.sessionId,
-            intro = null,
-            blocks = graph.blocks.sortedBy { it.ordinal }.map { block ->
-                val storedTool = if (block.kind == "tool") decodeStoredToolBlock(block.content) else null
-                ProcessBlockUi(
-                    id = block.blockId,
-                    kind = if (block.kind == "thinking") ProcessBlockKind.THINKING else ProcessBlockKind.TOOL,
-                    title = storedTool?.name ?: "思考",
-                    detail = storedTool?.description ?: if (storedTool == null) block.content else "",
-                    state = when (block.status) {
-                        "running" -> ProcessBlockState.RUNNING
-                        "failed" -> ProcessBlockState.FAILED
-                        else -> ProcessBlockState.COMPLETED
-                    },
-                    arguments = storedTool?.arguments,
-                    resultPreview = storedTool?.resultPreview,
-                    durationMillis = storedTool?.durationMillis,
-                )
-            },
-            answer = message.text,
-            status = when (message.deliveryState) {
-                "streaming" -> AssistantTurnStatus.STREAMING
-                "complete" -> AssistantTurnStatus.COMPLETE
-                "interrupted" -> AssistantTurnStatus.INTERRUPTED
-                "cancelled" -> AssistantTurnStatus.CANCELLED
-                "failed" -> AssistantTurnStatus.FAILED
-                else -> error("未知助手消息状态: ${message.deliveryState}")
-            },
-            durationSeconds = turnDurationSeconds(
-                startedAt = message.createdAt,
-                updatedAt = message.updatedAt,
-                isTerminal = message.deliveryState in setOf("complete", "interrupted", "cancelled", "failed"),
-            ),
-            createdAtMillis = message.createdAt,
-            reply = message.toReplyUi(),
-            attachments = graph.attachmentLinks.toMessageAttachmentUi(),
-            updatedAtMillis = message.updatedAt,
-            clientMessageId = message.turnClientMessageId,
-            controlTurnId = message.controlTurnId,
-        )
+            seq = seq,
+            timestamp = message.recordedAt,
+            author = message.author,
+            source = message.source,
+            body = Json.parseToJsonElement(message.bodyJson).jsonObject,
+            metadata = Json.parseToJsonElement(message.metadataJson).jsonObject,
+            attachments = attachments,
+        ).also { projected ->
+            timelineProjectionCache[message.messageId] = CachedTimelineProjection(message, projected)
+        }
     }
 
-    private fun com.akashic.mobile.data.local.MessageEntity.toReplyUi(): MessageReplyUi? {
-        val target = replyToMessageId ?: return null
-        return MessageReplyUi(
-            messageId = target,
-            role = requireNotNull(replyRole) { "引用消息缺少角色: $messageId" },
-            preview = requireNotNull(replyPreview) { "引用消息缺少预览: $messageId" },
-        )
-    }
 }
 
-/** 流式输出只投影活动尾部，冻结历史不再进入逐次投影循环。 */
-internal fun mergeStreamingTail(
-    frozenPrefix: List<MessageUi>,
-    liveTail: List<MessageUi>,
-): List<MessageUi> {
-    val liveIds = liveTail.mapTo(hashSetOf()) { it.id }
-    return frozenPrefix.filterNot { it.id in liveIds } + liveTail
-}
+private data class ProjectedMessageState(
+    val timelineMessages: List<TimelineMessageUi>,
+    val downloads: List<MessageAttachmentUi>,
+    val pendingMessages: List<PendingMessageUi>,
+)
 
-/** 按 streaming 投影的持久主键定位活动 turn。 */
-internal fun activeTurnIndex(messages: List<MessageWithBlocks>, turnId: String): Int =
-    messages.indexOfFirst { it.message.messageId == "assistant:$turnId" }
+private data class CachedTimelineProjection(
+    val source: com.akashic.mobile.data.local.MessageEntity,
+    val message: TimelineMessageUi,
+)
+
+internal fun MobileSessionState.hasActiveReply(): Boolean =
+    replyStatus?.get("items")?.jsonArray?.any { item ->
+        item.jsonObject["active"]?.jsonPrimitive?.booleanOrNull == true
+    } == true
 
 internal fun canReloadServerProjection(session: MobileSessionState): Boolean =
     session.hasProfile &&
         session.connection.lastErrorCode != "device_revoked" &&
         !session.isReloadingHistory &&
-        session.activeTurnId == null &&
+        !session.hasActiveReply() &&
         !session.hasActiveAttachmentDownload
 
 internal fun List<MessageAttachmentWithMedia>.toMessageAttachmentUi(): List<MessageAttachmentUi> =

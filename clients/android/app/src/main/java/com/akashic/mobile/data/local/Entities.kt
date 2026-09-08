@@ -132,6 +132,12 @@ data class MessageEntity(
     val replyPreview: String? = null,
     val turnClientMessageId: String? = null,
     val controlTurnId: String? = null,
+    val recordedAt: String = "",
+    val author: String = "",
+    val source: String = "",
+    val bodyJson: String = "{}",
+    val metadataJson: String = "{}",
+    val attachmentsJson: String = "[]",
 )
 
 @Entity(
@@ -156,10 +162,12 @@ data class MessageContentTransferEntity(
     @PrimaryKey val messageId: String,
     val serverId: String,
     val sessionId: String,
+    val messageSeq: Long,
     val byteLength: Long,
     val sha256: String,
     val transferredBytes: Long,
     val state: String,
+    val notifyWhenReady: Boolean,
     val updatedAt: Long,
 )
 
@@ -187,6 +195,8 @@ data class PendingMessageNotificationEntity(
     val content: String,
     val hasAttachments: Boolean,
     val attention: String,
+    val ready: Boolean = true,
+    val headSeq: Long? = null,
     val createdAt: Long,
 )
 
@@ -358,10 +368,8 @@ data class MessageAttachmentEntity(
     val ordinal: Int,
 )
 
-data class MessageWithBlocks(
+data class MessageWithAttachments(
     @Embedded val message: MessageEntity,
-    @Relation(parentColumn = "messageId", entityColumn = "messageId")
-    val blocks: List<TurnBlockEntity>,
     @Relation(
         entity = MessageAttachmentEntity::class,
         parentColumn = "messageId",

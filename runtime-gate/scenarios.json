@@ -3,10 +3,76 @@
   "profile": "mobile-runtime-inspection-v1",
   "scenarios": [
     {
-      "id": "message-send-idempotency",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_is_idempotent_and_session_is_shared_between_devices",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "verifyUnknownOutcomeReusesOriginalIdempotencyKey"
+      "id": "message-input-v2-uses-one-real-identity",
+      "provider_test": "tests/test_mobile_message_input.py::test_mobile_send_requires_new_protocol_and_one_real_message_identity",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
+      "consumer_test": "rejects message command whose id differs from client message id"
+    },
+    {
+      "id": "message-input-preserves-reply-reference-and-replays-once",
+      "provider_test": "tests/test_mobile_message_input.py::test_mobile_input_and_reference_commit_original_facts_and_replay_once",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
+      "consumer_test": "round trips canonical message reply identity"
+    },
+    {
+      "id": "message-history-v2-reads-fixed-prefix",
+      "provider_test": "tests/test_mobile_message_log.py::test_mobile_history_reads_full_message_prefix_and_directory_without_old_context",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ConnectionRecoveryPolicyTest.kt",
+      "consumer_test": "terminal history page completes enumeration while message row awaits download"
+    },
+    {
+      "id": "message-history-v2-preserves-raw-row",
+      "provider_test": "tests/test_mobile_message_log.py::test_mobile_history_reads_full_message_prefix_and_directory_without_old_context",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
+      "consumer_test": "decodes message log v2 row without relaxing unknown keys"
+    },
+    {
+      "id": "large-message-download-restores-whole-json",
+      "provider_test": "tests/test_mobile_message_log.py::test_mobile_large_messages_download_whole_json_and_page_budget_never_truncates",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MessageContentDownloadCoordinatorTest.kt",
+      "consumer_test": "verified range atomically restores unicode content"
+    },
+    {
+      "id": "large-message-facts-do-not-become-text",
+      "provider_test": "tests/test_mobile_message_log.py::test_mobile_large_messages_download_whole_json_and_page_budget_never_truncates",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/local/TimelineTextTest.kt",
+      "consumer_test": "output summary reads only text parts and preserves the full body"
+    },
+    {
+      "id": "message-history-rejects-old-protocol",
+      "provider_test": "tests/test_mobile_message_log.py::test_mobile_history_rejects_old_or_invalid_protocol",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
+      "consumer_test": "rejects unsupported version at boundary"
+    },
+    {
+      "id": "message-json-range-is-bound-to-message-identity",
+      "provider_test": "tests/test_mobile_message_log.py::test_mobile_json_range_authentication_and_reopen",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MessageContentDownloadCoordinatorTest.kt",
+      "consumer_test": "grant with different message identity is rejected before http"
+    },
+    {
+      "id": "message-follow-appends-exact-cursors",
+      "provider_test": "tests/test_mobile_message_follow.py::test_authenticated_follow_splits_every_row_then_switches_reconnects_without_inbox_writes",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/ui/web/MobileWebSnapshotTest.kt",
+      "consumer_test": "append event contains only the new tail and exact cursors"
+    },
+    {
+      "id": "reply-status-switch-clears-old-generation",
+      "provider_test": "tests/test_message_follow.py::test_status_switch_and_absence_never_pin_old_generation",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/MainViewModelTest.kt",
+      "consumer_test": "projectionDataRequiresTheSameServerSessionAndGeneration"
+    },
+    {
+      "id": "reply-status-event-does-not-repeat-history",
+      "provider_test": "tests/test_mobile_message_follow.py::test_preview_large_unicode_and_generation_switch_remain_ephemeral",
+      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/ui/web/MobileWebSnapshotTest.kt",
+      "consumer_test": "reply status event does not serialize long history"
+    },
+    {
+      "id": "session-update-hint-waits-for-durable-message",
+      "provider_test": "tests/mobile_realtime/test_channel.py::test_native_v3_mobile_adapter_reads_opaque_ref_and_commits_one_event",
+      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/PendingMessageNotificationDaoTest.kt",
+      "consumer_test": "hintSurvivesRestartAndBecomesObservableOnlyAfterMessageIsReady"
     },
     {
       "id": "unknown-outcome-preserves-command",
@@ -21,58 +87,10 @@
       "consumer_test": "verifyUnknownOutcomeReusesOriginalIdempotencyKey"
     },
     {
-      "id": "prestart-receipt-is-retryable",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_marks_prestart_processing_receipt_retryable",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "unavailableSessionRetainsPendingOutboxBeforeTransportAttempt"
-    },
-    {
-      "id": "protocol-rejection-closes-4410",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_authenticated_gateway_reports_validation_without_echoing_payload",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolClosePolicyTest.kt",
-      "consumer_test": "protocol_close_action_distinguishes_bad_command_from_version_mismatch"
-    },
-    {
-      "id": "resume-gap-requires-reset",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_resume_resets_when_durable_inbox_has_sequence_gap",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "gapResetClearsOnlyServerProjectionAndPreservesLocalWork"
-    },
-    {
-      "id": "ahead-ack-rebases-before-retention",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_ahead_ack_rebases_before_expired_inbox_check",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "gapResetClearsOnlyServerProjectionAndPreservesLocalWork"
-    },
-    {
-      "id": "rebased-reset-survives-restart",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_rebased_reset_survives_runtime_restart",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "gapResetClearsOnlyServerProjectionAndPreservesLocalWork"
-    },
-    {
       "id": "canonical-history-replaces-optimistic-message",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_final_event_maps_optimistic_user_to_persisted_identity",
       "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
       "consumer_test": "historyCanonicalIdReplacesOptimisticUserMessage"
-    },
-    {
-      "id": "session-catalog-drives-complete-history-sync",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "historyPageRestoresMessagesThinkingAndTools"
-    },
-    {
-      "id": "oversized-history-content-uses-bounded-reference",
-      "provider_test": "tests/mobile_realtime/test_message_content_http.py::test_history_externalizes_unicode_content_without_losing_tool_projection",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "historyContentRefRestoresExactBodyWithoutChangingThinkingOrTools"
-    },
-    {
-      "id": "history-content-range-resumes-from-fsynced-offset",
-      "provider_test": "tests/mobile_realtime/test_message_content_http.py::test_http_route_returns_identity_encoded_verified_range_headers",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MessageContentDownloadCoordinatorTest.kt",
-      "consumer_test": "verified range atomically restores unicode content"
     },
     {
       "id": "attachment-binary-frame-contract",
@@ -85,12 +103,6 @@
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_upload_resumes_from_persisted_offset_and_verifies_digest",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/AttachmentUploadCoordinatorTest.kt",
       "consumer_test": "uploads one confirmed window then resumes with a new begin id"
-    },
-    {
-      "id": "attachment-upload-reaches-agent-media",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_attachment_upload_resumes_and_reaches_agent_media",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "attachmentMessageMovesReadyToSendingThenSent"
     },
     {
       "id": "attachment-filename-is-plain",
@@ -111,76 +123,10 @@
       "consumer_test": "downloads serial chunks and atomically publishes verified file"
     },
     {
-      "id": "attachment-history-reuses-stable-identity",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "liveAndHistoryMessagesIdempotentlyShareOutboundAttachment"
-    },
-    {
       "id": "attachment-cache-recovers-atomic-publish",
       "provider_test": "tests/mobile_realtime/test_attachments.py::test_outbound_registration_copies_and_stably_reuses_content",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/local/MediaCacheStoreTest.kt",
       "consumer_test": "reconcile commits valid final left before database update"
-    },
-    {
-      "id": "akashic-direct-message-commits-before-notify",
-      "provider_test": "tests/test_core_channel_adapter.py::test_akashic_direct_push_commits_session_before_client_notification",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ConnectionRecoveryPolicyTest.kt",
-      "consumer_test": "history resumes from the first incomplete page"
-    },
-    {
-      "id": "session-seq-detects-stale-projection",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ConnectionRecoveryPolicyTest.kt",
-      "consumer_test": "versioned history snapshot accepts sparse seq and detects stale projection"
-    },
-    {
-      "id": "turn-stop-survives-client-process-restart",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_turn_stop_accepts_a_shared_mobile_session",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "processRestartRestoresAndReplaysPersistedStopIdentity"
-    },
-    {
-      "id": "resume-reports-turn-identities",
-      "provider_test": "tests/mobile_realtime/test_mobile_realtime_protocol.py::test_golden_frames_round_trip",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "resumeUsesTurnIdsWhileUiKeepsSessionIds"
-    },
-    {
-      "id": "resume-active-turn-reconciles-before-sync",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_authenticated_gateway_requires_resume_and_acks_durable_sync",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "resumeUsesTurnIdsWhileUiKeepsSessionIds"
-    },
-    {
-      "id": "recovered-terminal-turn-closes-stale-projection",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_resume_reconciles_recovered_terminal_turn_for_mobile_device",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "alreadyTerminalNonCompletedOkHealsStaleActiveProjection"
-    },
-    {
-      "id": "terminal-turn-stop-is-idempotent",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_stop_is_idempotent_after_authoritative_terminal_turn",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "alreadyTerminalNonCompletedOkHealsStaleActiveProjection"
-    },
-    {
-      "id": "unknown-stop-keeps-unconfirmed-active-projection",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_turn_stop_rejects_missing_or_stale_turn_identity",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "turnNotActiveReplyKeepsUnconfirmedActiveProjection"
-    },
-    {
-      "id": "shutdown-stops-channel-before-gateway-storage",
-      "provider_test": "tests/test_runtime_smoke.py::test_shutdown_stops_mobile_channel_before_closing_gateway_storage",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/TurnStopCoordinatorTest.kt",
-      "consumer_test": "processRestartRestoresAndReplaysPersistedStopIdentity"
-    },
-    {
-      "id": "completed-turn-history-replaces-lost-final",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_session_list_and_history_sync_publish_all_mobile_sessions",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "canonicalHistoryReplacesCompletedTurnWhoseFinalEventWasLost"
     },
     {
       "id": "command-catalog-shape-and-filtering",
@@ -195,34 +141,16 @@
       "consumer_test": "round trips slash command text unchanged"
     },
     {
-      "id": "plugin-query-https-data-plane-is-request-bound",
-      "provider_test": "tests/mobile_realtime/test_gateway.py::test_plugin_ui_https_data_plane_uses_signed_request_bound_ticket",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/PluginUiCoordinatorTest.kt",
-      "consumer_test": "httpsQueryKeepsWebSocketReplySmallAndPublishesHttpResult"
-    },
-    {
       "id": "runtime-inspection-lists-and-markdown-detail",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_runtime_document_commands_use_bound_read_service",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/RuntimeInspectionCoordinatorTest.kt",
       "consumer_test": "refreshProjectsAllListsAndOpensMarkdownDetail"
     },
     {
-      "id": "plugin-v3-runtime-inspection-composition",
-      "provider_test": "tests/test_runtime_inspection.py::test_capabilities_project_bounded_v3_composition_facts",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/RuntimeInspectionCoordinatorTest.kt",
-      "consumer_test": "decodes plugin v3 composition with strict schema"
-    },
-    {
       "id": "model-catalog-projects-session-selection",
       "provider_test": "tests/mobile_realtime/test_channel.py::test_model_catalog_returns_bound_registry_and_session_selection",
       "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ModelCatalogCoordinatorTest.kt",
       "consumer_test": "projectsCatalogAndKeepsValidatedLocalSelection"
-    },
-    {
-      "id": "message-send-carries-explicit-model-selection",
-      "provider_test": "tests/mobile_realtime/test_channel.py::test_message_send_resolves_reply_into_agent_context_and_metadata",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/ProtocolCodecTest.kt",
-      "consumer_test": "round trips explicit model selection while old payload omits it"
     },
     {
       "id": "mobile-webui-canonical-manifest",
@@ -237,28 +165,10 @@
       "consumer_test": "release hint decoder requires a valid selection digest"
     },
     {
-      "id": "mobile-webui-https-ticket-range",
-      "provider_test": "tests/mobile_webui/test_gateway_http.py::test_webui_http_headers_ranges_and_ticket_lifecycle",
-      "consumer_source": "clients/android/app/src/test/java/com/akashic/mobile/data/realtime/MobileWebUiCoordinatorTest.kt",
-      "consumer_test": "digestHeadersRequireStrongIdentity"
-    },
-    {
       "id": "mobile-webui-preview-rollback",
       "provider_test": "tests/mobile_webui/test_publication.py::test_store_preview_promotion_rollback_gc_and_backup",
       "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/realtime/MobileWebUiStoreInstrumentedTest.kt",
       "consumer_test": "rollbackAndRejectAtomicallyClearsAttemptAndRejectsCandidate"
-    },
-    {
-      "id": "mobile-webui-revoke-offline-recovery",
-      "provider_test": "tests/mobile_webui/test_gateway_runtime.py::test_revoke_device_commits_offline_and_notifies_active_connection",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/realtime/RealtimeWebSocketClientRevocationTest.kt",
-      "consumer_test": "controlRevokeClosesCurrentRaceBeforeLateFramesCanUseIt"
-    },
-    {
-      "id": "failed-turn-explicit-retry-reuses-user-message",
-      "provider_test": "tests/control/test_channel_adapter.py::test_explicit_retry_reuses_user_message_and_starts_new_attempt",
-      "consumer_source": "clients/android/app/src/androidTest/java/com/akashic/mobile/data/local/LocalDeliveryStoreTest.kt",
-      "consumer_test": "providerFailureKeepsOneUserMessageAndRestoresExplicitRetry"
     }
   ]
 }

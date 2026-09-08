@@ -64,9 +64,7 @@
     "connection_epoch": 7,
     "payload": {
       "last_ack": 1842,
-      "active_turns": [
-        "turn-1"
-      ]
+      "active_turns": []
     }
   }
 ]

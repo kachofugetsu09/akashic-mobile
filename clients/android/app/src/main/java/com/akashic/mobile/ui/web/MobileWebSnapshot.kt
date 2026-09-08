@@ -1,6 +1,5 @@
 package com.akashic.mobile.ui.web
 
-import com.akashic.mobile.ui.conversation.AssistantTurnStatus
 import com.akashic.mobile.ui.conversation.CommandUi
 import com.akashic.mobile.ui.conversation.ComposerAttachmentState
 import com.akashic.mobile.ui.conversation.ComposerAttachmentUi
@@ -8,23 +7,26 @@ import com.akashic.mobile.ui.conversation.ConnectionStatusUi
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
-import com.akashic.mobile.ui.conversation.MessageUi
 import com.akashic.mobile.ui.conversation.ModelCatalogUi
 import com.akashic.mobile.ui.conversation.ModelRuntimeUi
 import com.akashic.mobile.ui.conversation.MessageDeliveryActionUi
-import com.akashic.mobile.ui.conversation.MessageReplyUi
-import com.akashic.mobile.ui.conversation.ProcessBlockKind
-import com.akashic.mobile.ui.conversation.ProcessBlockState
-import com.akashic.mobile.ui.conversation.ProcessBlockUi
 import com.akashic.mobile.ui.conversation.PendingMessageUi
 import com.akashic.mobile.ui.conversation.ReadingPositionUi
 import com.akashic.mobile.ui.conversation.NavigationTargetUi
 import com.akashic.mobile.ui.conversation.SessionUi
 import com.akashic.mobile.ui.conversation.TransferStatusUi
+import com.akashic.mobile.ui.conversation.TimelineMessageUi
+import com.akashic.mobile.ui.conversation.TimelineAttachmentUi
 import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 @Serializable
 data class MobileWebSnapshot(
@@ -35,33 +37,43 @@ data class MobileWebSnapshot(
     val readingPosition: MobileWebReadingPosition?,
     val navigationTarget: MobileWebNavigationTarget?,
     val projectionGeneration: Long,
-    val messages: List<MobileWebMessage>,
+    val messages: List<MobileWebTimelineMessage>,
+    val throughSeq: Long,
+    val replyStatus: JsonElement,
+    val downloads: List<MobileWebDownload>,
     val composer: MobileWebComposer,
     val modelCatalog: MobileWebModelCatalog,
     val runtimeInspection: MobileWebRuntimeInspection,
 )
 
 @Serializable
-data class MobileWebStreamPatch(
-    val protocolVersion: Int,
-    val projectionGeneration: Long,
-    val selectedSessionId: String,
-    val messageIndex: Int,
-    val messageId: String,
-    val searchRevision: Long,
-    val durationSeconds: Int? = null,
-    val contentAppend: String? = null,
-    val thinkingAppend: MobileWebThinkingAppend? = null,
-    val message: MobileWebMessage? = null,
-    val state: MobileWebStatePatch? = null,
-    val clientMessageId: String? = null,
+data class MobileWebTimelineMessage(
+    val id: String,
+    @SerialName("session_id") val sessionId: String,
+    val seq: Long,
+    val timestamp: String,
+    val author: String,
+    val source: String,
+    val body: JsonObject,
+    val metadata: JsonObject,
+    val attachments: List<MobileWebTimelineAttachment>,
 )
 
 @Serializable
-data class MobileWebThinkingAppend(
-    val blockIndex: Int,
-    val blockId: String,
-    val delta: String,
+data class MobileWebTimelineAttachment(
+    @SerialName("artifact_id") val artifactId: String,
+    val kind: String,
+    val filename: String?,
+    @SerialName("media_type") val mediaType: String?,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+)
+
+@Serializable
+data class MobileWebMessageEvent(
+    val protocolVersion: Int,
+    val projectionGeneration: Long,
+    val event: JsonObject,
 )
 
 @Serializable
@@ -73,6 +85,7 @@ data class MobileWebStatePatch(
     val readingPosition: MobileWebReadingPosition?,
     val navigationTarget: MobileWebNavigationTarget?,
     val projectionGeneration: Long,
+    val downloads: List<MobileWebDownload>,
     val composer: MobileWebComposer,
     val modelCatalog: MobileWebModelCatalog,
     val runtimeInspection: MobileWebRuntimeInspection,
@@ -149,78 +162,14 @@ data class MobileWebPendingMessage(
     val messageId: String,
     val preview: String,
     val createdAt: Long,
-)
-
-@Serializable
-data class MobileWebMessage(
-    val id: String,
-    val sessionId: String,
-    val role: MobileWebRole,
-    val content: String,
-    val createdAt: Long,
-    val searchRevision: Long,
-    val replyable: Boolean,
-    val reply: MobileWebReply? = null,
-    val deliveryLabel: String? = null,
+    val deliveryLabel: String,
     val deliveryAction: MobileWebDeliveryAction? = null,
-    val controlTurnId: String? = null,
-    val blocks: List<MobileWebProcessBlock> = emptyList(),
-    val streaming: Boolean = false,
-    val interrupted: Boolean = false,
-    val terminalStatus: MobileWebTerminalStatus? = null,
-    val durationSeconds: Int? = null,
-    val attachments: List<MobileWebAttachment> = emptyList(),
 )
-
-@Serializable
-enum class MobileWebTerminalStatus {
-    @SerialName("failed") FAILED,
-    @SerialName("cancelled") CANCELLED,
-    @SerialName("interrupted") INTERRUPTED,
-}
 
 @Serializable
 enum class MobileWebDeliveryAction {
     @SerialName("retry") RETRY,
     @SerialName("verify") VERIFY,
-}
-
-@Serializable
-data class MobileWebReply(
-    val messageId: String,
-    val role: String,
-    val preview: String,
-)
-
-@Serializable
-enum class MobileWebRole {
-    @SerialName("user") USER,
-    @SerialName("assistant") ASSISTANT,
-}
-
-@Serializable
-data class MobileWebProcessBlock(
-    val id: String,
-    val kind: MobileWebProcessKind,
-    val title: String,
-    val detail: String,
-    val state: MobileWebProcessState,
-    val arguments: JsonObject? = null,
-    val resultPreview: String? = null,
-    val durationMillis: Long? = null,
-)
-
-@Serializable
-enum class MobileWebProcessKind {
-    @SerialName("thinking") THINKING,
-    @SerialName("tool") TOOL,
-}
-
-@Serializable
-enum class MobileWebProcessState {
-    @SerialName("completed") COMPLETED,
-    @SerialName("running") RUNNING,
-    @SerialName("failed") FAILED,
 }
 
 @Serializable
@@ -232,6 +181,14 @@ data class MobileWebAttachment(
     val transferredBytes: Long,
     val state: String,
     val canRemove: Boolean = false,
+    val contentUrl: String? = null,
+)
+
+@Serializable
+data class MobileWebDownload(
+    val artifactId: String,
+    val state: String,
+    val transferredBytes: Long,
     val contentUrl: String? = null,
 )
 
@@ -322,7 +279,7 @@ data class MobileWebTransferStatus(
 
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 8,
+    protocolVersion = 9,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -334,7 +291,10 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     readingPosition = readingPosition?.toMobileWebReadingPosition(),
     navigationTarget = navigationTarget?.toMobileWebNavigationTarget(),
     projectionGeneration = projectionGeneration,
-    messages = messages.map(MessageUi::toMobileWebMessage),
+    messages = timelineMessages.map(TimelineMessageUi::toMobileWebTimelineMessage),
+    throughSeq = timelineMessages.lastOrNull()?.seq ?: -1,
+    replyStatus = replyStatus ?: JsonNull,
+    downloads = downloads.map(MessageAttachmentUi::toMobileWebDownload),
     composer = MobileWebComposer(
         draft = MobileWebComposerDraft(
             text = composerDraft.text,
@@ -356,21 +316,58 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
 )
 
-/** Build a control-state patch without serializing the unchanged message graph. */
-fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): MobileWebStatePatch? {
-    if (
-        selectedSessionId != previous.selectedSessionId ||
-        projectionGeneration != previous.projectionGeneration ||
-        messages != previous.messages
-    ) {
-        return null
+/** 已提交前缀复用原对象；只把新尾部和变化的回复状态送入 WebUI。 */
+fun ConversationUiState.toMobileWebMessageEvents(previous: ConversationUiState): List<MobileWebMessageEvent>? {
+    // 1. 切会话、重建和长消息补回历史中部需要完整快照。
+    if (selectedSessionId == null || selectedSessionId != previous.selectedSessionId ||
+        projectionGeneration != previous.projectionGeneration
+    ) return null
+    val current = timelineMessages
+    val before = previous.timelineMessages
+    if (current !== before && (current.size < before.size ||
+            before.indices.any { current[it] != before[it] })
+    ) return null
+
+    // 2. 状态变化不遍历或序列化历史；append 的游标来自已交付前缀。
+    return buildList {
+        if (current.size > before.size) {
+            add(MobileWebMessageEvent(1, projectionGeneration, buildJsonObject {
+                put("type", "messages.appended")
+                put("version", 2)
+                put("session_id", selectedSessionId)
+                put("after_seq", before.lastOrNull()?.seq ?: -1)
+                put("through_seq", current.last().seq)
+                put("next_after_seq", current.last().seq)
+                put("has_more", false)
+                put("items", JsonArray(current.subList(before.size, current.size).map {
+                    Json.encodeToJsonElement(MobileWebTimelineMessage.serializer(), it.toMobileWebTimelineMessage())
+                }))
+            }))
+        }
+        if (replyStatus != previous.replyStatus) add(requireNotNull(toMobileWebReplyEvent()))
     }
-    return toMobileWebStatePatch()
 }
 
-/** 控制状态单独发送，终态时随消息原子提交。 */
-private fun ConversationUiState.toMobileWebStatePatch(): MobileWebStatePatch = MobileWebStatePatch(
-        protocolVersion = 1,
+/** 断线或等待订阅时显式清除临时草稿，不伪造已提交 Message。 */
+fun ConversationUiState.toMobileWebReplyEvent(): MobileWebMessageEvent? {
+    val sessionId = selectedSessionId ?: return null
+    return MobileWebMessageEvent(1, projectionGeneration, replyStatus ?: buildJsonObject {
+        put("type", "reply.status")
+        put("version", 2)
+        put("session_id", sessionId)
+        put("snapshot_id", JsonNull)
+        put("available", false)
+        put("items", JsonArray(emptyList()))
+    })
+}
+
+/** 只发布变化的控制字段；消息与回复状态沿独立消息事件发送。 */
+fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): MobileWebStatePatch? {
+    if (copy(timelineMessages = emptyList(), replyStatus = null) ==
+        previous.copy(timelineMessages = emptyList(), replyStatus = null)
+    ) return null
+    return MobileWebStatePatch(
+        protocolVersion = 2,
         connection = MobileWebConnection(
             label = connectionLabel,
             status = connectionStatus.toMobileWebStatus(),
@@ -382,6 +379,7 @@ private fun ConversationUiState.toMobileWebStatePatch(): MobileWebStatePatch = M
         readingPosition = readingPosition?.toMobileWebReadingPosition(),
         navigationTarget = navigationTarget?.toMobileWebNavigationTarget(),
         projectionGeneration = projectionGeneration,
+        downloads = downloads.map(MessageAttachmentUi::toMobileWebDownload),
         composer = MobileWebComposer(
             draft = MobileWebComposerDraft(
                 text = composerDraft.text,
@@ -402,6 +400,7 @@ private fun ConversationUiState.toMobileWebStatePatch(): MobileWebStatePatch = M
         modelCatalog = modelCatalog.toMobileWebModelCatalog(),
         runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
     )
+}
 
 private fun ModelCatalogUi.toMobileWebModelCatalog() = MobileWebModelCatalog(
     generationId = generationId,
@@ -467,181 +466,6 @@ private fun RuntimeInspectionUi.toMobileWebRuntimeInspection() =
         errorMessage = errorMessage,
     )
 
-/** 为同一助手 turn 的流式或终态变化生成轻量 WebView patch。 */
-fun ConversationUiState.toMobileWebStreamPatch(
-    previous: ConversationUiState,
-): MobileWebStreamPatch? {
-    // 1. 消息投影必须仍属于同一会话 generation
-    if (
-        selectedSessionId == null ||
-        selectedSessionId != previous.selectedSessionId ||
-        projectionGeneration != previous.projectionGeneration ||
-        messages.size != previous.messages.size
-    ) {
-        return null
-    }
-
-    // 2. 只允许一个现有 streaming assistant message 发生局部变化
-    var changedIndex = -1
-    for (index in messages.indices) {
-        val before = previous.messages[index]
-        val after = messages[index]
-        if (before == after) continue
-        if (changedIndex >= 0 || !after.isSameStreamingTurnUpdate(before)) return null
-        changedIndex = index
-    }
-    if (changedIndex < 0) return null
-
-    // 3. 控制状态与正文可以同时变化，不为草稿或阅读位置重发整段历史
-    val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
-    val after = messages[changedIndex] as MessageUi.AssistantTurn
-
-    // 4. 诊断身份字段必须通过协议校验，否则 fail-loud
-    after.clientMessageId?.let { clientMessageId ->
-        require(FRAME_ID_PATTERN.matches(clientMessageId)) { "Stream patch client message id 无效" }
-    }
-
-    val state = if (after.isStreaming) {
-        null
-    } else {
-        toMobileWebStatePatch()
-    }
-
-    // 5. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
-    val append = after.streamAppendFrom(before)
-    return if (after.isStreaming && append != null) {
-        MobileWebStreamPatch(
-            protocolVersion = 3,
-            projectionGeneration = projectionGeneration,
-            selectedSessionId = selectedSessionId,
-            messageIndex = changedIndex,
-            messageId = before.id,
-            searchRevision = after.updatedAtMillis,
-            durationSeconds = after.durationSeconds,
-            contentAppend = append.content,
-            thinkingAppend = append.thinking,
-            state = state,
-            clientMessageId = after.clientMessageId,
-        )
-    } else {
-        MobileWebStreamPatch(
-            protocolVersion = 3,
-            projectionGeneration = projectionGeneration,
-            selectedSessionId = selectedSessionId,
-            messageIndex = changedIndex,
-            messageId = before.id,
-            searchRevision = after.updatedAtMillis,
-            durationSeconds = after.durationSeconds,
-            message = after.toMobileWebMessage(),
-            state = state,
-            clientMessageId = after.clientMessageId,
-        )
-    }
-}
-
-internal data class MobileWebTerminalTransition(
-    val sessionId: String,
-    val turnId: String,
-    val clientMessageId: String?,
-)
-
-/** 完整 snapshot 同时迁移 user/assistant identity 时，保留终态跨桥观测。 */
-internal fun ConversationUiState.terminalTransitionFrom(
-    previous: ConversationUiState,
-): MobileWebTerminalTransition? {
-    // 1. 从同一会话的旧投影定位仍在流式的权威 turn
-    if (selectedSessionId == null || selectedSessionId != previous.selectedSessionId) return null
-    val before = previous.messages.asReversed().filterIsInstance<MessageUi.AssistantTurn>()
-        .firstOrNull {
-            it.isStreaming &&
-                (it.controlTurnId != null || it.id.startsWith(ASSISTANT_TURN_PREFIX))
-        }
-        ?: return null
-    val beforeTurnId = before.controlTurnId ?: before.id.removePrefix(ASSISTANT_TURN_PREFIX)
-
-    // 2. canonical ID 可变；权威 turn id 优先，客户端发件身份兼容旧投影
-    val after = messages.asReversed().filterIsInstance<MessageUi.AssistantTurn>()
-        .firstOrNull {
-            !it.isStreaming && it.sessionId == before.sessionId && (
-                if (it.controlTurnId != null) {
-                    it.controlTurnId == beforeTurnId
-                } else if (before.clientMessageId != null) {
-                    it.clientMessageId == before.clientMessageId
-                } else {
-                    it.id == before.id
-                }
-                )
-        }
-        ?: return null
-    return MobileWebTerminalTransition(
-        sessionId = before.sessionId,
-        turnId = beforeTurnId,
-        clientMessageId = after.clientMessageId ?: before.clientMessageId,
-    )
-}
-
-private fun MessageUi.isSameStreamingTurnUpdate(previous: MessageUi): Boolean {
-    if (this !is MessageUi.AssistantTurn || previous !is MessageUi.AssistantTurn) return false
-    if (
-        !previous.isStreaming ||
-        sessionId != previous.sessionId ||
-        createdAtMillis != previous.createdAtMillis ||
-        (isStreaming && id != previous.id)
-    ) {
-        return false
-    }
-    return previous.copy(
-        id = id,
-        intro = intro,
-        answer = answer,
-        blocks = blocks,
-        status = status,
-        durationSeconds = durationSeconds,
-        attachments = attachments,
-        updatedAtMillis = updatedAtMillis,
-    ) == this
-}
-
-private data class MobileWebStreamAppend(
-    val content: String?,
-    val thinking: MobileWebThinkingAppend?,
-)
-
-/** 提取同一 streaming turn 相对已投递状态的无损追加量。 */
-private fun MessageUi.AssistantTurn.streamAppendFrom(
-    previous: MessageUi.AssistantTurn,
-): MobileWebStreamAppend? {
-    // 1. 回答与 block 结构必须保持追加语义
-    if (!answer.startsWith(previous.answer) || blocks.size != previous.blocks.size) return null
-    var thinkingAppend: MobileWebThinkingAppend? = null
-    for (index in blocks.indices) {
-        val before = previous.blocks[index]
-        val after = blocks[index]
-        if (before == after) continue
-        if (
-            thinkingAppend != null ||
-            before.kind != ProcessBlockKind.THINKING ||
-            before.copy(detail = after.detail) != after ||
-            !after.detail.startsWith(before.detail)
-        ) {
-            return null
-        }
-        thinkingAppend = MobileWebThinkingAppend(
-            blockIndex = index,
-            blockId = after.id,
-            delta = after.detail.removePrefix(before.detail),
-        )
-    }
-
-    // 2. 纯计时变化没有内容收益，交给完整消息回退
-    val contentAppend = answer.removePrefix(previous.answer).ifEmpty { null }
-    return if (contentAppend != null || thinkingAppend != null) {
-        MobileWebStreamAppend(contentAppend, thinkingAppend)
-    } else {
-        null
-    }
-}
-
 private fun TransferStatusUi.toMobileWebTransferStatus() = MobileWebTransferStatus(
     title = title,
     detail = detail,
@@ -667,70 +491,39 @@ private fun NavigationTargetUi.toMobileWebNavigationTarget() =
     MobileWebNavigationTarget(sessionId, messageId)
 
 private fun PendingMessageUi.toMobileWebPendingMessage() =
-    MobileWebPendingMessage(messageId, preview, createdAtMillis)
+    MobileWebPendingMessage(
+        messageId,
+        preview,
+        createdAtMillis,
+        deliveryLabel,
+        deliveryAction?.toMobileWebDeliveryAction(),
+    )
 
-internal fun MessageUi.toMobileWebMessage(): MobileWebMessage = when (this) {
-    is MessageUi.User -> MobileWebMessage(
-        id = id,
-        sessionId = sessionId,
-        role = MobileWebRole.USER,
-        content = text,
-        createdAt = createdAtMillis,
-        searchRevision = updatedAtMillis,
-        replyable = replyable,
-        reply = reply?.toMobileWebReply(),
-        deliveryLabel = deliveryLabel,
-        deliveryAction = deliveryAction?.toMobileWebDeliveryAction(),
-        attachments = attachments.map(MessageAttachmentUi::toMobileWebAttachment),
-    )
-    is MessageUi.AssistantTurn -> MobileWebMessage(
-        id = id,
-        sessionId = sessionId,
-        role = MobileWebRole.ASSISTANT,
-        content = answer,
-        createdAt = createdAtMillis,
-        searchRevision = updatedAtMillis,
-        replyable = status == AssistantTurnStatus.COMPLETE,
-        reply = reply?.toMobileWebReply(),
-        controlTurnId = controlTurnId,
-        blocks = blocks.map(ProcessBlockUi::toMobileWebProcessBlock),
-        streaming = status == AssistantTurnStatus.STREAMING,
-        interrupted = status == AssistantTurnStatus.INTERRUPTED,
-        terminalStatus = when (status) {
-            AssistantTurnStatus.FAILED -> MobileWebTerminalStatus.FAILED
-            AssistantTurnStatus.CANCELLED -> MobileWebTerminalStatus.CANCELLED
-            AssistantTurnStatus.INTERRUPTED -> MobileWebTerminalStatus.INTERRUPTED
-            AssistantTurnStatus.STREAMING, AssistantTurnStatus.COMPLETE -> null
-        },
-        durationSeconds = durationSeconds,
-        attachments = attachments.map(MessageAttachmentUi::toMobileWebAttachment),
-    )
-}
+private fun TimelineMessageUi.toMobileWebTimelineMessage() = MobileWebTimelineMessage(
+    id = id,
+    sessionId = sessionId,
+    seq = seq,
+    timestamp = timestamp,
+    author = author,
+    source = source,
+    body = body,
+    metadata = metadata,
+    attachments = attachments.map(TimelineAttachmentUi::toMobileWebTimelineAttachment),
+)
+
+private fun TimelineAttachmentUi.toMobileWebTimelineAttachment() = MobileWebTimelineAttachment(
+    artifactId = artifactId,
+    kind = kind,
+    filename = filename,
+    mediaType = mediaType,
+    sizeBytes = sizeBytes,
+    sha256 = sha256,
+)
 
 private fun MessageDeliveryActionUi.toMobileWebDeliveryAction() = when (this) {
     MessageDeliveryActionUi.RETRY -> MobileWebDeliveryAction.RETRY
     MessageDeliveryActionUi.VERIFY -> MobileWebDeliveryAction.VERIFY
 }
-
-private fun ProcessBlockUi.toMobileWebProcessBlock() = MobileWebProcessBlock(
-    id = id,
-    kind = when (kind) {
-        ProcessBlockKind.THINKING -> MobileWebProcessKind.THINKING
-        ProcessBlockKind.TOOL -> MobileWebProcessKind.TOOL
-    },
-    title = title,
-    detail = detail,
-    state = when (state) {
-        ProcessBlockState.COMPLETED -> MobileWebProcessState.COMPLETED
-        ProcessBlockState.RUNNING -> MobileWebProcessState.RUNNING
-        ProcessBlockState.FAILED -> MobileWebProcessState.FAILED
-    },
-    arguments = arguments,
-    resultPreview = resultPreview,
-    durationMillis = durationMillis,
-)
-
-private fun MessageReplyUi.toMobileWebReply() = MobileWebReply(messageId, role, preview)
 
 private fun ComposerAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
     id = id,
@@ -769,6 +562,24 @@ private fun MessageAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
     },
 )
 
+private fun MessageAttachmentUi.toMobileWebDownload() = MobileWebDownload(
+    artifactId = id,
+    state = when (state) {
+        MessageAttachmentState.REMOTE -> "remote"
+        MessageAttachmentState.PENDING -> "pending"
+        MessageAttachmentState.DOWNLOADING -> "downloading"
+        MessageAttachmentState.CACHED -> "cached"
+        MessageAttachmentState.FAILED -> "failed"
+        MessageAttachmentState.EVICTED -> "evicted"
+    },
+    transferredBytes = transferredBytes,
+    contentUrl = if (state == MessageAttachmentState.CACHED) {
+        mobileMediaResourceUrl(id, filename)
+    } else {
+        null
+    },
+)
+
 private fun CommandUi.toMobileWebCommand() = MobileWebCommand(command, description)
 
 private fun ConnectionStatusUi.toMobileWebStatus(): MobileWebConnectionStatus = when (this) {
@@ -778,8 +589,3 @@ private fun ConnectionStatusUi.toMobileWebStatus(): MobileWebConnectionStatus = 
     ConnectionStatusUi.RECONNECTING -> MobileWebConnectionStatus.RECONNECTING
     ConnectionStatusUi.DISCONNECTED -> MobileWebConnectionStatus.DISCONNECTED
 }
-
-private val FRAME_ID_PATTERN = Regex(
-    "^(?:[0-9A-HJKMNP-TV-Z]{26}|[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-" +
-        "7[0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12})$",
-)

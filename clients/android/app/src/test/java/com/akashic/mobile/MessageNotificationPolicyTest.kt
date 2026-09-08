@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -119,14 +120,10 @@ class MessageNotificationPolicyTest {
     }
 
     @Test
-    fun repliesUseCanonicalOrOptimisticMessageIdentity() {
-        val canonical = messageReplyReference("mobile:session-a:42", null)
-        val optimistic = messageReplyReference(
-            "user:01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-        )
+    fun replyReferenceUsesTheMessageIdentityDirectly() {
+        val canonical = messageReplyReference("mobile:session-a:42")
 
         assertEquals("mobile:session-a:42", canonical.messageId)
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", optimistic.clientMessageId)
     }
+
 }

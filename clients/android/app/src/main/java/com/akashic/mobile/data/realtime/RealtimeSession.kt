@@ -17,7 +17,6 @@ import com.akashic.mobile.data.local.MediaCacheStore
 import com.akashic.mobile.data.local.MessageContentStore
 import com.akashic.mobile.data.local.NotificationTargetProjection
 import com.akashic.mobile.data.local.OutboxCommandEntity
-import com.akashic.mobile.data.local.PendingTurnStopEntity
 import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.RemoveUnavailableConversationResult
 import com.akashic.mobile.data.local.ServerProfileEntity
@@ -59,7 +58,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
@@ -75,14 +76,11 @@ data class MobileSessionState(
     val pairingConfirmationCode: String? = null,
     val currentSessionId: String? = null,
     val remoteSessionIds: Set<String>? = null,
-    val activeTurnId: String? = null,
-    val activeSessionIds: Set<String> = emptySet(),
     val hasActiveAttachmentDownload: Boolean = false,
     val transferNetwork: TransferNetworkState = TransferNetworkState(TransferNetworkKind.UNAVAILABLE, false),
     val meteredLargeTransferApproved: Boolean = false,
     val isReloadingHistory: Boolean = false,
-    val isStopping: Boolean = false,
-    val outputCompleted: Boolean = false,
+    val replyStatus: JsonObject? = null,
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
@@ -214,23 +212,89 @@ internal fun historyStartPage(
 
 internal enum class HistorySyncAction { COMPLETE, RESUME, RESET }
 
-internal fun shouldRetryLegacySessionList(
-    pendingType: String,
-    errorCode: String?,
-    generation: Long,
-    legacyGeneration: Long?,
-): Boolean =
-    pendingType == "session.list" &&
-        errorCode == "invalid_payload" &&
-        legacyGeneration != generation
-
 internal fun historyRequestSnapshotMaxSeq(
     action: HistorySyncAction,
     snapshotMaxSeq: Long?,
 ): Long? = if (action == HistorySyncAction.RESET) null else snapshotMaxSeq
 
-internal fun historyTerminalMatches(remoteTotal: Int, local: HistoryProjectionProgress): Boolean =
-    local.messageCount == remoteTotal
+internal fun historyPageEnumerationComplete(payload: HistoryPagePayload): Boolean =
+    !payload.hasMore && payload.nextAfterSeq == payload.throughSeq
+
+internal sealed interface SessionMessageContent {
+    val sessionId: String
+
+    data class Messages(
+        override val sessionId: String,
+        val payload: MessagesAppendedPayload,
+    ) : SessionMessageContent
+
+    data class ReplyStatus(
+        override val sessionId: String,
+        val payload: JsonObject,
+    ) : SessionMessageContent
+}
+
+/** 严格区分 session.message 的消息追加与临时回复状态。 */
+internal fun decodeSessionMessage(payload: JsonObject): SessionMessageContent {
+    val type = payload["type"]?.jsonPrimitive?.content ?: error("session.message 缺少 type")
+    return when (type) {
+        "messages.appended" -> {
+            val appended = ProtocolCodec.decodePayload<MessagesAppendedPayload>(payload)
+            require(appended.version == 2) { "messages.appended version mismatch" }
+            require(appended.sessionId.isNotBlank()) { "messages.appended 缺少 session_id" }
+            require(appended.nextAfterSeq in appended.afterSeq..appended.throughSeq) {
+                "messages.appended next cursor is invalid"
+            }
+            if (appended.hasMore) {
+                require(appended.nextAfterSeq > appended.afterSeq) {
+                    "messages.appended cursor did not advance"
+                }
+            } else {
+                require(appended.nextAfterSeq == appended.throughSeq) {
+                    "messages.appended terminal page did not reach through_seq"
+                }
+            }
+            SessionMessageContent.Messages(appended.sessionId, appended)
+        }
+        "reply.status" -> {
+            require(payload["version"]?.jsonPrimitive?.longOrNull == 2L) {
+                "reply.status version mismatch"
+            }
+            val sessionId = payload["session_id"]?.jsonPrimitive?.content
+                ?: error("reply.status 缺少 session_id")
+            SessionMessageContent.ReplyStatus(sessionId, payload)
+        }
+        else -> error("未知 session.message 类型")
+    }
+}
+
+internal fun hasActiveReply(status: JsonObject?): Boolean =
+    status?.get("items")?.jsonArray?.any { item ->
+        item.jsonObject["active"]?.jsonPrimitive?.booleanOrNull == true
+    } == true
+
+internal data class PendingFollowOwner(
+    val id: String,
+    val sessionId: String,
+    val epoch: Long,
+)
+
+internal enum class FollowReplyAction { ACCEPT, IGNORE, INVALID }
+
+internal fun followReplyAction(
+    owner: PendingFollowOwner?,
+    replyId: String,
+    replySessionId: String?,
+    currentSessionId: String?,
+    currentEpoch: Long?,
+): FollowReplyAction {
+    if (owner == null || owner.id != replyId) return FollowReplyAction.IGNORE
+    if (replySessionId != owner.sessionId) return FollowReplyAction.INVALID
+    if (currentSessionId != owner.sessionId || currentEpoch != owner.epoch) {
+        return FollowReplyAction.IGNORE
+    }
+    return FollowReplyAction.ACCEPT
+}
 
 /** 用权威消息数与 seq 高水位选择历史恢复动作。 */
 internal fun historySyncAction(
@@ -342,13 +406,11 @@ class RealtimeSession(
     private val scope: CoroutineScope,
     allowInsecureTransport: Boolean,
     private val onRuntimeError: (String, Throwable) -> Unit,
-    private val turnTrace: TurnTraceTracker,
 ) : RealtimeSocketListener {
     private data class PendingSyncCommand(
         val generation: Long,
         val type: String,
         val sessionId: String?,
-        val page: Int?,
         val afterSeq: Long?,
     )
 
@@ -415,23 +477,6 @@ class RealtimeSession(
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
     )
-    private val stops = TurnStopCoordinator(
-        send = ::sendTurnStopCommand,
-        onPersist = ::persistTurnStop,
-        onRemovePersisted = ::removePersistedTurnStop,
-        onAuthoritativeTerminal = { request ->
-            deliveryStore.reconcileInterruptedTurn(
-                sessionId = request.sessionId,
-                turnId = request.turnId,
-                updatedAt = System.currentTimeMillis(),
-            )
-        },
-        onTransportUnavailable = ::scheduleReconnect,
-        onError = { message ->
-            mutableState.value = mutableState.value.copy(errorMessage = message)
-        },
-        onStateChanged = ::publishTurnState,
-    )
     private val mutableState = MutableStateFlow(MobileSessionState())
     val state: StateFlow<MobileSessionState> = mutableState.asStateFlow()
     val pluginUi = PluginUiCoordinator(
@@ -475,13 +520,14 @@ class RealtimeSession(
     private var syncGeneration = 0L
     private var completedSyncGeneration = 0L
     private var resetRebuildGeneration: Long? = null
-    private var legacySessionListGeneration: Long? = null
-    private var terminalHistoryMismatchGeneration: Long? = null
     private val pendingSyncCommands = mutableMapOf<String, PendingSyncCommand>()
-    private val requestedHistoryPages = mutableSetOf<Triple<Long, String, Int>>()
     private val requestedHistoryCursors = mutableSetOf<Triple<Long, String, Long>>()
     private var pendingCommandListId: String? = null
     private var pendingSessionCreateId: String? = null
+    private var pendingFollow: PendingFollowOwner? = null
+    private val sessionListItems = linkedMapOf<String, RemoteSessionSummary>()
+    private var sessionListTotal: Int? = null
+    private var sessionListNextCursor: SessionListCursor? = null
 
     fun start() {
         if (!started.compareAndSet(false, true)) return
@@ -532,6 +578,16 @@ class RealtimeSession(
                     hasProfile = profile != null,
                     serverId = profile?.serverId,
                     currentSessionId = selected,
+                    projectionGeneration = if (mutableState.value.currentSessionId == selected) {
+                        mutableState.value.projectionGeneration
+                    } else {
+                        mutableState.value.projectionGeneration + 1
+                    },
+                    replyStatus = if (mutableState.value.currentSessionId == selected) {
+                        mutableState.value.replyStatus
+                    } else {
+                        null
+                    },
                 )
                 profile?.let {
                     preferences.selectServer(it.serverId)
@@ -603,7 +659,6 @@ class RealtimeSession(
                         initialized = true,
                         connection = ConnectionState(phase = ConnectionPhase.CONNECTING),
                     )
-                    stops.reset()
                     connectQr(qr)
                 }
             } catch (error: IllegalArgumentException) {
@@ -642,7 +697,6 @@ class RealtimeSession(
                 deviceRevokeCleanupStarted = false
                 resetGenerationState()
                 networkRecovery.reset()
-                stops.reset()
                 preferences.selectServer(null)
                 mutableState.value = MobileSessionState(
                     initialized = true,
@@ -667,7 +721,9 @@ class RealtimeSession(
                     return@withLock
                 }
                 check(!mutableState.value.isReloadingHistory) { "History reload is already running" }
-                check(mutableState.value.activeTurnId == null) { "History reload cannot interrupt an active turn" }
+                check(!hasActiveReply(mutableState.value.replyStatus)) {
+                    "History reload cannot interrupt an active reply"
+                }
                 check(!mutableState.value.hasActiveAttachmentDownload) {
                     "History reload cannot interrupt an attachment download"
                 }
@@ -1198,7 +1254,6 @@ class RealtimeSession(
         sentDraftRevision: Long? = null,
     ) {
         // 0. 发送入口即捕获 origin，cmid 生成后绑定；深层校验失败不产生观测
-        val sendOrigin = turnTrace.captureSendOrigin()
         scope.launch {
             withSendResult(onPersisted) { reportResult ->
                 attachmentOperations.perform {
@@ -1273,7 +1328,6 @@ class RealtimeSession(
                         val now = System.currentTimeMillis()
                         val commandId = Ulid.next(now)
                         val clientMessageId = commandId
-                        turnTrace.recordSend(sessionId, clientMessageId, sendOrigin)
                         val modelSelection = if (includeModelSelection) {
                             modelCatalog.selectionFor(sessionId)
                         } else {
@@ -1286,7 +1340,7 @@ class RealtimeSession(
                             mediaRefs = attachments.map { it.attachmentId },
                             clientCreatedAt = Instant.ofEpochMilli(now).toString(),
                             replyTo = replyTarget?.let { target ->
-                                messageReplyReference(target.messageId, target.clientMessageId)
+                                messageReplyReference(target.messageId)
                             },
                             modelRuntimeId = modelSelection?.runtimeId,
                             modelReasoningEffort = modelSelection?.reasoningEffort,
@@ -1339,9 +1393,8 @@ class RealtimeSession(
                                 now,
                             ),
                             message = MessageEntity(
-                                // TODO(deprecated): optimistic 本地临时 ID 命名空间，canonical 身份由服务端 history 投影原子迁移
-                                messageId = "user:$clientMessageId",
-                                clientMessageId = clientMessageId,
+                                messageId = clientMessageId,
+                                clientMessageId = null,
                                 sessionId = sessionId,
                                 role = "user",
                                 text = body.ifBlank {
@@ -1369,7 +1422,6 @@ class RealtimeSession(
                             attachments = cachedAttachments,
                             sentDraftRevision = sentDraftRevision,
                         )
-                        turnTrace.onLocalOutboxCommitted(sessionId, clientMessageId)
                         reportResult(true)
                         if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
                     }
@@ -1429,11 +1481,6 @@ class RealtimeSession(
                     )
                     return@withLock
                 }
-                if (sessionId in stops.activeSessionIds()) {
-                    mutableState.value = mutableState.value.copy(errorMessage = "会话仍在运行，暂时不能移除")
-                    return@withLock
-                }
-
                 // 2. 删除无待发送工作的本地投影
                 val result = try {
                     deliveryStore.removeUnavailableConversation(currentProfile.serverId, sessionId)
@@ -1467,26 +1514,29 @@ class RealtimeSession(
                         .firstOrNull { !it.isRemoteMissingIn(remoteSessionIds) }
                         ?.sessionId
                     preferences.selectSession(nextSessionId)
-                    mutableState.value = mutableState.value.copy(currentSessionId = nextSessionId)
-                    publishTurnState()
+                    publishSelectedSession(nextSessionId)
                 }
             }
         }
     }
 
     fun stopCurrentTurn() {
-        scope.launch {
-            mutex.withLock {
-                val sessionId = mutableState.value.currentSessionId
-                if (sessionId == null || stops.activeTurnId(sessionId) == null) {
-                    mutableState.value = mutableState.value.copy(
-                        errorMessage = "当前会话没有正在生成的内容",
-                    )
-                    return@withLock
-                }
-                stops.requestStop(sessionId)
-            }
+        val state = mutableState.value
+        val sessionId = state.currentSessionId
+        val active = state.replyStatus?.get("items")?.jsonArray?.any { item ->
+            item.jsonObject["active"]?.jsonPrimitive?.booleanOrNull == true
+        } == true
+        if (sessionId == null || !active) {
+            mutableState.value = state.copy(errorMessage = "当前会话没有正在生成的内容")
+            return
         }
+        enqueueMessage(
+            text = "/stop",
+            includeDraftAttachments = false,
+            includeModelSelection = false,
+            replyToMessageId = null,
+            targetSessionId = sessionId,
+        )
     }
 
     fun dismissError() {
@@ -1558,11 +1608,11 @@ class RealtimeSession(
 
         // 2. 同步持久选择与进程内投影
         preferences.selectSession(sessionId)
-        mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+        publishSelectedSession(sessionId)
         if (mutableState.value.connection.phase == ConnectionPhase.READY) {
             modelCatalog.onSessionSelected(sessionId)
+            requestMessageFollow(sessionId)
         }
-        publishTurnState()
     }
 
     override fun onOpen(candidateId: SocketCandidateId, endpoint: ServerEndpoint) {
@@ -1819,6 +1869,7 @@ class RealtimeSession(
             hasProfile = true,
             serverId = saved.serverId,
             currentSessionId = selectedSessionId,
+            projectionGeneration = mutableState.value.projectionGeneration + 1,
         )
         socket.close(reason = "pairing accepted; reconnecting with device proof")
         connectProfile(saved)
@@ -1844,10 +1895,8 @@ class RealtimeSession(
         completedSyncGeneration = 0
         resetRebuildGeneration = null
         pendingSyncCommands.clear()
-        requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         retryCount = 0
-        restoreTurnStops(currentProfile.serverId)
         val cursor = requireNotNull(database.realtimeCursors().get(currentProfile.deviceId))
         check(
             socket.send(
@@ -1862,7 +1911,7 @@ class RealtimeSession(
                         put(
                             "active_turns",
                             kotlinx.serialization.json.JsonArray(
-                                stops.activeTurnIds().map(::JsonPrimitive),
+                                emptyList(),
                             ),
                         )
                     },
@@ -1904,7 +1953,6 @@ class RealtimeSession(
         when (envelope.kind) {
             WireKind.EVENT -> {
                 val currentProfile = requireNotNull(profile)
-                recordEnvelopeTrace(envelope)
                 val eventSeq = deliveryStore.applyEvent(
                     serverId = currentProfile.serverId,
                     deviceId = currentProfile.deviceId,
@@ -1912,44 +1960,11 @@ class RealtimeSession(
                     updatedAt = System.currentTimeMillis(),
                     preservedSessionId = mutableState.value.currentSessionId,
                 )
-                recordRoomCommitTrace(envelope)
                 recordAck(eventSeq)
                 when (envelope.type) {
-                    "turn.started" -> {
-                        rememberRemoteSession(requireNotNull(envelope.sessionId))
-                        stops.onTurnStarted(
-                            requireNotNull(envelope.sessionId),
-                            requireNotNull(envelope.turnId),
-                        )
-                    }
-                    "turn.interrupted" -> {
-                        stops.onTurnTerminal(
-                            requireNotNull(envelope.sessionId),
-                            requireNotNull(envelope.turnId),
-                        )
-                        turnTrace.onTurnCleared(
-                            requireNotNull(envelope.sessionId),
-                            requireNotNull(envelope.turnId),
-                        )
-                    }
-                    "turn.output.completed" -> {
-                        stops.onOutputCompleted(
-                            requireNotNull(envelope.sessionId),
-                            requireNotNull(envelope.turnId),
-                        )
-                    }
-                    "message.final" -> {
-                        rememberRemoteSession(requireNotNull(envelope.sessionId))
-                        stops.onTurnTerminal(
-                            requireNotNull(envelope.sessionId),
-                            requireNotNull(envelope.turnId),
-                        )
-                        turnTrace.onTurnCleared(
-                            requireNotNull(envelope.sessionId),
-                            requireNotNull(envelope.turnId),
-                        )
-                        downloads.resumeIfIdle(currentProfile.serverId)
-                    }
+                    "turn.started", "turn.interrupted", "turn.output.completed",
+                    "message.final", "react.thinking.delta", "react.tool.started",
+                    "react.tool.completed", "answer.delta" -> Unit
                     "sync.completed" -> {
                         if (completedSyncGeneration == syncGeneration) return
                         completedSyncGeneration = syncGeneration
@@ -1961,20 +1976,10 @@ class RealtimeSession(
                         beginResetRebuild()
                     }
                     "session.list" -> {
-                        applyRemoteSessionList(envelope)
-                        if (hasPendingSyncCommand("session.list")) {
-                            requestAllHistory(envelope)
-                        }
+                        if (hasPendingSyncCommand("session.list")) applyRemoteSessionList(envelope)
                     }
                     "history.page" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
-                        val healedTurnId = reconcileHistoryTurnTerminals(envelope)
-                        if (healedTurnId != null) {
-                            val sessionId = requireNotNull(envelope.sessionId)
-                            turnTrace.onTerminalReceived(sessionId, healedTurnId, "completed")
-                            turnTrace.onRoomCommitted(sessionId, healedTurnId, TurnTraceStage.TERMINAL_COMMITTED)
-                            turnTrace.onTurnCleared(sessionId, healedTurnId)
-                        }
                         requestNextHistoryPage(envelope)
                         downloads.resumeIfIdle(currentProfile.serverId)
                         messageDownloads.resumeIfIdle(currentProfile.serverId)
@@ -1983,7 +1988,9 @@ class RealtimeSession(
                         ProtocolCodec.decodePayload(envelope.payload),
                     )
                     "session.updated" -> {
-                        rememberRemoteSession(requireNotNull(envelope.sessionId))
+                        val sessionId = requireNotNull(envelope.sessionId)
+                        rememberRemoteSession(sessionId)
+                        requestPendingNotificationTail(sessionId)
                         requestSessionList()
                     }
                     "session.created" ->
@@ -1994,17 +2001,6 @@ class RealtimeSession(
                 }
             }
             WireKind.REPLY -> {
-                val authoritativeTerminalStatus = authoritativeTerminalStatus(envelope)
-                if (stops.onReply(envelope)) {
-                    authoritativeTerminalStatus?.let { terminalStatus ->
-                        val sessionId = requireNotNull(envelope.sessionId)
-                        val turnId = requireNotNull(envelope.turnId)
-                        turnTrace.onTerminalReceived(sessionId, turnId, terminalStatus)
-                        turnTrace.onRoomCommitted(sessionId, turnId, TurnTraceStage.TERMINAL_COMMITTED)
-                        turnTrace.onTurnCleared(sessionId, turnId)
-                    }
-                    return
-                }
                 if (envelope.type.startsWith("attachment.download.")) {
                     try {
                         check(downloads.onReply(envelope)) { "收到未知附件下载 reply" }
@@ -2046,35 +2042,6 @@ class RealtimeSession(
                     val pending = requireNotNull(pendingSyncCommands.remove(id))
                     require(pending.generation == syncGeneration) { "收到旧 generation 的历史同步错误" }
                     require(envelope.type == "${pending.type}.error") { "历史同步错误类型不匹配" }
-                    val errorCode = envelope.payload["code"]?.jsonPrimitive?.content
-                    if (
-                        shouldRetryLegacySessionList(
-                            pending.type,
-                            errorCode,
-                            syncGeneration,
-                            legacySessionListGeneration,
-                        )
-                    ) {
-                        legacySessionListGeneration = syncGeneration
-                        requestSessionList()
-                        return
-                    }
-                    if (
-                        pending.type == "history.get" &&
-                        pending.afterSeq != null &&
-                        pending.page != null &&
-                        errorCode in LEGACY_HISTORY_FALLBACK_CODES
-                    ) {
-                        val sessionId = requireNotNull(pending.sessionId)
-                        requestedHistoryCursors.remove(
-                            Triple(syncGeneration, sessionId, pending.afterSeq),
-                        )
-                        requestedHistoryPages.remove(
-                            Triple(syncGeneration, sessionId, pending.page),
-                        )
-                        requestLegacyHistoryPage(sessionId, pending.page)
-                        return
-                    }
                     mutableState.value = mutableState.value.copy(
                         errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "历史同步失败",
                     )
@@ -2118,10 +2085,14 @@ class RealtimeSession(
                     }
                     "message.send.ok" -> {
                         require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的 ACK: $id" }
-                        // 1. ACK 到达先记 received，Room 事务提交后记 committed；两次记录间不新增任何发送
-                        turnTrace.onServerAckReceived(id)
-                        val sentFiles = deliveryStore.acknowledgeOutbox(id, System.currentTimeMillis())
-                        turnTrace.onServerAckCommitted(id)
+                        val payload = ProtocolCodec.decodePayload<MessageSendOkPayload>(envelope.payload)
+                        require(payload.accepted) { "message.send.ok 未确认 accepted" }
+                        val sentFiles = deliveryStore.acknowledgeOutbox(
+                            id,
+                            payload.clientMessageId,
+                            System.currentTimeMillis(),
+                        )
+                        rememberRemoteSession(requireNotNull(envelope.sessionId))
                         activeOutboxCommandId = null
                         attachmentDrafts.deleteSentFiles(sentFiles)
                         flushOutbox()
@@ -2130,7 +2101,6 @@ class RealtimeSession(
                         require(id == activeOutboxCommandId) { "收到非活动 outbox 命令的错误: $id" }
                         val code = envelope.payload["code"]?.jsonPrimitive?.content
                             ?: error("message.send.error 缺少 code")
-                        turnTrace.onSendError(id, code)
                         if (code == "session_not_found") {
                             val sessionId = requireNotNull(envelope.sessionId) {
                                 "session_not_found 缺少 session_id"
@@ -2160,6 +2130,37 @@ class RealtimeSession(
                         )
                         flushOutbox()
                     }
+                    "session.follow.ok" -> {
+                        when (followReplyAction(
+                            pendingFollow,
+                            id,
+                            envelope.sessionId,
+                            mutableState.value.currentSessionId,
+                            activeEpoch,
+                        )) {
+                            FollowReplyAction.IGNORE -> return
+                            FollowReplyAction.INVALID -> error("session.follow reply 会话不匹配")
+                            FollowReplyAction.ACCEPT -> pendingFollow = null
+                        }
+                    }
+                    "session.follow.error" -> {
+                        when (followReplyAction(
+                            pendingFollow,
+                            id,
+                            envelope.sessionId,
+                            mutableState.value.currentSessionId,
+                            activeEpoch,
+                        )) {
+                            FollowReplyAction.IGNORE -> return
+                            FollowReplyAction.INVALID -> error("session.follow error 会话不匹配")
+                            FollowReplyAction.ACCEPT -> pendingFollow = null
+                        }
+                        mutableState.value = mutableState.value.copy(
+                            replyStatus = null,
+                            errorMessage = envelope.payload["message"]?.jsonPrimitive?.content
+                                ?: "消息订阅失败",
+                        )
+                    }
                     "session.list.ok", "history.get.ok" -> completeSyncReply(envelope)
                     "device.update.ok" -> Unit
                     // 仅旧 Core 不支持的 unsupported_command 静默降级；其他错误
@@ -2183,6 +2184,7 @@ class RealtimeSession(
             }
             WireKind.CONTROL -> {
                 when (envelope.type) {
+                    "session.message" -> applySessionMessage(envelope.payload)
                     "plugin.ui.changed" -> pluginUi.onCatalogChanged()
                     MOBILE_WEB_UI_RELEASE_CHANGED -> {
                         val serverId = requireNotNull(profile).serverId
@@ -2205,14 +2207,22 @@ class RealtimeSession(
         }
     }
 
-    private fun requestSessionList() {
+    private fun requestSessionList(cursor: SessionListCursor? = null) {
         if (hasPendingSyncCommand("session.list")) return
+        if (cursor == null) {
+            sessionListItems.clear()
+            sessionListTotal = null
+            sessionListNextCursor = null
+        }
         sendSyncCommand(
             type = "session.list",
             sessionId = null,
             payload = buildJsonObject {
-                if (legacySessionListGeneration != syncGeneration) {
-                    put("history_snapshot_version", 1)
+                put("message_log_version", 2)
+                put("page_size", 200)
+                cursor?.let {
+                    put("after_time", it.updatedAt)
+                    put("after_key", it.sessionId)
                 }
             },
         )
@@ -2331,10 +2341,8 @@ class RealtimeSession(
     private fun hasPendingSyncCommand(type: String): Boolean =
         pendingSyncCommands.values.any { it.generation == syncGeneration && it.type == type }
 
-    private suspend fun requestAllHistory(envelope: WireEnvelope) {
-        val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
+    private suspend fun requestAllHistory(sessions: List<RemoteSessionSummary>) {
         val forceReload = resetRebuildGeneration == syncGeneration
-        val sessions = payload.items
         var localProgress = sessions.associateWith {
             database.messages().historyProjectionProgress(it.sessionId)
         }
@@ -2371,16 +2379,10 @@ class RealtimeSession(
             if (action == HistorySyncAction.COMPLETE) continue
             if (session.messageCount == 0) continue
             val afterSeq = if (action == HistorySyncAction.RESET) -1L else local.maxServerSeq ?: -1L
-            val legacyPage = if (action == HistorySyncAction.RESET) {
-                1
-            } else {
-                local.messageCount / HISTORY_PAGE_SIZE + 1
-            }
             if (!requestHistoryCursor(
                     session.sessionId,
                     afterSeq,
                     snapshotMaxSeq = historyRequestSnapshotMaxSeq(action, session.snapshotMaxSeq),
-                    legacyPage = legacyPage,
                 )
             ) return
         }
@@ -2388,9 +2390,19 @@ class RealtimeSession(
 
     private fun applyRemoteSessionList(envelope: WireEnvelope) {
         val payload = ProtocolCodec.decodePayload<SessionListPayload>(envelope.payload)
-        mutableState.value = mutableState.value.copy(
-            remoteSessionIds = payload.items.mapTo(linkedSetOf()) { it.sessionId },
-        )
+        require(payload.version == 2 && payload.total >= 0) { "Session list v2 page is invalid" }
+        val expectedTotal = sessionListTotal
+        require(expectedTotal == null || expectedTotal == payload.total) {
+            "Session list total changed during pagination"
+        }
+        sessionListTotal = payload.total
+        payload.items.forEach { item ->
+            require(sessionListItems.putIfAbsent(item.sessionId, item) == null) {
+                "Session list repeated a session"
+            }
+        }
+        require(sessionListItems.size <= payload.total) { "Session list exceeded total" }
+        sessionListNextCursor = payload.nextCursor
     }
 
     private fun rememberRemoteSession(sessionId: String) {
@@ -2399,106 +2411,41 @@ class RealtimeSession(
         mutableState.value = mutableState.value.copy(remoteSessionIds = remoteSessionIds + sessionId)
     }
 
-    /** 记录事件信封的物理接收阶段；turn.started 在 applyEvent 前完成 send->turn 绑定。 */
-    private fun recordEnvelopeTrace(envelope: WireEnvelope) {
-        val sessionId = envelope.sessionId ?: return
-        val turnId = envelope.turnId ?: return
-        when (envelope.type) {
-            "turn.started" -> turnTrace.onTurnStartedReceived(
-                sessionId,
-                turnId,
-                envelope.payload["client_message_id"]?.jsonPrimitive?.contentOrNull,
-            )
-            "react.thinking.delta" -> turnTrace.onThinkingReceived(sessionId, turnId)
-            "answer.delta" -> turnTrace.onAnswerReceived(sessionId, turnId)
-            "message.final" -> turnTrace.onTerminalReceived(sessionId, turnId, "completed")
-            "turn.interrupted" -> turnTrace.onTerminalReceived(
-                sessionId,
-                turnId,
-                interruptedTerminalStatus(envelope.payload),
-            )
-            else -> Unit
-        }
-    }
-
-    /** 记录事件在 LocalDeliveryStore Room 事务提交后的阶段。 */
-    private fun recordRoomCommitTrace(envelope: WireEnvelope) {
-        val sessionId = envelope.sessionId ?: return
-        val turnId = envelope.turnId ?: return
-        when (envelope.type) {
-            "turn.started" -> turnTrace.onRoomCommitted(
-                sessionId, turnId, TurnTraceStage.TURN_STARTED_COMMITTED,
-            )
-            "react.thinking.delta" -> turnTrace.onRoomCommitted(
-                sessionId, turnId, TurnTraceStage.FIRST_THINKING_COMMITTED,
-            )
-            "answer.delta" -> turnTrace.onRoomCommitted(
-                sessionId, turnId, TurnTraceStage.FIRST_ANSWER_COMMITTED,
-            )
-            "message.final", "turn.interrupted" -> turnTrace.onRoomCommitted(
-                sessionId, turnId, TurnTraceStage.TERMINAL_COMMITTED,
-            )
-            else -> Unit
-        }
-    }
-
     private suspend fun requestNextHistoryPage(envelope: WireEnvelope) {
         val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
         val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        if (payload.contentRefVersion == null) {
-            val page = requireNotNull(payload.page) { "Legacy history page has no page" }
-            if (Triple(syncGeneration, sessionId, page) !in requestedHistoryPages) return
-            if (Math.multiplyExact(page.toLong(), payload.pageSize.toLong()) < payload.total.toLong()) {
-                requestLegacyHistoryPage(sessionId, page + 1)
-            }
-            return
-        }
-        require(payload.contentRefVersion == 1) { "History page content_ref_version mismatch" }
-        val afterSeq = requireNotNull(payload.afterSeq) { "History page has no after_seq" }
-        val nextAfterSeq = requireNotNull(payload.nextAfterSeq) { "History page has no next_after_seq" }
-        val snapshotMaxSeq = requireNotNull(payload.snapshotMaxSeq) {
-            "History page has no snapshot_max_seq"
-        }
-        val hasMore = requireNotNull(payload.hasMore) { "History page has no has_more" }
-        if (Triple(syncGeneration, sessionId, afterSeq) !in requestedHistoryCursors) return
-        require(nextAfterSeq in afterSeq..snapshotMaxSeq) { "History page next cursor is invalid" }
-        if (hasMore) {
-            require(nextAfterSeq > afterSeq) { "History page cursor did not advance" }
-            requestHistoryCursor(sessionId, nextAfterSeq, snapshotMaxSeq)
+        require(payload.version == 2) { "History page message version mismatch" }
+        if (Triple(syncGeneration, sessionId, payload.afterSeq) !in requestedHistoryCursors) return
+        require(payload.nextAfterSeq in payload.afterSeq..payload.throughSeq) { "History page next cursor is invalid" }
+        if (payload.hasMore) {
+            require(payload.nextAfterSeq > payload.afterSeq) { "History page cursor did not advance" }
+            requestHistoryCursor(sessionId, payload.nextAfterSeq, payload.throughSeq)
         } else {
-            val local = database.messages().historyProjectionProgress(sessionId)
-            if (!historyTerminalMatches(payload.total, local)) {
-                terminalHistoryMismatchGeneration = syncGeneration
-                restartHistorySyncAfterTerminalMismatch()
+            require(historyPageEnumerationComplete(payload)) {
+                "History terminal page did not reach through_seq"
             }
+            requestPendingNotificationTail(sessionId)
         }
+    }
+
+    /** 从本地高水位拉取尚未完成的持久通知 hint。 */
+    private suspend fun requestPendingNotificationTail(sessionId: String) {
+        val hints = database.pendingMessageNotifications().pendingHintsForSession(sessionId)
+        val throughSeq = hints.mapNotNull { it.headSeq }.maxOrNull() ?: return
+        val afterSeq = database.messages().historyProjectionProgress(sessionId).maxServerSeq ?: -1L
+        if (afterSeq < throughSeq) requestHistoryCursor(sessionId, afterSeq, throughSeq)
     }
 
     private fun requestHistoryCursor(
         sessionId: String,
         afterSeq: Long,
         snapshotMaxSeq: Long?,
-        legacyPage: Int? = null,
     ): Boolean {
         if (!requestedHistoryCursors.add(Triple(syncGeneration, sessionId, afterSeq))) return true
-        legacyPage?.let { requestedHistoryPages.add(Triple(syncGeneration, sessionId, it)) }
         return sendSyncCommand(
             type = "history.get",
             sessionId = sessionId,
             payload = historyCursorPayload(afterSeq, snapshotMaxSeq),
-            legacyPage = legacyPage,
-        )
-    }
-
-    private fun requestLegacyHistoryPage(sessionId: String, page: Int): Boolean {
-        if (!requestedHistoryPages.add(Triple(syncGeneration, sessionId, page))) return true
-        return sendSyncCommand(
-            type = "history.get",
-            sessionId = sessionId,
-            payload = buildJsonObject {
-                put("page", page)
-                put("page_size", HISTORY_PAGE_SIZE)
-            },
         )
     }
 
@@ -2506,7 +2453,6 @@ class RealtimeSession(
         type: String,
         sessionId: String?,
         payload: kotlinx.serialization.json.JsonObject,
-        legacyPage: Int? = null,
     ): Boolean {
         val epoch = requireNotNull(activeEpoch) { "History sync requires an authenticated connection" }
         val candidate = requireNotNull(activeCandidate) { "History sync requires an active endpoint" }
@@ -2515,9 +2461,6 @@ class RealtimeSession(
             generation = syncGeneration,
             type = type,
             sessionId = sessionId,
-            page = legacyPage ?: payload["page"]?.jsonPrimitive?.longOrNull?.also {
-                require(it in 1..Int.MAX_VALUE) { "历史同步 page 超出范围" }
-            }?.toInt(),
             afterSeq = payload["after_seq"]?.jsonPrimitive?.longOrNull?.also {
                 require(it >= -1) { "历史同步 after_seq 超出范围" }
             },
@@ -2555,31 +2498,22 @@ class RealtimeSession(
             require(envelope.payload["after_seq"]?.jsonPrimitive?.longOrNull == pending.afterSeq) {
                 "历史同步 reply after_seq 不匹配"
             }
-        } else if (pending.page != null) {
-            require(envelope.payload["page"]?.jsonPrimitive?.longOrNull == pending.page.toLong()) {
-                "历史同步 reply page 不匹配"
-            }
         }
-        if (restartHistorySyncAfterTerminalMismatch()) return
+        if (pending.type == "session.list") {
+            val total = requireNotNull(sessionListTotal) { "session.list reply arrived before its event" }
+            val next = sessionListNextCursor
+            if (next != null) {
+                requestSessionList(next)
+                return
+            }
+            require(sessionListItems.size == total) { "Session list terminal page did not reach total" }
+            val sessions = sessionListItems.values.toList()
+            mutableState.value = mutableState.value.copy(
+                remoteSessionIds = sessions.mapTo(linkedSetOf()) { it.sessionId },
+            )
+            requestAllHistory(sessions)
+        }
         finishSessionSyncIfComplete()
-    }
-
-    /** 终页数量不一致时清掉可重建投影，并从服务端取得一份新快照。 */
-    private suspend fun restartHistorySyncAfterTerminalMismatch(): Boolean {
-        if (terminalHistoryMismatchGeneration != syncGeneration) return false
-        if (pendingSyncCommands.isNotEmpty()) return false
-        val currentProfile = requireNotNull(profile)
-        terminalHistoryMismatchGeneration = null
-        deliveryStore.clearReloadableCache(
-            currentProfile.serverId,
-            mutableState.value.currentSessionId,
-        )
-        messageContentStore.reconcile()
-        mutableState.value = mutableState.value.copy(
-            projectionGeneration = mutableState.value.projectionGeneration + 1,
-        )
-        beginResetRebuild()
-        return true
     }
 
     /** 从 reset event 的新 cursor 开始重建当前服务端投影视图。 */
@@ -2593,7 +2527,6 @@ class RealtimeSession(
         pluginUi.onDisconnected("服务端要求重新同步")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
-        requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         mutableState.value = mutableState.value.copy(
             projectionGeneration = mutableState.value.projectionGeneration + 1,
@@ -2628,7 +2561,9 @@ class RealtimeSession(
         uploads.onConnectionReady(currentProfile.serverId)
         downloads.onConnectionReady(currentProfile.serverId)
         messageDownloads.onConnectionReady(currentProfile.serverId)
-        stops.onConnectionReady()
+        database.pendingMessageNotifications().pendingHints(currentProfile.serverId)
+            .map { it.sessionId }.distinct().forEach { requestPendingNotificationTail(it) }
+        currentSessionId?.let(::requestMessageFollow)
         flushOutbox()
         sendDeviceUpdateCommand()
     }
@@ -2655,22 +2590,58 @@ class RealtimeSession(
         )
     }
 
-    private fun sendTurnStopCommand(request: TurnStopRequest): Boolean {
-        val epoch = activeEpoch ?: return false
-        val candidate = activeCandidate ?: return false
-        return socket.send(
-            candidate,
-            WireEnvelope(
-                v = WIRE_PROTOCOL_VERSION,
-                kind = WireKind.COMMAND,
-                type = "turn.stop",
-                id = request.commandId,
-                connectionEpoch = epoch,
-                sessionId = request.sessionId,
-                turnId = request.turnId,
-                payload = buildJsonObject {},
-            ),
-        )
+    private suspend fun applySessionMessage(payload: JsonObject) {
+        val currentProfile = requireNotNull(profile)
+        val message = decodeSessionMessage(payload)
+        if (message.sessionId != mutableState.value.currentSessionId) return
+        when (message) {
+            is SessionMessageContent.Messages -> {
+                deliveryStore.applyMessageRows(
+                    currentProfile.serverId,
+                    message.sessionId,
+                    message.payload.items,
+                )
+                downloads.resumeIfIdle(currentProfile.serverId)
+                messageDownloads.resumeIfIdle(currentProfile.serverId)
+            }
+            is SessionMessageContent.ReplyStatus -> {
+                mutableState.value = mutableState.value.copy(replyStatus = message.payload)
+            }
+        }
+    }
+
+    private fun requestMessageFollow(sessionId: String) {
+        scope.launch {
+            val afterSeq = database.messages().historyProjectionProgress(sessionId).maxServerSeq ?: -1L
+            mutex.withLock {
+                val state = mutableState.value
+                val epoch = activeEpoch ?: return@withLock
+                val candidate = activeCandidate ?: return@withLock
+                if (
+                    state.connection.phase != ConnectionPhase.READY ||
+                    state.currentSessionId != sessionId
+                ) return@withLock
+                val commandId = Ulid.next()
+                pendingFollow = PendingFollowOwner(commandId, sessionId, epoch)
+                mutableState.value = mutableState.value.copy(replyStatus = null)
+                val payload = ProtocolCodec.json().encodeToJsonElement(
+                    SessionFollowPayload.serializer(),
+                    SessionFollowPayload(afterSeq = afterSeq),
+                ).jsonObject
+                if (!socket.send(candidate, WireEnvelope(
+                        v = WIRE_PROTOCOL_VERSION,
+                        kind = WireKind.COMMAND,
+                        type = "session.follow",
+                        id = commandId,
+                        connectionEpoch = epoch,
+                        sessionId = sessionId,
+                        payload = payload,
+                    ))) {
+                    if (pendingFollow?.id == commandId) pendingFollow = null
+                    scheduleReconnect("消息订阅未进入 WebSocket 队列")
+                }
+            }
+        }
     }
 
     /** 认证连接建立后刷新能力声明，让升级 APK 无需重新配对即可接收新事件。 */
@@ -2695,61 +2666,6 @@ class RealtimeSession(
                 },
             ),
         )
-    }
-
-    private suspend fun persistTurnStop(request: TurnStopRequest) {
-        val currentProfile = requireNotNull(profile) { "停止生成时不存在已配对服务器" }
-        database.pendingTurnStops().insert(
-            PendingTurnStopEntity(
-                commandId = request.commandId,
-                serverId = currentProfile.serverId,
-                sessionId = request.sessionId,
-                turnId = request.turnId,
-                createdAt = System.currentTimeMillis(),
-            ),
-        )
-    }
-
-    private suspend fun removePersistedTurnStop(commandId: String) {
-        check(database.pendingTurnStops().delete(commandId) == 1) {
-            "持久停止请求不存在: $commandId"
-        }
-    }
-
-    /** 从 streaming 消息和持久 stop 意图恢复当前服务器的交互状态。 */
-    private suspend fun restoreTurnStops(serverId: String) {
-        // 1. streaming assistant 消息是活动 turn 的本地持久投影
-        val activeMessages = database.messages().activeAssistantTurns(serverId)
-        require(activeMessages.distinctBy { it.sessionId }.size == activeMessages.size) {
-            "同一会话存在多个 streaming assistant turn"
-        }
-        val activeTurns = activeMessages.associate { message ->
-            val turnId = message.messageId.removePrefix(ASSISTANT_TURN_PREFIX)
-            require(turnId.isNotBlank()) { "Streaming assistant turn id is empty" }
-            message.sessionId to turnId
-        }
-
-        // 2. 仅恢复仍属于活动 turn 的 stop，终态残留由 coordinator 清理
-        val pendingStops = database.pendingTurnStops().listForServer(serverId).map { stop ->
-            TurnStopRequest(stop.commandId, stop.sessionId, stop.turnId)
-        }
-        stops.restore(activeTurns, pendingStops)
-    }
-
-    /** 用 canonical history 收束漏收 final 的本地活动 turn；返回被收敛的 turnId。 */
-    private suspend fun reconcileHistoryTurnTerminals(envelope: WireEnvelope): String? {
-        val sessionId = requireNotNull(envelope.sessionId)
-        val activeTurnId = stops.activeTurnId(sessionId) ?: return null
-        val history = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        if (history.items.any { item ->
-                item.role == "assistant" &&
-                    item.extra["control_turn_id"]?.jsonPrimitive?.contentOrNull == activeTurnId
-            }
-        ) {
-            stops.onTurnTerminal(sessionId, activeTurnId)
-            return activeTurnId
-        }
-        return null
     }
 
     private suspend fun flushOutbox() {
@@ -2778,12 +2694,6 @@ class RealtimeSession(
             if (!socket.send(candidate, wire)) {
                 activeOutboxCommandId = null
                 deliveryStore.retryOutbox(command.commandId)
-            } else {
-                // 1. 只有写入 WebSocket 成功才算 dispatched；outbox 仅承载 message.send，session_id 必非空
-                turnTrace.onSocketDispatched(
-                    requireNotNull(stored.sessionId) { "Outbox 命令缺少 session_id" },
-                    command.commandId,
-                )
             }
             return
         }
@@ -2827,7 +2737,6 @@ class RealtimeSession(
         if (deviceRevoked) return
         reconnectJob?.cancel()
         resetGenerationState()
-        turnTrace.reset()
         val generation = socket.connectRace(
             qr.lanEndpoints.lanEndpoints(qr.tlsSpkiPins),
             qr.tunnelEndpoints.tunnelEndpoints(),
@@ -2911,8 +2820,19 @@ class RealtimeSession(
             null,
         ) ?: return null
         preferences.selectSession(sessionId)
-        mutableState.value = mutableState.value.copy(currentSessionId = sessionId)
+        publishSelectedSession(sessionId)
         return sessionId
+    }
+
+    /** 会话身份改变时同步推进 WebUI 投影 generation。 */
+    private fun publishSelectedSession(sessionId: String?) {
+        val state = mutableState.value
+        if (state.currentSessionId == sessionId) return
+        mutableState.value = state.copy(
+            currentSessionId = sessionId,
+            projectionGeneration = state.projectionGeneration + 1,
+            replyStatus = null,
+        )
     }
 
     private suspend fun isRemoteMissingSession(serverId: String, sessionId: String): Boolean {
@@ -2985,10 +2905,10 @@ class RealtimeSession(
         pendingSyncCommands.clear()
         pendingCommandListId = null
         pendingSessionCreateId = null
+        pendingFollow = null
         pluginUi.onDisconnected("连接已中断")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
-        requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         resetRebuildGeneration = null
         retryCount += 1
@@ -3115,7 +3035,6 @@ class RealtimeSession(
         pluginUi.onDisconnected("协议不兼容")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
-        requestedHistoryPages.clear()
         requestedHistoryCursors.clear()
         resetRebuildGeneration = null
 
@@ -3197,16 +3116,6 @@ class RealtimeSession(
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
         mobileWebUi.onDisconnected()
-    }
-
-    private fun publishTurnState() {
-        val sessionId = mutableState.value.currentSessionId
-        mutableState.value = mutableState.value.copy(
-            activeTurnId = stops.activeTurnId(sessionId),
-            activeSessionIds = stops.activeSessionIds(),
-            isStopping = stops.isStopping(sessionId),
-            outputCompleted = stops.isOutputCompleted(sessionId),
-        )
     }
 
     private fun publishDownloadState(active: Boolean) {
@@ -3313,10 +3222,6 @@ class RealtimeSession(
             MOBILE_WEB_UI_CAPABILITY,
             TURN_OUTPUT_COMPLETED_CAPABILITY,
         )
-        val LEGACY_HISTORY_FALLBACK_CODES = setOf(
-            "invalid_payload",
-            "unsupported_content_ref_version",
-        )
         val AKASHIC_SESSION = Regex("^akashic:[0-9a-f]{32}$")
         const val ACK_DELAY_MILLIS = 100L
         const val ACK_EVENT_LIMIT = 32
@@ -3328,10 +3233,10 @@ class RealtimeSession(
 
 internal fun historyCursorPayload(afterSeq: Long, snapshotMaxSeq: Long?): JsonObject =
     buildJsonObject {
+        put("message_log_version", 2)
         put("page_size", HISTORY_PAGE_SIZE)
-        put("content_ref_version", 1)
         put("after_seq", afterSeq)
-        snapshotMaxSeq?.let { put("snapshot_max_seq", it) }
+        snapshotMaxSeq?.let { put("through_seq", it) }
     }
 
 internal fun endHistoryReload(state: MobileSessionState, errorMessage: String): MobileSessionState =

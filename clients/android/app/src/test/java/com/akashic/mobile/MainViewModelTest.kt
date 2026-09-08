@@ -1,8 +1,6 @@
 package com.akashic.mobile
 
 import com.akashic.mobile.data.local.ConversationSummary
-import com.akashic.mobile.data.local.MessageEntity
-import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.data.local.PersistedIncomingShare
 import com.akashic.mobile.data.local.canRemoveFrom
 import com.akashic.mobile.data.local.isRemoteMissingIn
@@ -11,7 +9,9 @@ import com.akashic.mobile.data.realtime.endHistoryReload
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.ui.conversation.ConnectionStatusUi
-import com.akashic.mobile.ui.conversation.MessageUi
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -19,33 +19,11 @@ import org.junit.Test
 
 class MainViewModelTest {
     @Test
-    fun activeTurnUsesPersistedStreamingMessageIdentity() {
-        val settled = messageGraph("message:settled", createdAt = 1, text = "old")
-        val legacyActive = messageGraph(
-            "assistant:turn:legacy",
-            createdAt = 2,
-            text = "",
-        )
-
-        assertEquals(1, activeTurnIndex(listOf(settled, legacyActive), "turn:legacy"))
-        assertEquals(-1, activeTurnIndex(listOf(settled), "turn:legacy"))
-    }
-
-    @Test
-    fun streamingTailReplacesLiveRowsWithoutRebuildingSettledHistory() {
-        val settled = MessageUi.User("settled", "session", "old", "已发送", true, createdAtMillis = 1, reply = null)
-        val activeBefore = settled.copy(id = "active", text = "a", createdAtMillis = 2)
-        val activeAfter = activeBefore.copy(text = "ab")
-        val sameTurnInput = settled.copy(id = "input", text = "继续", createdAtMillis = 3)
-
-        val merged = mergeStreamingTail(
-            frozenPrefix = listOf(settled, activeBefore),
-            liveTail = listOf(activeAfter, sameTurnInput),
-        )
-
-        assertSame(settled, merged[0])
-        assertSame(activeAfter, merged[1])
-        assertSame(sameTurnInput, merged[2])
+    fun projectionDataRequiresTheSameServerSessionAndGeneration() {
+        assertEquals(true, projectionIdentityMatches("server-a", "akashic:a", 7, "server-a", "akashic:a", 7))
+        assertEquals(false, projectionIdentityMatches("server-old", "akashic:a", 7, "server-a", "akashic:a", 7))
+        assertEquals(false, projectionIdentityMatches("server-a", "akashic:old", 7, "server-a", "akashic:a", 7))
+        assertEquals(false, projectionIdentityMatches("server-a", "akashic:a", 6, "server-a", "akashic:a", 7))
     }
 
     @Test
@@ -72,7 +50,33 @@ class MainViewModelTest {
             ),
         )
         assertEquals(false, canReloadServerProjection(degraded.copy(isReloadingHistory = true)))
-        assertEquals(false, canReloadServerProjection(degraded.copy(activeTurnId = "turn:active")))
+        assertEquals(
+            false,
+            canReloadServerProjection(
+                degraded.copy(
+                    replyStatus = buildJsonObject {
+                        put("type", "reply.status")
+                        put("version", 2)
+                        put("session_id", "akashic:test")
+                        put("snapshot_id", "reply-snapshot-1")
+                        put("available", true)
+                        put("items", buildJsonArray {
+                            add(buildJsonObject {
+                                put("session_id", "akashic:test")
+                                put("source", "conversation")
+                                put("handle", "reply-1")
+                                put("active", true)
+                                put("preview", buildJsonObject {
+                                    put("message_id", "reply-1")
+                                    put("text", "")
+                                    put("thinking", "")
+                                })
+                            })
+                        })
+                    },
+                ),
+            ),
+        )
         assertEquals(false, canReloadServerProjection(degraded.copy(hasActiveAttachmentDownload = true)))
     }
 
@@ -161,20 +165,6 @@ class MainViewModelTest {
     }
 
     @Test
-    fun turnDurationRoundsUpOnlyAfterTerminalMessage() {
-        assertNull(turnDurationSeconds(startedAt = 1_000, updatedAt = 2_001, isTerminal = false))
-        assertEquals(2, turnDurationSeconds(startedAt = 1_000, updatedAt = 2_001, isTerminal = true))
-    }
-
-    @Test
-    fun userMessageBecomesReplyableOnlyAfterCanonicalCommit() {
-        assertEquals(false, userMessageCanReply("pending"))
-        assertEquals(false, userMessageCanReply("sent"))
-        assertEquals(false, userMessageCanReply("failed"))
-        assertEquals(true, userMessageCanReply("complete"))
-    }
-
-    @Test
     fun remoteMissingBlocksSendingWhileLocalWorkOnlyBlocksRemoval() {
         val remote = ConversationSummary(
             sessionId = "akashic:remote",
@@ -199,22 +189,3 @@ class MainViewModelTest {
         assertEquals(false, pending.canRemoveFrom(emptySet()))
     }
 }
-
-private fun messageGraph(
-    id: String,
-    createdAt: Long,
-    text: String,
-): MessageWithBlocks = MessageWithBlocks(
-    message = MessageEntity(
-        messageId = id,
-        clientMessageId = null,
-        sessionId = "akashic:test",
-        role = "assistant",
-        text = text,
-        deliveryState = "streaming",
-        createdAt = createdAt,
-        updatedAt = createdAt,
-    ),
-    blocks = emptyList(),
-    attachmentLinks = emptyList(),
-)

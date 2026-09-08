@@ -21,6 +21,8 @@
 
 跨边界变化必须同时声明生产者、消费者、权威状态和客户端替代方案。移动端仓库保持独立构建，不通过 submodule 复制核心运行时。
 
+Input 的身份在边界上只有一个值：客户端先生成 `message.send` frame ID，Core 接纳后把同值保存为 `Message.id`。Room v18 把旧 `user:<首次 clientMessageId>` 本地行迁到当前 `clientMessageId`；旧版明确失败重试会更新后者和 outbox，但保留前者作为视觉身份。旧协议已经投影为 `<sessionId>:<seq>` canonical ID 的 Input 保留该 ID，只退役 `clientMessageId`，避免现行历史按原 ID 补全时产生重复。完整远端 Input 是补结算 outbox 的成功证据，未完成的 restoring 行及下载进度继续保留。迁移只移动没有服务端序号、正文和来源的 `user:` 本地行，拒绝猜测其他旧 ID 形状。
+
 ## 验证
 
 任务合同和 PR 必须列出能力 owner、持久化增减与受保护状态；Runtime Contract 验证固定核心与移动端组合。

@@ -10,11 +10,11 @@
 
 ## 决定
 
-1. `history.get` 新客户端使用冻结的 seq 高水位和游标分页；旧 page/page_size 请求保持兼容。
-2. 超过事件预算的正文在历史页中改为 `content_ref`，其中只含版本、UTF-8 字节长度、SHA-256 和预览；thinking、tool block、顺序和消息身份不外移。
+1. `history.get` 使用 `after_seq + through_seq` 冻结 Message 日志前缀，不兼容旧分页。
+2. 超过事件预算的整条 Message JSON 在历史页中改为 `message_ref`，其中只含版本、UTF-8 字节长度和 SHA-256；不保存可见预览或并行 block 投影。
 3. 客户端通过 WebSocket 的 `message.content.prepare` 取得短期 ticket，再从当前活动 endpoint 派生的同源 HTTPS route 以单段、最多 256 KiB 的 Range 请求恢复正文。
 4. ticket 绑定服务器、设备、连接 epoch、会话、消息、长度和摘要；HTTP 不接受 redirect，并复用配对建立的证书信任。
-5. 客户端每段先写私有临时文件并 `fsync`，再保存确认偏移。只有完整长度、SHA-256 和严格 UTF-8 校验通过时，才在 Room 事务中替换预览并结束传输。
+5. 客户端每段先写私有临时文件并 `fsync`，再保存确认偏移。只有完整长度、SHA-256、严格 UTF-8、Message 身份、Session 和 `seq` 全部通过时，才在 Room 事务中提交整条 Message 并结束传输。
 
 ## 理由
 
@@ -22,10 +22,10 @@ WebSocket 保留有序控制和小事件，HTTPS 提供成熟的 Range、条件�
 
 ## 后果
 
-- Room schema 升至 v12，新增历史正文传输记录；应用私有目录新增 `message-content` 临时文件。
+- 自 Room v17 起，传输记录绑定 `messageId + sessionId + messageSeq`；v18 的 Input 身份迁移保留该记录与确认偏移，应用私有目录继续保留 `message-content` 临时文件。
 - 普通断线和进程退出不清除已确认片段；重载服务端投影时级联删除记录并清理孤立文件。
-- 新客户端遇到旧核心时继续使用旧历史分页；旧客户端遇到无法装入事件预算的正文时由核心明确要求升级，不返回假完整内容。
-- 协议快照和 Runtime Contract 固定核心提交 `b7d86d6fe2b69b5310e9a15e3fb9d50ce97c750a`。
+- 旧协议在 Message v2 边界明确失败，不返回假完整内容。
+- 协议快照和 Runtime Contract 使用仓库当前锁文件固定的核心提交。
 
 ## 验证
 

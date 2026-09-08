@@ -14,40 +14,75 @@ import okio.ByteString.Companion.toByteString
 
 class ProtocolCodecTest {
     @Test
-    fun `decodes history attachment degradation without relaxing unknown keys`() {
+    fun `decodes fixed core message content grant exactly`() {
+        val sha256 = "a".repeat(64)
+        val payload = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "version": 2,
+              "message_id": "message-1",
+              "byte_length": 42,
+              "sha256": "$sha256",
+              "encoding": "utf-8",
+              "media_type": "application/json",
+              "path": "/mobile/message-content/v2",
+              "ticket": "signed-ticket",
+              "expires_at": "2026-09-08T08:01:00Z"
+            }
+            """.trimIndent(),
+        ).jsonObject
+
+        val grant = ProtocolCodec.decodePayload<MessageContentGrantPayload>(payload)
+
+        assertEquals(2, grant.version)
+        assertEquals("utf-8", grant.encoding)
+        assertEquals("application/json", grant.mediaType)
+        assertEquals(MESSAGE_CONTENT_HTTP_PATH, grant.path)
+    }
+
+    @Test
+    fun `decodes message log v2 row without relaxing unknown keys`() {
         val payload = ProtocolCodec.json().parseToJsonElement(
             """
             {
               "items": [{
-                "id": "akashic:test:1",
-                "session_key": "akashic:test",
-                "seq": 1,
-                "role": "assistant",
-                "content": "正文仍然可用",
-                "extra": {},
-                "ts": "2026-08-12T05:00:00Z",
-                "attachments": [],
-                "attachment_error": {
-                  "code": "media_unavailable",
-                  "message": "附件源暂时不可用"
-                }
+                "id": "message-1",
+                "session_id": "akashic:test",
+                "seq": 9007199254740991,
+                "timestamp": "2026-08-12T05:00:00Z",
+                "author": "assistant",
+                "source": "akashic",
+                "body": {"kind": "output", "finish": "complete", "parts": [{"kind": "text", "value": "正文仍然可用"}]},
+                "metadata": {"reply_to": "message-0"},
+                "attachments": [{
+                  "artifact_id": "artifact-1",
+                  "kind": "image",
+                  "filename": "result.png",
+                  "media_type": "image/png",
+                  "size_bytes": 42,
+                  "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                }]
               }],
-              "total": 1,
-              "page": 1,
-              "page_size": 50
+              "version": 2,
+              "after_seq": 0,
+              "next_after_seq": 9007199254740991,
+              "through_seq": 9007199254740991,
+              "has_more": false
             }
             """.trimIndent(),
         ).jsonObject
 
         val decoded = ProtocolCodec.decodePayload<HistoryPagePayload>(payload).items.single()
 
-        assertEquals("正文仍然可用", decoded.content)
-        assertEquals(emptyList<AttachmentDescriptor>(), decoded.attachments)
-        assertEquals("media_unavailable", decoded.attachmentError?.code)
-        assertEquals("附件源暂时不可用", decoded.attachmentError?.message)
+        assertEquals("message-1", decoded.id)
+        assertEquals("akashic:test", decoded.sessionId)
+        assertEquals(9_007_199_254_740_991L, decoded.seq)
+        assertEquals("output", decoded.body?.get("kind")?.toString()?.trim('"'))
+        assertEquals("message-0", decoded.metadata?.get("reply_to")?.toString()?.trim('"'))
+        assertEquals("artifact-1", decoded.attachments.single().artifactId)
 
         val unknownPayload = ProtocolCodec.json().parseToJsonElement(
-            payload.toString().replace("attachment_error", "unexpected_attachment_error"),
+            payload.toString().replace("\"metadata\"", "\"unexpected_metadata\""),
         ).jsonObject
         assertThrows(SerializationException::class.java) {
             ProtocolCodec.decodePayload<HistoryPagePayload>(unknownPayload)
@@ -69,54 +104,7 @@ class ProtocolCodecTest {
 
         assertEquals(6, envelopes.size)
         assertEquals("2026-07-14T12:00:00+08:00", messagePayload.clientCreatedAt)
-        assertEquals(listOf("turn-1"), resumePayload.activeTurns)
-    }
-
-    @Test
-    fun `decodes ordered answer event`() {
-        val frame = """
-            {
-              "v": 1,
-              "kind": "event",
-              "type": "answer.delta",
-              "id": "01J00000000000000000000002",
-              "connection_epoch": 7,
-              "event_seq": 1842,
-              "session_id": "akashic:session",
-              "turn_id": "turn-1",
-              "payload": {"delta": "你好"}
-            }
-        """.trimIndent()
-
-        val envelope = ProtocolCodec.decode(frame)
-
-        assertEquals(WireKind.EVENT, envelope.kind)
-        assertEquals(1842L, envelope.eventSeq)
-        assertEquals("你好", envelope.payload["delta"]?.toString()?.trim('"'))
-    }
-
-    @Test
-    fun `decodes output completed event and declares its capability`() {
-        assertEquals("turn-output-completed-v1", TURN_OUTPUT_COMPLETED_CAPABILITY)
-        val frame = """
-            {
-              "v": 1,
-              "kind": "event",
-              "type": "turn.output.completed",
-              "id": "01J00000000000000000000003",
-              "connection_epoch": 7,
-              "event_seq": 1843,
-              "session_id": "akashic:session",
-              "turn_id": "turn-1",
-              "payload": {"client_message_id": "cmid-1"}
-            }
-        """.trimIndent()
-
-        val envelope = ProtocolCodec.decode(frame)
-
-        assertEquals(WireKind.EVENT, envelope.kind)
-        assertEquals("turn.output.completed", envelope.type)
-        assertEquals("turn-1", envelope.turnId)
+        assertEquals(emptyList<String>(), resumePayload.activeTurns)
     }
 
     @Test
@@ -133,19 +121,95 @@ class ProtocolCodecTest {
     }
 
     @Test
-    fun `round trips turn stop with current identity`() {
+    fun `production follow path and message stream types match fixed core schema`() {
+        val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val follow = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "session.follow",
+            id = commandId,
+            connectionEpoch = 7,
+            sessionId = "akashic:one",
+            payload = ProtocolCodec.json().encodeToJsonElement(
+                SessionFollowPayload.serializer(),
+                SessionFollowPayload(afterSeq = 42),
+            ).jsonObject,
+        )
+
+        assertEquals(follow, ProtocolCodec.decode(ProtocolCodec.encode(follow)))
+        for (replyType in listOf("session.follow.ok", "session.follow.error")) {
+            val reply = follow.copy(kind = WireKind.REPLY, type = replyType)
+            assertEquals(reply, ProtocolCodec.decode(ProtocolCodec.encode(reply)))
+        }
+        for (messageType in listOf("messages.appended", "reply.status")) {
+            val control = WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION,
+                kind = WireKind.CONTROL,
+                type = "session.message",
+                connectionEpoch = 7,
+                payload = buildJsonObject { put("type", messageType) },
+            )
+            assertEquals(control, ProtocolCodec.decode(ProtocolCodec.encode(control)))
+        }
+    }
+
+    @Test
+    fun `fixed core type rules accept current extensions and reject retired turn stop`() {
+        val command = WireEnvelope(
+            v = WIRE_PROTOCOL_VERSION,
+            kind = WireKind.COMMAND,
+            type = "model.call.get",
+            id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+            connectionEpoch = 7,
+        )
+        val specialReply = command.copy(kind = WireKind.REPLY, type = "message.content.ready")
+
+        assertEquals(command, ProtocolCodec.decode(ProtocolCodec.encode(command)))
+        assertEquals(specialReply, ProtocolCodec.decode(ProtocolCodec.encode(specialReply)))
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtocolCodec.encode(command.copy(type = "turn.stop"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ProtocolCodec.encode(command.copy(kind = WireKind.REPLY, type = "turn.stop.ok"))
+        }
+    }
+
+    @Test
+    fun `round trips stop as a normal message command`() {
         val envelope = WireEnvelope(
             v = WIRE_PROTOCOL_VERSION,
             kind = WireKind.COMMAND,
-            type = "turn.stop",
+            type = "message.send",
             id = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             connectionEpoch = 7,
             sessionId = "akashic:one",
-            turnId = "turn-1",
-            payload = buildJsonObject {},
+            payload = buildJsonObject {
+                put("message_log_version", 2)
+                put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+                put("session_id", "akashic:one")
+                put("text", "/stop")
+                put("media_refs", kotlinx.serialization.json.buildJsonArray {})
+                put("client_created_at", "2026-09-08T08:00:00Z")
+            },
         )
 
         assertEquals(envelope, ProtocolCodec.decode(ProtocolCodec.encode(envelope)))
+    }
+
+    @Test
+    fun `message send ok carries acceptance and the acknowledged client identity`() {
+        val payload = buildJsonObject {
+            put("accepted", true)
+            put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV")
+        }
+
+        val decoded = ProtocolCodec.decodePayload<MessageSendOkPayload>(payload)
+
+        assertEquals(true, decoded.accepted)
+        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", decoded.clientMessageId)
+        assertThrows(SerializationException::class.java) {
+            ProtocolCodec.decodePayload<MessageSendOkPayload>(buildJsonObject { put("accepted", true) })
+        }
     }
 
     @Test
@@ -281,14 +345,14 @@ class ProtocolCodecTest {
     }
 
     @Test
-    fun `round trips proactive delivery reply identity`() {
+    fun `round trips canonical message reply identity`() {
         val payload = MessageSendPayload(
             clientMessageId = "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             sessionId = "akashic:one",
             text = "继续说",
             mediaRefs = emptyList(),
             clientCreatedAt = "2026-07-20T00:00:00Z",
-            replyTo = MessageReplyReference(deliveryId = "delivery-42"),
+            replyTo = MessageReplyReference(messageId = "message-42"),
         )
 
         val encoded = ProtocolCodec.json().encodeToJsonElement(
@@ -297,8 +361,7 @@ class ProtocolCodecTest {
         ).jsonObject
         val decoded = ProtocolCodec.decodePayload<MessageSendPayload>(encoded)
 
-        assertEquals("delivery-42", decoded.replyTo?.deliveryId)
-        assertEquals(null, decoded.replyTo?.messageId)
+        assertEquals("message-42", decoded.replyTo?.messageId)
     }
 
     @Test

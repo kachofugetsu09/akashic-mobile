@@ -177,15 +177,13 @@ data class WireEnvelope(
 @Serializable
 data class MessageReplyReference(
     @SerialName("message_id")
-    val messageId: String? = null,
-    @SerialName("client_message_id")
-    val clientMessageId: String? = null,
-    @SerialName("delivery_id")
-    val deliveryId: String? = null,
+    val messageId: String,
 )
 
 @Serializable
 data class MessageSendPayload(
+    @SerialName("message_log_version")
+    val messageLogVersion: Int = 2,
     @SerialName("client_message_id")
     val clientMessageId: String,
     @SerialName("retry_of_client_message_id")
@@ -335,6 +333,21 @@ data class PairAcceptedPayload(
 @Serializable
 data class SessionListPayload(
     val items: List<RemoteSessionSummary>,
+    val version: Int,
+    val total: Int,
+    @SerialName("next_cursor") val nextCursor: SessionListCursor? = null,
+)
+
+@Serializable
+data class SessionListCursor(
+    @SerialName("updated_at") val updatedAt: String,
+    @SerialName("session_id") val sessionId: String,
+)
+
+@Serializable
+data class MessageSendOkPayload(
+    val accepted: Boolean,
+    @SerialName("client_message_id") val clientMessageId: String,
 )
 
 @Serializable
@@ -544,30 +557,40 @@ data class RemoteSessionSummary(
     val title: String,
     @SerialName("updated_at") val updatedAt: String,
     @SerialName("message_count") val messageCount: Int,
-    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
-)
+    @SerialName("head_seq") val headSeq: Long,
+) {
+    val snapshotMaxSeq: Long get() = headSeq
+}
 
 @Serializable
 data class HistoryPagePayload(
     val items: List<RemoteHistoryMessage>,
-    val title: String? = null,
-    val total: Int,
-    val page: Int? = null,
-    @SerialName("page_size") val pageSize: Int,
-    @SerialName("content_ref_version") val contentRefVersion: Int? = null,
-    @SerialName("after_seq") val afterSeq: Long? = null,
-    @SerialName("next_after_seq") val nextAfterSeq: Long? = null,
-    @SerialName("snapshot_max_seq") val snapshotMaxSeq: Long? = null,
-    @SerialName("has_more") val hasMore: Boolean? = null,
+    val version: Int,
+    @SerialName("after_seq") val afterSeq: Long,
+    @SerialName("next_after_seq") val nextAfterSeq: Long,
+    @SerialName("through_seq") val throughSeq: Long,
+    @SerialName("has_more") val hasMore: Boolean,
+)
+
+@Serializable
+data class MessagesAppendedPayload(
+    val type: String,
+    val version: Int,
+    @SerialName("session_id") val sessionId: String,
+    val items: List<RemoteHistoryMessage>,
+    @SerialName("after_seq") val afterSeq: Long,
+    @SerialName("next_after_seq") val nextAfterSeq: Long,
+    @SerialName("through_seq") val throughSeq: Long,
+    @SerialName("has_more") val hasMore: Boolean,
 )
 
 @Serializable
 data class MessageContentRef(
     val version: Int,
     val encoding: String,
+    @SerialName("media_type") val mediaType: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,
-    val preview: String,
 )
 
 @Serializable
@@ -579,24 +602,36 @@ data class AttachmentAvailabilityError(
 @Serializable
 data class RemoteHistoryMessage(
     val id: String,
-    @SerialName("session_key") val sessionKey: String,
-    val seq: Int,
-    val role: String,
-    val content: String? = null,
-    @SerialName("content_ref") val contentRef: MessageContentRef? = null,
-    @SerialName("tool_chain") val toolChain: JsonElement? = null,
-    val extra: JsonObject,
-    val ts: String,
-    @SerialName("client_message_id") val clientMessageId: String? = null,
-    @SerialName("reply_to_message_id") val replyToMessageId: String? = null,
-    @SerialName("reply_role") val replyRole: String? = null,
-    @SerialName("reply_preview") val replyPreview: String? = null,
-    val attachments: List<AttachmentDescriptor> = emptyList(),
-    @SerialName("attachment_error") val attachmentError: AttachmentAvailabilityError? = null,
+    @SerialName("session_id") val sessionId: String,
+    val seq: Long,
+    val timestamp: String? = null,
+    val author: String? = null,
+    val source: String? = null,
+    val body: JsonObject? = null,
+    val metadata: JsonObject? = null,
+    @SerialName("message_ref") val messageRef: MessageContentRef? = null,
+    val attachments: List<TimelineAttachmentDescriptor> = emptyList(),
+)
+
+@Serializable
+data class TimelineAttachmentDescriptor(
+    @SerialName("artifact_id") val artifactId: String,
+    val kind: String,
+    val filename: String? = null,
+    @SerialName("media_type") val mediaType: String? = null,
+    @SerialName("size_bytes") val sizeBytes: Long,
+    val sha256: String,
+)
+
+@Serializable
+data class SessionFollowPayload(
+    @SerialName("message_log_version") val messageLogVersion: Int = 2,
+    @SerialName("after_seq") val afterSeq: Long,
 )
 
 @Serializable
 data class MessageContentPreparePayload(
+    @SerialName("message_log_version") val messageLogVersion: Int = 2,
     @SerialName("message_id") val messageId: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,
@@ -604,9 +639,12 @@ data class MessageContentPreparePayload(
 
 @Serializable
 data class MessageContentGrantPayload(
+    val version: Int,
     @SerialName("message_id") val messageId: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,
+    val encoding: String,
+    @SerialName("media_type") val mediaType: String,
     val path: String,
     val ticket: String,
     @SerialName("expires_at") val expiresAt: String,
@@ -628,36 +666,50 @@ object ProtocolCodec {
         coerceInputValues = false
     }
 
+    private val commandTypes = setOf(
+        "session.list",
+        "session.create",
+        "session.open",
+        "session.follow",
+        "history.get",
+        "message.content.prepare",
+        "message.send",
+        "attachment.begin",
+        "attachment.finish",
+        "attachment.download",
+        "command.list",
+        "model.catalog.get",
+        "model.call.get",
+        "runtime.document.list",
+        "runtime.document.get",
+        "runtime.capability.list",
+        "runtime.mcp.get",
+        "scheduler.job.list",
+        "scheduler.job.get",
+        "plugin.ui.catalog",
+        "plugin.ui.asset.get",
+        "plugin.ui.query",
+        "plugin.ui.query.prepare",
+        "plugin.ui.cancel",
+        MOBILE_WEB_UI_RELEASE_GET,
+        MOBILE_WEB_UI_CONTENT_PREPARE,
+        "device.update",
+        "ping",
+    )
+
+    private val specialReplyTypes = setOf(
+        "session.created",
+        "message.content.ready",
+        "plugin.ui.catalog.not_modified",
+        "plugin.ui.query.ready",
+    )
+
+    private val replyTypePattern = Regex(
+        "^([a-z][a-z0-9]*(?:\\.[a-z][a-z0-9_]*)+)\\.(?:ok|error)$",
+    )
+
     private val knownTypes = mapOf(
-        WireKind.COMMAND to setOf(
-            "session.list",
-            "session.create",
-            "session.open",
-            "history.get",
-            "message.content.prepare",
-            "message.send",
-            "turn.stop",
-            "attachment.begin",
-            "attachment.finish",
-            "attachment.download",
-            "command.list",
-            "model.catalog.get",
-            "runtime.document.list",
-            "runtime.document.get",
-            "runtime.capability.list",
-            "runtime.mcp.get",
-            "scheduler.job.list",
-            "scheduler.job.get",
-            "plugin.ui.catalog",
-            "plugin.ui.asset.get",
-            "plugin.ui.query",
-            "plugin.ui.query.prepare",
-            "plugin.ui.cancel",
-            MOBILE_WEB_UI_RELEASE_GET,
-            MOBILE_WEB_UI_CONTENT_PREPARE,
-            "device.update",
-            "ping",
-        ),
+        WireKind.COMMAND to commandTypes,
         WireKind.EVENT to setOf(
             "session.list",
             "session.created",
@@ -683,6 +735,7 @@ object ProtocolCodec {
             "device.proof",
             "auth.accepted",
             "resume",
+            "session.message",
             "plugin.ui.changed",
             MOBILE_WEB_UI_RELEASE_CHANGED,
             "device.revoked",
@@ -727,6 +780,12 @@ object ProtocolCodec {
         knownTypes[envelope.kind]?.let { types ->
             require(envelope.type in types) { "Unsupported ${envelope.kind} type: ${envelope.type}" }
         }
+        if (envelope.kind == WireKind.REPLY) {
+            val command = replyTypePattern.matchEntire(envelope.type)?.groupValues?.get(1)
+            require(envelope.type in specialReplyTypes || command in commandTypes) {
+                "Unsupported REPLY type: ${envelope.type}"
+            }
+        }
 
         when (envelope.kind) {
             WireKind.COMMAND,
@@ -754,7 +813,7 @@ object ProtocolCodec {
                 "Authenticated frames require a positive connection_epoch"
             }
             WireKind.CONTROL -> when (envelope.type) {
-                "auth.accepted", "resume", "plugin.ui.changed", MOBILE_WEB_UI_RELEASE_CHANGED, "device.revoked" -> require(
+                "auth.accepted", "resume", "session.message", "plugin.ui.changed", MOBILE_WEB_UI_RELEASE_CHANGED, "device.revoked" -> require(
                     envelope.connectionEpoch != null && envelope.connectionEpoch > 0,
                 ) { "Authenticated controls require a positive connection_epoch" }
                 else -> require(envelope.connectionEpoch == null) {

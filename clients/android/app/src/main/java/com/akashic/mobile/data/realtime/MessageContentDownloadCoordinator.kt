@@ -8,6 +8,8 @@ import java.util.Base64
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 
+internal const val MESSAGE_CONTENT_HTTP_PATH = "/mobile/message-content/v2"
+
 data class MessageContentHttpRequest(
     val commandId: String,
     val path: String,
@@ -76,9 +78,12 @@ class MessageContentDownloadCoordinator(
         }
         val grant = ProtocolCodec.decodePayload<MessageContentGrantPayload>(envelope.payload)
         require(
-            grant.messageId == current.transfer.messageId &&
+            grant.version == 2 &&
+                grant.messageId == current.transfer.messageId &&
                 grant.byteLength == current.transfer.byteLength &&
                 grant.sha256.equals(current.transfer.sha256, ignoreCase = true) &&
+                grant.encoding == "utf-8" &&
+                grant.mediaType == "application/json" &&
                 grant.path == MESSAGE_CONTENT_HTTP_PATH &&
                 grant.ticket.isNotBlank()
         ) { "消息正文下载票据与 manifest 不匹配" }
@@ -155,9 +160,9 @@ class MessageContentDownloadCoordinator(
             ProtocolCodec.json().encodeToJsonElement(
                 MessageContentPreparePayload.serializer(),
                 MessageContentPreparePayload(
-                    transfer.messageId,
-                    transfer.byteLength,
-                    transfer.sha256,
+                    messageId = transfer.messageId,
+                    byteLength = transfer.byteLength,
+                    sha256 = transfer.sha256,
                 ),
             ).jsonObject,
         )
@@ -234,7 +239,6 @@ class MessageContentDownloadCoordinator(
         envelope.payload["message"]?.toString()?.trim('"') ?: "消息正文恢复失败"
 
     private companion object {
-        const val MESSAGE_CONTENT_HTTP_PATH = "/mobile/message-content/v1"
         const val MAX_RANGE_BYTES = 256 * 1024
     }
 }

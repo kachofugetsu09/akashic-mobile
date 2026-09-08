@@ -12,7 +12,9 @@ data class ConversationUiState(
     val readingPosition: ReadingPositionUi?,
     val navigationTarget: NavigationTargetUi?,
     val projectionGeneration: Long,
-    val messages: List<MessageUi>,
+    val downloads: List<MessageAttachmentUi>,
+    val timelineMessages: List<TimelineMessageUi>,
+    val replyStatus: JsonObject?,
     val attachments: List<ComposerAttachmentUi>,
     val composerDraft: ComposerDraftUi,
     val pendingMessages: List<PendingMessageUi>,
@@ -26,6 +28,27 @@ data class ConversationUiState(
     val canSend: Boolean,
     val modelCatalog: ModelCatalogUi = ModelCatalogUi(),
     val runtimeInspection: RuntimeInspectionUi = RuntimeInspectionUi(),
+)
+
+data class TimelineMessageUi(
+    val id: String,
+    val sessionId: String,
+    val seq: Long,
+    val timestamp: String,
+    val author: String,
+    val source: String,
+    val body: JsonObject,
+    val metadata: JsonObject,
+    val attachments: List<TimelineAttachmentUi>,
+)
+
+data class TimelineAttachmentUi(
+    val artifactId: String,
+    val kind: String,
+    val filename: String?,
+    val mediaType: String?,
+    val sizeBytes: Long,
+    val sha256: String,
 )
 
 data class ModelCatalogUi(
@@ -151,6 +174,8 @@ data class PendingMessageUi(
     val messageId: String,
     val preview: String,
     val createdAtMillis: Long,
+    val deliveryLabel: String,
+    val deliveryAction: MessageDeliveryActionUi? = null,
 )
 
 data class CommandUi(
@@ -177,56 +202,6 @@ enum class ConnectionStatusUi {
     DISCONNECTED,
 }
 
-sealed interface MessageUi {
-    val id: String
-    val sessionId: String
-    val createdAtMillis: Long
-    val updatedAtMillis: Long
-    val reply: MessageReplyUi?
-    val attachments: List<MessageAttachmentUi>
-
-    data class User(
-        override val id: String,
-        override val sessionId: String,
-        val text: String,
-        val deliveryLabel: String,
-        val replyable: Boolean,
-        val deliveryAction: MessageDeliveryActionUi? = null,
-        override val createdAtMillis: Long,
-        override val reply: MessageReplyUi?,
-        override val attachments: List<MessageAttachmentUi> = emptyList(),
-        override val updatedAtMillis: Long = createdAtMillis,
-        val clientMessageId: String? = null,
-    ) : MessageUi
-
-    data class AssistantTurn(
-        override val id: String,
-        override val sessionId: String,
-        val intro: String?,
-        val blocks: List<ProcessBlockUi>,
-        val answer: String,
-        val status: AssistantTurnStatus,
-        val durationSeconds: Int?,
-        override val createdAtMillis: Long,
-        override val reply: MessageReplyUi? = null,
-        override val attachments: List<MessageAttachmentUi> = emptyList(),
-        override val updatedAtMillis: Long = createdAtMillis,
-        val clientMessageId: String? = null,
-        val controlTurnId: String? = null,
-    ) : MessageUi {
-        val isStreaming: Boolean
-            get() = status == AssistantTurnStatus.STREAMING
-    }
-}
-
-enum class AssistantTurnStatus {
-    STREAMING,
-    COMPLETE,
-    INTERRUPTED,
-    CANCELLED,
-    FAILED,
-}
-
 data class MessageAttachmentUi(
     val id: String,
     val filename: String,
@@ -246,28 +221,6 @@ enum class MessageAttachmentState {
     EVICTED,
 }
 
-data class ProcessBlockUi(
-    val id: String,
-    val kind: ProcessBlockKind,
-    val title: String,
-    val detail: String,
-    val state: ProcessBlockState,
-    val arguments: JsonObject? = null,
-    val resultPreview: String? = null,
-    val durationMillis: Long? = null,
-)
-
-enum class ProcessBlockKind {
-    THINKING,
-    TOOL,
-}
-
-enum class ProcessBlockState {
-    COMPLETED,
-    RUNNING,
-    FAILED,
-}
-
 internal val EmptyConversationState = ConversationUiState(
     connectionLabel = "正在连接",
     connectionStatus = ConnectionStatusUi.CONNECTING,
@@ -278,7 +231,9 @@ internal val EmptyConversationState = ConversationUiState(
     readingPosition = null,
     navigationTarget = null,
     projectionGeneration = 0,
-    messages = emptyList(),
+    downloads = emptyList(),
+    timelineMessages = emptyList(),
+    replyStatus = null,
     attachments = emptyList(),
     composerDraft = ComposerDraftUi("", null),
     pendingMessages = emptyList(),
@@ -305,67 +260,19 @@ internal val PreviewConversationState = ConversationUiState(
     readingPosition = null,
     navigationTarget = null,
     projectionGeneration = 0,
-    messages = listOf(
-        MessageUi.User(
-            id = "user-1",
-            sessionId = "akashic:preview-1",
-            text = "帮我检查移动端实时链路，尤其是网络抖动后的恢复。",
-            deliveryLabel = "已发送",
-            replyable = true,
-            createdAtMillis = 1_752_681_600_000,
-            reply = null,
-        ),
-        MessageUi.AssistantTurn(
-            id = "assistant-1",
-            sessionId = "akashic:preview-1",
-            intro = "我先沿着协议和恢复链路检查。",
-            blocks = listOf(
-                ProcessBlockUi(
-                    id = "block-1",
-                    kind = ProcessBlockKind.THINKING,
-                    title = "分析连接状态机",
-                    detail = "核对认证、epoch 与恢复边界。",
-                    state = ProcessBlockState.COMPLETED,
-                ),
-                ProcessBlockUi(
-                    id = "block-2",
-                    kind = ProcessBlockKind.TOOL,
-                    title = "读取协议模型",
-                    detail = "codegraph explore mobile realtime",
-                    state = ProcessBlockState.COMPLETED,
-                ),
-                ProcessBlockUi(
-                    id = "block-3",
-                    kind = ProcessBlockKind.THINKING,
-                    title = "检查 ACK 单调性",
-                    detail = "旧 epoch 的回调必须被丢弃。",
-                    state = ProcessBlockState.COMPLETED,
-                ),
-                ProcessBlockUi(
-                    id = "block-4",
-                    kind = ProcessBlockKind.TOOL,
-                    title = "运行弱网恢复测试",
-                    detail = "等待测试结果…",
-                    state = ProcessBlockState.RUNNING,
-                ),
-            ),
-            answer = "当前事件顺序保持一致；连接恢复后会从最后一次累计 ACK 继续。",
-            status = AssistantTurnStatus.STREAMING,
-            durationSeconds = null,
-            createdAtMillis = 1_752_681_601_000,
-            attachments = listOf(
-                MessageAttachmentUi(
-                    id = "preview-download",
-                    filename = "弱网恢复报告.pdf",
-                    contentType = "application/pdf",
-                    sizeBytes = 3_200_000,
-                    transferredBytes = 1_344_000,
-                    state = MessageAttachmentState.DOWNLOADING,
-                    cachePath = "/preview/弱网恢复报告.pdf",
-                ),
-            ),
+    downloads = listOf(
+        MessageAttachmentUi(
+            id = "preview-download",
+            filename = "弱网恢复报告.pdf",
+            contentType = "application/pdf",
+            sizeBytes = 3_200_000,
+            transferredBytes = 1_344_000,
+            state = MessageAttachmentState.DOWNLOADING,
+            cachePath = "/preview/弱网恢复报告.pdf",
         ),
     ),
+    timelineMessages = emptyList(),
+    replyStatus = null,
     attachments = listOf(
         ComposerAttachmentUi(
             id = "preview-upload",

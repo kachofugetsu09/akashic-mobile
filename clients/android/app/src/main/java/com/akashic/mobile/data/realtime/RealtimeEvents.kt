@@ -21,10 +21,8 @@ internal fun deliveredAssistantMessageId(envelope: WireEnvelope): String {
 
 internal fun messageReplyReference(
     messageId: String,
-    clientMessageId: String?,
-): MessageReplyReference = when {
-    clientMessageId != null -> MessageReplyReference(clientMessageId = clientMessageId)
-    else -> MessageReplyReference(messageId = messageId)
+): MessageReplyReference {
+    return MessageReplyReference(messageId = messageId)
 }
 
 internal fun deliveredFinalMessageEvent(envelope: WireEnvelope): FinalMessageEvent {

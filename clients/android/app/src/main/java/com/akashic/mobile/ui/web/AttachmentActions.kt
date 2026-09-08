@@ -11,20 +11,13 @@ import com.akashic.mobile.BuildConfig
 import com.akashic.mobile.ui.conversation.ConversationUiState
 import com.akashic.mobile.ui.conversation.MessageAttachmentState
 import com.akashic.mobile.ui.conversation.MessageAttachmentUi
-import com.akashic.mobile.ui.conversation.MessageUi
 import java.io.File
 import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 internal fun ConversationUiState.findCachedAttachment(attachmentId: String): MessageAttachmentUi? {
-    val attachment = messages.asSequence()
-        .flatMap { message ->
-            when (message) {
-                is MessageUi.User -> message.attachments.asSequence()
-                is MessageUi.AssistantTurn -> message.attachments.asSequence()
-            }
-        }
+    val attachment = downloads.asSequence()
         .firstOrNull { it.id == attachmentId }
         ?: return null
     return attachment.takeIf {

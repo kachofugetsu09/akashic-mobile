@@ -1,12 +1,9 @@
 package com.akashic.mobile.data.realtime
 
-import com.akashic.mobile.data.local.HistoryProjectionProgress
 import com.akashic.mobile.domain.model.ConnectionPhase
-import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -15,13 +12,66 @@ class ConnectionRecoveryPolicyTest {
     private val unmetered = TransferNetworkState(TransferNetworkKind.UNMETERED, true)
 
     @Test
-    fun `history cursor request uses the production page size`() {
-        val payload = historyCursorPayload(afterSeq = 41, snapshotMaxSeq = 99)
+    fun `session message keeps empty append nonempty append and reply status separate`() {
+        val empty = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "type": "messages.appended",
+              "version": 2,
+              "session_id": "akashic:test",
+              "items": [],
+              "after_seq": 4,
+              "next_after_seq": 4,
+              "through_seq": 4,
+              "has_more": false
+            }
+            """.trimIndent(),
+        ).jsonObject
+        val nonempty = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "type": "messages.appended",
+              "version": 2,
+              "session_id": "akashic:test",
+              "items": [{
+                "id": "message-0",
+                "session_id": "akashic:test",
+                "seq": 0,
+                "timestamp": "2026-09-08T05:33:47Z",
+                "author": "user",
+                "source": "conversation",
+                "body": {"kind": "input", "parts": []},
+                "metadata": {},
+                "attachments": []
+              }],
+              "after_seq": -1,
+              "next_after_seq": 0,
+              "through_seq": 0,
+              "has_more": false
+            }
+            """.trimIndent(),
+        ).jsonObject
+        val status = ProtocolCodec.json().parseToJsonElement(
+            """
+            {
+              "type": "reply.status",
+              "version": 2,
+              "session_id": "akashic:test",
+              "snapshot_id": null,
+              "available": false,
+              "items": []
+            }
+            """.trimIndent(),
+        ).jsonObject
 
-        assertEquals(JsonPrimitive(100), payload["page_size"])
-        assertEquals(JsonPrimitive(1), payload["content_ref_version"])
-        assertEquals(JsonPrimitive(41), payload["after_seq"])
-        assertEquals(JsonPrimitive(99), payload["snapshot_max_seq"])
+        val emptyMessage = decodeSessionMessage(empty) as SessionMessageContent.Messages
+        val appendedMessage = decodeSessionMessage(nonempty) as SessionMessageContent.Messages
+        val replyStatus = decodeSessionMessage(status) as SessionMessageContent.ReplyStatus
+
+        assertTrue(emptyMessage.payload.items.isEmpty())
+        assertEquals(4L, emptyMessage.payload.nextAfterSeq)
+        assertEquals("message-0", appendedMessage.payload.items.single().id)
+        assertEquals(status, replyStatus.payload)
     }
 
     @Test
@@ -98,141 +148,84 @@ class ConnectionRecoveryPolicyTest {
     }
 
     @Test
-    fun `history resumes from the first incomplete page`() {
-        assertNull(
-            historyStartPage(
-                remoteMessageCount = 0,
-                local = HistoryProjectionProgress(0, null),
-                forceReload = false,
-                pageSize = 10,
+    fun `terminal history page completes enumeration while message row awaits download`() {
+        val referencedRow = RemoteHistoryMessage(
+            id = "message-120k",
+            sessionId = "akashic:test",
+            seq = 8,
+            messageRef = MessageContentRef(
+                version = 2,
+                encoding = "utf-8",
+                mediaType = "application/json",
+                byteLength = 120_367,
+                sha256 = "a".repeat(64),
             ),
         )
-        assertNull(
-            historyStartPage(
-                remoteMessageCount = 537,
-                local = HistoryProjectionProgress(537, 536),
-                forceReload = false,
-                pageSize = 10,
+
+        assertTrue(
+            historyPageEnumerationComplete(
+                HistoryPagePayload(
+                    items = listOf(referencedRow),
+                    version = 2,
+                    afterSeq = 7,
+                    nextAfterSeq = 8,
+                    throughSeq = 8,
+                    hasMore = false,
+                ),
             ),
         )
-        assertEquals(
-            54,
-            historyStartPage(
-                remoteMessageCount = 537,
-                local = HistoryProjectionProgress(536, 535),
-                forceReload = false,
-                pageSize = 10,
-            ),
-        )
-        assertEquals(
-            46,
-            historyStartPage(
-                remoteMessageCount = 537,
-                local = HistoryProjectionProgress(450, 449),
-                forceReload = false,
-                pageSize = 10,
-            ),
-        )
-        assertEquals(
-            1,
-            historyStartPage(
-                remoteMessageCount = 537,
-                local = HistoryProjectionProgress(538, 537),
-                forceReload = false,
-                pageSize = 10,
-            ),
-        )
-        assertEquals(
-            1,
-            historyStartPage(
-                remoteMessageCount = 537,
-                local = HistoryProjectionProgress(450, 451),
-                forceReload = false,
-                pageSize = 10,
-            ),
-        )
-        assertEquals(
-            1,
-            historyStartPage(
-                remoteMessageCount = 537,
-                local = HistoryProjectionProgress(537, 536),
-                forceReload = true,
-                pageSize = 10,
+        assertFalse(
+            historyPageEnumerationComplete(
+                HistoryPagePayload(
+                    items = listOf(referencedRow),
+                    version = 2,
+                    afterSeq = 7,
+                    nextAfterSeq = 8,
+                    throughSeq = 9,
+                    hasMore = false,
+                ),
             ),
         )
     }
 
     @Test
-    fun `versioned history snapshot accepts sparse seq and detects stale projection`() {
-        assertEquals(
-            HistorySyncAction.COMPLETE,
-            historySyncAction(1_816, 1_817, HistoryProjectionProgress(1_816, 1_817), false),
-        )
-        assertEquals(
-            HistorySyncAction.RESUME,
-            historySyncAction(1_816, 1_817, HistoryProjectionProgress(900, 901), false),
-        )
-        assertEquals(
-            HistorySyncAction.RESET,
-            historySyncAction(1_816, 1_818, HistoryProjectionProgress(1_816, 1_817), false),
-        )
-        assertEquals(
-            HistorySyncAction.RESET,
-            historySyncAction(1_816, 1_817, HistoryProjectionProgress(1_815, 1_817), false),
-        )
-        assertEquals(
-            HistorySyncAction.COMPLETE,
-            historySyncAction(0, -1, HistoryProjectionProgress(0, null), false),
-        )
-        assertEquals(
-            HistorySyncAction.RESET,
-            historySyncAction(0, -1, HistoryProjectionProgress(1, 7), false),
-        )
-    }
-
-    @Test
-    fun `history reset negotiates a fresh snapshot and terminal count catches stale rows`() {
-        assertNull(historyRequestSnapshotMaxSeq(HistorySyncAction.RESET, 1_817))
-        assertEquals(1_817L, historyRequestSnapshotMaxSeq(HistorySyncAction.RESUME, 1_817))
-        assertFalse(historyTerminalMatches(101, HistoryProjectionProgress(102, 102)))
-        assertTrue(historyTerminalMatches(101, HistoryProjectionProgress(101, 102)))
-    }
-
-    @Test
-    fun `session list retries legacy payload once per generation`() {
-        assertTrue(shouldRetryLegacySessionList("session.list", "invalid_payload", 8, null))
-        assertFalse(shouldRetryLegacySessionList("session.list", "invalid_payload", 8, 8))
-        assertFalse(shouldRetryLegacySessionList("history.get", "invalid_payload", 8, null))
-        assertFalse(shouldRetryLegacySessionList("session.list", "unsupported_command", 8, null))
-    }
-
-    @Test
-    fun `history batch stops after transport send failure`() = runBlocking {
-        val requested = mutableListOf<Pair<String, Int>>()
-        val sessions = listOf(
-            RemoteSessionSummary("empty", "空会话", "2026-07-28T00:00:00Z", 0),
-            RemoteSessionSummary("complete", "已完成", "2026-07-28T00:00:00Z", 10),
-            RemoteSessionSummary("first", "第一段", "2026-07-28T00:00:00Z", 2),
-            RemoteSessionSummary("failed", "发送失败", "2026-07-28T00:00:00Z", 3),
-            RemoteSessionSummary("unreachable", "不应请求", "2026-07-28T00:00:00Z", 4),
+    fun `late follow reply after session switch cannot replace current subscription`() {
+        val oldOwner = PendingFollowOwner(
+            id = "follow-a",
+            sessionId = "akashic:a",
+            epoch = 7,
         )
 
-        requestHistoryBatch(
-            sessions = sessions,
-            startPage = {
-                when (it.sessionId) {
-                    "complete" -> null
-                    "first" -> 2
-                    else -> 1
-                }
-            },
-            requestPage = { sessionId, page ->
-                requested += sessionId to page
-                sessionId != "failed"
-            },
+        assertEquals(
+            FollowReplyAction.IGNORE,
+            followReplyAction(
+                owner = oldOwner,
+                replyId = "follow-a",
+                replySessionId = "akashic:a",
+                currentSessionId = "akashic:b",
+                currentEpoch = 7,
+            ),
         )
-
-        assertEquals(listOf("first" to 2, "failed" to 1), requested)
+        assertEquals(
+            FollowReplyAction.INVALID,
+            followReplyAction(
+                owner = oldOwner,
+                replyId = "follow-a",
+                replySessionId = "akashic:b",
+                currentSessionId = "akashic:a",
+                currentEpoch = 7,
+            ),
+        )
+        assertEquals(
+            FollowReplyAction.ACCEPT,
+            followReplyAction(
+                owner = oldOwner,
+                replyId = "follow-a",
+                replySessionId = "akashic:a",
+                currentSessionId = "akashic:a",
+                currentEpoch = 7,
+            ),
+        )
     }
 
     @Test
