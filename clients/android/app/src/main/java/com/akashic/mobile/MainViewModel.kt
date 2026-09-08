@@ -48,6 +48,7 @@ import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
 import com.akashic.mobile.ui.conversation.RuntimeJobUi
 import com.akashic.mobile.ui.conversation.RuntimeMcpUi
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
@@ -63,6 +64,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.plus
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
@@ -332,7 +334,9 @@ class MainViewModel(
         val messages = if (sessionId == null) flowOf(emptyList()) else {
             container.database.messages().observeMessageGraph(sessionId).distinctUntilChanged()
         }.map { graph -> projectMessageState(sessionId, graph) }
-        val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
+        val conversations = serverId?.let {
+            container.database.conversations().observeSummaries(it).distinctUntilChanged()
+        } ?: flowOf(emptyList())
         val composer = if (serverId == null || sessionId == null) {
             flowOf(ComposerLocalState(emptyList(), null))
         } else {
@@ -502,7 +506,7 @@ class MainViewModel(
             runtimeInspection = runtime.toUi(),
         )
     }.stateIn(
-        viewModelScope,
+        viewModelScope + Dispatchers.Default,
         SharingStarted.WhileSubscribed(5_000),
         ConversationUiState(
             connectionLabel = "正在连接",

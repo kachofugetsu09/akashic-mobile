@@ -138,7 +138,6 @@ class MainActivity : ComponentActivity() {
                     }
                 }
                 val session by viewModel.sessionState.collectAsStateWithLifecycle()
-                val conversation by viewModel.conversationState.collectAsStateWithLifecycle()
                 val incomingShare by viewModel.incomingShare.collectAsStateWithLifecycle()
                 val pluginUiCatalog by viewModel.pluginUiCatalog.collectAsStateWithLifecycle()
                 val mobileWebUiServing by viewModel.mobileWebUiServing.collectAsStateWithLifecycle()
@@ -240,7 +239,7 @@ class MainActivity : ComponentActivity() {
                         CircularProgressIndicator(Modifier.align(Alignment.Center))
                     } else if (session.hasProfile) {
                         MobileWebChat(
-                            state = conversation,
+                            state = viewModel.conversationState,
                             themeId = appSettings.theme,
                             onThemeChange = viewModel::setTheme,
                             onModelChange = viewModel::selectModel,
@@ -299,7 +298,7 @@ class MainActivity : ComponentActivity() {
                             onRetryDownloadedAttachment = viewModel::retryDownloadedAttachment,
                             onTouchDownloadedAttachment = viewModel::touchDownloadedAttachment,
                             onOpenDownloadedAttachment = { attachmentId ->
-                                withCachedAttachment(this@MainActivity, conversation, attachmentId) {
+                                withCachedAttachment(this@MainActivity, viewModel.conversationState.value, attachmentId) {
                                     viewModel.touchDownloadedAttachment(attachmentId)
                                     openCachedAttachment(
                                         this@MainActivity,
@@ -309,7 +308,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onShareDownloadedAttachment = { attachmentId ->
-                                withCachedAttachment(this@MainActivity, conversation, attachmentId) {
+                                withCachedAttachment(this@MainActivity, viewModel.conversationState.value, attachmentId) {
                                     viewModel.touchDownloadedAttachment(attachmentId)
                                     shareCachedAttachment(
                                         this@MainActivity,
@@ -319,7 +318,7 @@ class MainActivity : ComponentActivity() {
                                 }
                             },
                             onSaveDownloadedAttachment = { attachmentId ->
-                                withCachedAttachment(this@MainActivity, conversation, attachmentId) {
+                                withCachedAttachment(this@MainActivity, viewModel.conversationState.value, attachmentId) {
                                     viewModel.touchDownloadedAttachment(attachmentId)
                                     pendingSave.value = it
                                     if (!nativeActivityLaunchSucceeded(

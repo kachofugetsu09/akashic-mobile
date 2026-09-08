@@ -91,7 +91,6 @@ data class ConversationSummary(
     val lastMessagePreview: String?,
     val lastMessageAt: Long?,
     val unreadCount: Int,
-    val isRunning: Boolean,
     val anchorMessageId: String?,
     val anchorOffsetPx: Int,
     val remoteKnown: Boolean,
