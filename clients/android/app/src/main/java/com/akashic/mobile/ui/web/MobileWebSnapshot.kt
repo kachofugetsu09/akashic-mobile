@@ -28,6 +28,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 
+// 完整附件 metadata 的 null 是协议事实，快照与增量不能省略它。
+internal val mobileWebJson = Json
+
 @Serializable
 data class MobileWebSnapshot(
     val protocolVersion: Int,

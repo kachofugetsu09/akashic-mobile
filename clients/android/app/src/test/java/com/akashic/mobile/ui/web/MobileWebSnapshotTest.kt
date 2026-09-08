@@ -85,8 +85,8 @@ class MobileWebSnapshotTest {
                         TimelineAttachmentUi(
                             artifactId = "artifact-1",
                             kind = "image",
-                            filename = "result.png",
-                            mediaType = "image/png",
+                            filename = null,
+                            mediaType = null,
                             sizeBytes = 42,
                             sha256 = "a".repeat(64),
                         ),
@@ -96,7 +96,7 @@ class MobileWebSnapshotTest {
             replyStatus = replyStatus,
         ).toMobileWebSnapshot()
 
-        val encoded = Json.encodeToString(snapshot)
+        val encoded = mobileWebJson.encodeToString(snapshot)
         val json = Json.parseToJsonElement(encoded).jsonObject
         val message = json.getValue("messages").jsonArray.single().jsonObject
 
@@ -113,6 +113,8 @@ class MobileWebSnapshotTest {
         assertEquals(metadata, message.getValue("metadata"))
         assertEquals("artifact-1", message.getValue("attachments").jsonArray.single().jsonObject
             .getValue("artifact_id").jsonPrimitive.content)
+        assertEquals(kotlinx.serialization.json.JsonNull, message.getValue("attachments").jsonArray.single().jsonObject.getValue("filename"))
+        assertEquals(kotlinx.serialization.json.JsonNull, message.getValue("attachments").jsonArray.single().jsonObject.getValue("media_type"))
     }
 
     @Test

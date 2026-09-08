@@ -64,9 +64,16 @@ class IsolatedGatewayDeviceTest {
         app.container.database.messages().upsert(com.akashic.mobile.data.local.MessageEntity(
             "local-rejected", null, sessionId, "user", "保留但不排队的旧失败正文", "failed", 1, 1,
         ))
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        for (command in listOf("input keyevent KEYCODE_WAKEUP", "wm dismiss-keyguard")) {
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(
+                instrumentation.uiAutomation.executeShellCommand(command),
+            ).use { it.readBytes() }
+        }
         androidx.test.core.app.ActivityScenario.launch(com.akashic.mobile.MainActivity::class.java).use { activity ->
-            val text = withTimeout(TIMEOUT_MILLIS) {
-                var rendered = ""
+            activity.onActivity { it.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+            var rendered = ""
+            val text = kotlinx.coroutines.withTimeoutOrNull(TIMEOUT_MILLIS) {
                 while (!rendered.contains("原回答完整保留")) {
                     val reply = kotlinx.coroutines.CompletableDeferred<String>()
                     activity.onActivity { screen ->
@@ -79,7 +86,7 @@ class IsolatedGatewayDeviceTest {
                     if (!rendered.contains("原回答完整保留")) kotlinx.coroutines.delay(100)
                 }
                 rendered
-            }
+            } ?: error("Shared WebUI did not show history: $rendered")
             assertTrue(!text.contains("旧记录归档"))
             assertTrue(!text.contains("legacy-attribution-unknown"))
             assertTrue(!text.contains("消息详情"))
