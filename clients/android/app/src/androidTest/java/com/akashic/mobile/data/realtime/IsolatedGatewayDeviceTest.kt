@@ -1,26 +1,34 @@
 package com.akashic.mobile.data.realtime
 
+import android.Manifest
+import android.os.Build
 import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.akashic.mobile.App
 import com.akashic.mobile.MainActivity
+import com.akashic.mobile.MainViewModel
 import com.akashic.mobile.data.local.MessageWithBlocks
 import com.akashic.mobile.domain.model.ConnectionPhase
+import com.akashic.mobile.ui.conversation.ConversationUiState
 import java.io.File
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.double
+import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -51,12 +59,43 @@ class IsolatedGatewayDeviceTest {
         session.selectSession(sessionId)
         withTimeout(TIMEOUT_MILLIS) { session.state.first { it.currentSessionId == sessionId } }
 
+        // 基准开始前处理系统权限，避免弹窗暂停待测页面。
+        if (Build.VERSION.SDK_INT >= 33) {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
+                app.packageName, Manifest.permission.POST_NOTIFICATIONS,
+            )
+        }
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
             awaitWebViewReady(scenario)
             installFrameRecorder(scenario)
+            if (arguments.getString("perfInteractions") == "true") {
+                startComposerEdits(scenario)
+            }
             val startedAt = SystemClock.elapsedRealtime()
             session.sendMessage("Android 流式性能基准")
             withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId != null } }
+            if (arguments.getString("perfLifecycle") == "true") {
+                // 按持久增量协调暂停，不靠固定延时碰生命周期窗口。
+                val beforePause = graph(app, sessionId) { messages ->
+                    messages.any { it.blocks.any { block -> block.kind == "thinking" && block.content.length >= 400 } }
+                }.sumOf { message -> message.blocks.filter { it.kind == "thinking" }.sumOf { it.content.length } }
+                scenario.moveToState(Lifecycle.State.CREATED)
+                evaluateJavascript(scenario, """
+                    (() => {
+                      const params = new URLSearchParams(location.search);
+                      window.AkashicNativeTransport.postMessage(JSON.stringify({
+                        v: 1, generation_id: params.get('generation_id'), nonce: params.get('nonce'),
+                        method: 'requestSnapshot', args: []
+                      }));
+                    })()
+                """.trimIndent())
+                graph(app, sessionId) { messages ->
+                    messages.sumOf { message -> message.blocks.filter { it.kind == "thinking" }.sumOf { it.content.length } } >= beforePause + 400
+                }
+                scenario.moveToState(Lifecycle.State.RESUMED)
+                awaitWebViewReady(scenario)
+                Log.i("AkashicStreamPerf", "stage=stream_resumed_after_background_snapshot_request")
+            }
             withTimeout(TIMEOUT_MILLIS) { session.state.first { it.activeTurnId == null } }
             val completedGraph = graph(app, sessionId) { messages ->
                 messages.count { message ->
@@ -70,9 +109,15 @@ class IsolatedGatewayDeviceTest {
                     message.message.deliveryState == "complete" &&
                     message.message.text.length == 1_237
             }
+            // 终态跨桥与 DOM 更新必须落入测量窗口，不能在 Room 完成时提前截断。
+            awaitVisibleAnswer(scenario, completed)
             val completionMillis = SystemClock.elapsedRealtime() - startedAt
             val frameSummary = readFrameSummary(scenario)
 
+            Log.i(
+                "AkashicStreamPerf",
+                "stage=frame_summary completion_ms=$completionMillis json=${frameSummary.rawJson}",
+            )
             assertEquals(8_213, completed.blocks.filter { it.kind == "thinking" }.sumOf { it.content.length })
             assertEquals(6, completed.blocks.count { it.kind == "tool" && it.status == "completed" })
             assertTrue("流式 turn 应在 25 秒内完成，实际 ${completionMillis}ms", completionMillis < 25_000)
@@ -80,10 +125,40 @@ class IsolatedGatewayDeviceTest {
             assertTrue("可见文字更新 p50 过慢: ${frameSummary.renderP50}ms", frameSummary.renderP50 <= 100.0)
             assertTrue("可见文字更新 p95 过慢: ${frameSummary.renderP95}ms", frameSummary.renderP95 <= 175.0)
             assertTrue("页面帧 p95 过慢: ${frameSummary.frameP95}ms", frameSummary.frameP95 <= 75.0)
-            Log.i(
-                "AkashicStreamPerf",
-                "stage=frame_summary completion_ms=$completionMillis json=${frameSummary.rawJson}",
-            )
+            val projection = CompletableDeferred<StateFlow<ConversationUiState>>()
+            scenario.onActivity { activity ->
+                projection.complete(ViewModelProvider(activity)[MainViewModel::class.java].conversationState)
+            }
+            withTimeout(TIMEOUT_MILLIS) {
+                projection.await().first { state ->
+                    state.messages.map { it.id } == completedGraph.map { it.message.messageId }
+                }
+            }
+            Log.i("AkashicStreamPerf", "stage=visible_answer_verified")
+            if (arguments.getString("perfInteractions") == "true") {
+                val metrics = Json.parseToJsonElement(frameSummary.rawJson).jsonObject
+                val edits = requireNotNull(metrics["edits"]).jsonPrimitive.int
+                val expectedDraft = "performance draft $edits"
+                assertTrue("未执行足够的输入交互", edits >= 10)
+                assertEquals(expectedDraft, requireNotNull(metrics["draftText"]).jsonPrimitive.content)
+                withTimeout(TIMEOUT_MILLIS) {
+                    app.container.database.composerDrafts()
+                        .observe(requireNotNull(session.state.value.serverId), sessionId)
+                        .first { it?.text == expectedDraft }
+                }
+                // 重建真实宿主，验证旧 pump 释放及新 collector 恢复后不丢内容和草稿。
+                scenario.recreate()
+                awaitWebViewReady(scenario)
+                awaitVisibleAnswer(scenario, completed)
+                withTimeout(TIMEOUT_MILLIS) {
+                    while (evaluateJavascript(
+                            scenario,
+                            "document.querySelector('.mobile-composer textarea')?.value === ${org.json.JSONObject.quote(expectedDraft)}",
+                        ) != "true"
+                    ) kotlinx.coroutines.delay(50)
+                }
+                Log.i("AkashicStreamPerf", "stage=recreated_answer_and_draft_verified")
+            }
         }
     }
 
@@ -318,6 +393,25 @@ class IsolatedGatewayDeviceTest {
         app.container.database.messages().observeMessageGraph(sessionId).first(predicate)
     }
 
+    /** 等待完整终态正文进入 DOM，不以数据库完成代替可见完成。 */
+    private suspend fun awaitVisibleAnswer(
+        scenario: ActivityScenario<MainActivity>,
+        completed: MessageWithBlocks,
+    ) {
+        val expected = completed.message.text.replace("## ", "").replace(Regex("\\s+"), "")
+        val messageId = org.json.JSONObject.quote(completed.message.messageId)
+        val expectedJson = org.json.JSONObject.quote(expected)
+        withTimeout(TIMEOUT_MILLIS) {
+            while (evaluateJavascript(scenario, """
+                (() => {
+                  const message = document.querySelector('[data-message-id="' + CSS.escape($messageId) + '"]');
+                  return Boolean(message && !message.classList.contains('streaming') &&
+                    message.textContent.replace(/## /g, '').replace(/\s+/g, '').includes($expectedJson));
+                })()
+            """.trimIndent()) != "true") kotlinx.coroutines.delay(50)
+        }
+    }
+
     private suspend fun awaitWebViewReady(scenario: ActivityScenario<MainActivity>) {
         withTimeout(TIMEOUT_MILLIS) {
             while (true) {
@@ -325,7 +419,11 @@ class IsolatedGatewayDeviceTest {
                 scenario.onActivity { activity ->
                     ready = activity.window.decorView.findWebView()?.progress == 100
                 }
-                if (ready) return@withTimeout
+                if (ready && evaluateJavascript(
+                        scenario,
+                        "Boolean(document.querySelector('.mobile-composer textarea') && window.AkashicMobile)",
+                    ) == "true"
+                ) return@withTimeout
                 kotlinx.coroutines.delay(50)
             }
         }
@@ -336,8 +434,31 @@ class IsolatedGatewayDeviceTest {
             scenario,
             """
             (() => {
-              const state = { last: 0, gaps: [], renderTimes: [], lastText: "", messageId: null };
+              const state = {
+                last: 0, gaps: [], renderTimes: [], lastText: "", messageId: null,
+                snapshots: 0, snapshotChars: 0, streamPatches: 0, statePatches: 0,
+                longTasks: [], edits: 0, editTimer: null,
+                draftWrites: new Map(), draftRoundTrips: [], inputFrames: [],
+              };
               window.__akashicFramePerf = state;
+              new PerformanceObserver((list) => {
+                state.longTasks.push(...list.getEntries().map((entry) => entry.duration));
+              }).observe({ type: "longtask" });
+              window.addEventListener("message", (event) => {
+                if (typeof event.data !== "string") return;
+                const envelope = JSON.parse(event.data);
+                if (envelope.type === "mobile.snapshot") {
+                  state.snapshots++;
+                  state.snapshotChars += event.data.length;
+                } else if (envelope.type === "mobile.stream-patch") state.streamPatches++;
+                else if (envelope.type === "mobile.state-patch") state.statePatches++;
+                const draft = envelope.payload?.composer?.draft ?? envelope.payload?.state?.composer?.draft;
+                const started = draft && state.draftWrites.get(draft.text);
+                if (started !== undefined) {
+                  state.draftRoundTrips.push(performance.now() - started);
+                  state.draftWrites.delete(draft.text);
+                }
+              });
               const tick = (now) => {
                 if (state.last > 0) state.gaps.push(now - state.last);
                 state.last = now;
@@ -367,6 +488,28 @@ class IsolatedGatewayDeviceTest {
         )
     }
 
+    /** 用真实输入事件触发草稿保存，与流式输出重叠。 */
+    private suspend fun startComposerEdits(scenario: ActivityScenario<MainActivity>) {
+        evaluateJavascript(scenario, """
+            (() => {
+              const state = window.__akashicFramePerf;
+              const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value").set;
+              state.editTimer = setInterval(() => {
+                if (!document.querySelector('.mobile-message-anchor.streaming')) return;
+                const input = document.querySelector('.mobile-composer textarea');
+                if (!input) throw new Error('基准输入框丢失');
+                const text = 'performance draft ' + (++state.edits);
+                const started = performance.now();
+                state.draftWrites.set(text, started);
+                setter.call(input, text);
+                input.dispatchEvent(new Event('input', { bubbles: true }));
+                requestAnimationFrame(() => state.inputFrames.push(performance.now() - started));
+              }, 350);
+              return true;
+            })()
+        """.trimIndent())
+    }
+
     private suspend fun readFrameSummary(
         scenario: ActivityScenario<MainActivity>,
     ): FrameSummary {
@@ -374,11 +517,15 @@ class IsolatedGatewayDeviceTest {
             scenario,
             """
         (() => {
+          const state = window.__akashicFramePerf;
+          clearInterval(state.editTimer);
           const values = [...(window.__akashicFramePerf?.gaps ?? [])].sort((a, b) => a - b);
           const renderTimes = window.__akashicFramePerf?.renderTimes ?? [];
           const renderGaps = renderTimes.slice(1).map((value, index) => value - renderTimes[index]).sort((a, b) => a - b);
           const percentile = (p) => values.length === 0 ? -1 : values[Math.floor((values.length - 1) * p)];
           const renderPercentile = (p) => renderGaps.length === 0 ? -1 : renderGaps[Math.floor((renderGaps.length - 1) * p)];
+          const draftTrips = [...state.draftRoundTrips].sort((a, b) => a - b);
+          const inputFrames = [...state.inputFrames].sort((a, b) => a - b);
           return JSON.stringify({
             count: values.length,
             p50: percentile(0.50),
@@ -393,6 +540,17 @@ class IsolatedGatewayDeviceTest {
             renderP95: renderPercentile(0.95),
             renderP99: renderPercentile(0.99),
             renderMax: renderPercentile(1),
+            snapshots: state.snapshots,
+            snapshotChars: state.snapshotChars,
+            streamPatches: state.streamPatches,
+            statePatches: state.statePatches,
+            longTasks: state.longTasks.length,
+            longTaskMillis: state.longTasks.reduce((sum, duration) => sum + duration, 0),
+            edits: state.edits,
+            draftRoundTripCount: draftTrips.length,
+            draftRoundTripP95: draftTrips[Math.floor((draftTrips.length - 1) * 0.95)],
+            inputFrameP95: inputFrames[Math.floor((inputFrames.length - 1) * 0.95)],
+            draftText: document.querySelector('.mobile-composer textarea')?.value,
           });
         })()
         """.trimIndent(),

@@ -52,6 +52,7 @@ import com.akashic.mobile.ui.conversation.RuntimeInspectionUi
 import com.akashic.mobile.ui.conversation.RuntimeJobUi
 import com.akashic.mobile.ui.conversation.RuntimeMcpUi
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.SharingStarted
@@ -61,11 +62,13 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.plus
 import kotlinx.coroutines.flow.update
 import kotlin.math.ceil
 
@@ -230,8 +233,8 @@ class MainViewModel(
         null,
     )
     private val incomingShareQueue = MutableStateFlow<List<QueuedIncomingShare>>(emptyList())
-    private var projectedSessionId: String? = null
-    private val messageProjectionCache = mutableMapOf<String, CachedMessageProjection>()
+    private var projectedGraph = emptyList<MessageWithBlocks>()
+    private var projectedMessages = emptyList<MessageUi>()
     val turnTrace = container.turnTrace
     private val turnProjectionObserver = TurnProjectionObserver()
     val incomingShare = incomingShareQueue.map { queue ->
@@ -302,48 +305,53 @@ class MainViewModel(
         viewModelScope.launch { container.preferences.setTheme(themeId) }
     }
 
-    private val conversationProjection = sessionState.flatMapLatest { state ->
-        val serverId = state.serverId
-        val sessionId = state.currentSessionId
-        val graph = when {
-            sessionId == null -> flowOf(emptyList())
-            state.activeTurnId == null -> container.database.messages()
-                .observeMessageGraph(sessionId)
-                .distinctUntilChanged()
-            else -> flow {
-                val initial = container.database.messages().observeMessageGraph(sessionId).first()
-                val activeIndex = activeTurnIndex(initial, state.activeTurnId)
-                check(activeIndex >= 0) {
-                    "活动 turn ${state.activeTurnId} 缺少已持久化的助手投影"
+    private val conversationProjection = sessionState
+        .map { Triple(it.serverId, it.currentSessionId, it.activeTurnId) }
+        .distinctUntilChanged()
+        .flatMapLatest { (serverId, sessionId, activeTurnId) ->
+            // 只在查询范围变化时重建订阅；连接、下载和停止状态独立更新。
+            val messages = when {
+                sessionId == null -> flowOf(emptyList())
+                activeTurnId == null -> container.database.messages()
+                    .observeMessageGraph(sessionId)
+                    .distinctUntilChanged()
+                    .map(::projectMessages)
+                else -> flow {
+                    val initial = container.database.messages().observeMessageGraph(sessionId).first()
+                    val activeIndex = activeTurnIndex(initial, activeTurnId)
+                    check(activeIndex >= 0) {
+                        "活动 turn $activeTurnId 缺少已持久化的助手投影"
+                    }
+                    val activeCreatedAt = initial[activeIndex].message.createdAt
+                    val frozenPrefix = initial.take(activeIndex).map(::toMessageUi)
+                    emitAll(
+                        container.database.messages()
+                            .observeMessageGraphFrom(sessionId, activeCreatedAt, activeTurnId)
+                            .distinctUntilChanged()
+                            .map { liveTail -> mergeStreamingTail(frozenPrefix, projectMessages(liveTail)) },
+                    )
                 }
-                val activeCreatedAt = initial[activeIndex].message.createdAt
-                val frozenPrefix = initial.take(activeIndex)
-                emitAll(
-                    container.database.messages()
-                        .observeMessageGraphFrom(sessionId, activeCreatedAt, state.activeTurnId)
-                        .map { liveTail -> mergeStreamingTail(frozenPrefix, liveTail) }
-                        .distinctUntilChanged(),
-                )
+            }
+            val conversations = serverId?.let {
+                container.database.conversations().observeSummaries(it).distinctUntilChanged()
+            } ?: flowOf(emptyList())
+            val composer = if (serverId == null || sessionId == null) {
+                flowOf(ComposerLocalState(emptyList(), null))
+            } else {
+                combine(
+                    container.database.attachmentTransfers().observeDrafts(serverId, sessionId),
+                    container.database.composerDrafts().observe(serverId, sessionId),
+                ) { attachments, draft ->
+                    ComposerLocalState(attachments, draft)
+                }
+            }
+            val currentSession = sessionState.filter {
+                it.serverId == serverId && it.currentSessionId == sessionId && it.activeTurnId == activeTurnId
+            }
+            combine(messages, conversations, composer, currentSession) { currentMessages, currentConversations, currentComposer, state ->
+                ConversationProjection(state, currentMessages, currentConversations, currentComposer)
             }
         }
-        val messages = graph.map { currentGraph ->
-            projectMessages(sessionId, currentGraph)
-        }
-        val conversations = serverId?.let(container.database.conversations()::observeSummaries) ?: flowOf(emptyList())
-        val composer = if (serverId == null || sessionId == null) {
-            flowOf(ComposerLocalState(emptyList(), null))
-        } else {
-            combine(
-                container.database.attachmentTransfers().observeDrafts(serverId, sessionId),
-                container.database.composerDrafts().observe(serverId, sessionId),
-            ) { attachments, draft ->
-                ComposerLocalState(attachments, draft)
-            }
-        }
-        combine(messages, conversations, composer) { currentMessages, currentConversations, currentComposer ->
-            ConversationProjection(state, currentMessages, currentConversations, currentComposer)
-        }
-    }
 
     val conversationState = combine(
         conversationProjection,
@@ -492,7 +500,7 @@ class MainViewModel(
             runtimeInspection = runtime.toUi(),
         )
     }.stateIn(
-        viewModelScope,
+        viewModelScope + Dispatchers.Default,
         SharingStarted.WhileSubscribed(5_000),
         ConversationUiState(
             connectionLabel = "正在连接",
@@ -917,29 +925,15 @@ class MainViewModel(
 
     fun reloadFromServer() = container.realtimeSession.reloadFromServer()
 
-    /** Reuse immutable UI rows when Room re-emits an unchanged conversation history. */
-    private fun projectMessages(sessionId: String?, graph: List<MessageWithBlocks>): List<MessageUi> {
-        // 1. A session switch establishes a new cache ownership boundary.
-        if (projectedSessionId != sessionId) {
-            projectedSessionId = sessionId
-            messageProjectionCache.clear()
+    /** 按查询顺序复用未变化的行，不为每次增量重建 ID 集合。 */
+    private fun projectMessages(graph: List<MessageWithBlocks>): List<MessageUi> {
+        // 1. 顺序或来源变化就重新投影；来源相等包含 sessionId，不跨会话复用。
+        val projected = graph.mapIndexed { index, source ->
+            if (projectedGraph.getOrNull(index) == source) projectedMessages[index] else toMessageUi(source)
         }
-
-        // 2. Rebuild only rows whose Room graph actually changed.
-        val liveIds = mutableSetOf<String>()
-        val projected = graph.mapNotNull { source ->
-            if (source.message.sessionId != sessionId) return@mapNotNull null
-            val messageId = source.message.messageId
-            liveIds += messageId
-            val cached = messageProjectionCache[messageId]
-            if (cached?.source == source) return@mapNotNull cached.message
-            toMessageUi(source).also { message ->
-                messageProjectionCache[messageId] = CachedMessageProjection(source, message)
-            }
-        }
-
-        // 3. Remove identities no longer owned by the selected conversation.
-        messageProjectionCache.keys.retainAll(liveIds)
+        // 2. 单一收集器无挂起地提交等长的来源与 UI，两份列表始终逐项对应。
+        projectedGraph = graph
+        projectedMessages = projected
         return projected
     }
 
@@ -1025,13 +1019,13 @@ class MainViewModel(
     }
 }
 
-/** 流式输出时冻结已完成历史，只合并 Room 重载的活动尾部。 */
+/** 流式输出只投影活动尾部，冻结历史不再进入逐次投影循环。 */
 internal fun mergeStreamingTail(
-    frozenPrefix: List<MessageWithBlocks>,
-    liveTail: List<MessageWithBlocks>,
-): List<MessageWithBlocks> {
-    val liveIds = liveTail.mapTo(hashSetOf()) { it.message.messageId }
-    return frozenPrefix.filterNot { it.message.messageId in liveIds } + liveTail
+    frozenPrefix: List<MessageUi>,
+    liveTail: List<MessageUi>,
+): List<MessageUi> {
+    val liveIds = liveTail.mapTo(hashSetOf()) { it.id }
+    return frozenPrefix.filterNot { it.id in liveIds } + liveTail
 }
 
 /** 按 streaming 投影的持久主键定位活动 turn。 */
@@ -1044,11 +1038,6 @@ internal fun canReloadServerProjection(session: MobileSessionState): Boolean =
         !session.isReloadingHistory &&
         session.activeTurnId == null &&
         !session.hasActiveAttachmentDownload
-
-private data class CachedMessageProjection(
-    val source: MessageWithBlocks,
-    val message: MessageUi,
-)
 
 internal fun List<MessageAttachmentWithMedia>.toMessageAttachmentUi(): List<MessageAttachmentUi> =
     sortedBy { it.link.ordinal }.map { relation ->

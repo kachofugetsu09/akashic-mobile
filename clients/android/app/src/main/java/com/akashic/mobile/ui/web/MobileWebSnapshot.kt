@@ -365,7 +365,11 @@ fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): Mo
     ) {
         return null
     }
-    return MobileWebStatePatch(
+    return toMobileWebStatePatch()
+}
+
+/** 控制状态单独发送，终态时随消息原子提交。 */
+private fun ConversationUiState.toMobileWebStatePatch(): MobileWebStatePatch = MobileWebStatePatch(
         protocolVersion = 1,
         connection = MobileWebConnection(
             label = connectionLabel,
@@ -398,7 +402,6 @@ fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): Mo
         modelCatalog = modelCatalog.toMobileWebModelCatalog(),
         runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
     )
-}
 
 private fun ModelCatalogUi.toMobileWebModelCatalog() = MobileWebModelCatalog(
     generationId = generationId,
@@ -489,7 +492,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
     }
     if (changedIndex < 0) return null
 
-    // 3. 执行中只允许会话摘要变化；终态随消息一起提交完整控制状态
+    // 3. 控制状态与正文可以同时变化，不为草稿或阅读位置重发整段历史
     val before = previous.messages[changedIndex] as MessageUi.AssistantTurn
     val after = messages[changedIndex] as MessageUi.AssistantTurn
 
@@ -498,11 +501,10 @@ fun ConversationUiState.toMobileWebStreamPatch(
         require(FRAME_ID_PATTERN.matches(clientMessageId)) { "Stream patch client message id 无效" }
     }
 
-    val terminalState = if (after.isStreaming) {
-        if (previous.copy(sessions = sessions, messages = messages) != this) return null
+    val state = if (after.isStreaming) {
         null
     } else {
-        copy(messages = previous.messages).toMobileWebStatePatch(previous) ?: return null
+        toMobileWebStatePatch()
     }
 
     // 5. 追加型更新只跨桥发送新增文字；结构或终态变化携带一条完整消息
@@ -518,6 +520,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
             durationSeconds = after.durationSeconds,
             contentAppend = append.content,
             thinkingAppend = append.thinking,
+            state = state,
             clientMessageId = after.clientMessageId,
         )
     } else {
@@ -530,7 +533,7 @@ fun ConversationUiState.toMobileWebStreamPatch(
             searchRevision = after.updatedAtMillis,
             durationSeconds = after.durationSeconds,
             message = after.toMobileWebMessage(),
-            state = terminalState,
+            state = state,
             clientMessageId = after.clientMessageId,
         )
     }

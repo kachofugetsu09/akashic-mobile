@@ -28,7 +28,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -39,6 +38,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.webkit.WebResourceErrorCompat
 import androidx.webkit.JavaScriptReplyProxy
 import androidx.webkit.ServiceWorkerClientCompat
@@ -71,8 +73,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
@@ -323,7 +328,7 @@ private data class MobileWebUiOwner(
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 internal fun MobileWebChat(
-    state: ConversationUiState,
+    state: StateFlow<ConversationUiState>,
     themeId: String,
     onThemeChange: (String) -> Unit,
     onModelChange: (String, String) -> Unit,
@@ -395,7 +400,7 @@ internal fun MobileWebChat(
     modifier: Modifier = Modifier,
     turnTrace: TurnTraceTracker? = null,
 ) {
-    val latestState by rememberUpdatedState(state)
+    val lifecycleOwner = LocalLifecycleOwner.current
     val latestThemeId by rememberUpdatedState(themeId)
     val latestSharedTextDraft by rememberUpdatedState(sharedTextDraft)
     val latestPluginUiCatalog by rememberUpdatedState(pluginUiCatalog)
@@ -971,7 +976,7 @@ internal fun MobileWebChat(
                                     if (!leaseStillCurrent()) return@post
                                     val pump = snapshotPump
                                     Log.i(MOBILE_WEB_LOG_TAG, "transport requestSnapshot: pumpReady=${pump != null}")
-                                    pump?.request(latestState)
+                                    pump?.request()
                                     pluginUiBridge?.publishCatalog(latestPluginUiCatalog)
                                 }
                             }
@@ -1248,10 +1253,14 @@ internal fun MobileWebChat(
                                 return true
                             }
                         }
+                        // 新 view 接管发送前先停旧 pump，不依赖旧 view 的 onRelease 顺序。
+                        snapshotPump?.cancel()
                         webView = this
                         val newSnapshotPump = MobileSnapshotPump(
                             this,
                             mediaRegistry,
+                            state,
+                            lifecycleOwner.lifecycle,
                             onFirstSnapshot = { healthGate.markSnapshot() },
                             turnTrace = turnTrace,
                         )
@@ -1337,7 +1346,6 @@ internal fun MobileWebChat(
         }
     }
 
-    SideEffect { snapshotPump?.submit(state) }
     LaunchedEffect(webReady, sharedTextDraft?.id, sharedTextDraft?.revision, webView) {
         val current = webView
         val draft = latestSharedTextDraft
@@ -2165,7 +2173,8 @@ internal class MobileMediaResourceIndex {
     private val resources = AtomicReference<Map<String, MobileMediaResource>>(emptyMap())
 
     fun replace(next: Map<String, MobileMediaResource>) {
-        resources.set(next.toMap())
+        // 唯一生产调用移交新建后不再修改的资源快照，无需再复制一次。
+        resources.set(next)
     }
 
     fun resolve(path: String): MobileMediaResource? =
@@ -2266,63 +2275,70 @@ internal const val ASSISTANT_TURN_PREFIX = "assistant:"
 private class MobileSnapshotPump(
     private val webView: WebView,
     private val mediaRegistry: MobileMediaRegistry,
+    state: StateFlow<ConversationUiState>,
+    lifecycle: Lifecycle,
     private val onFirstSnapshot: () -> Unit,
     private val turnTrace: TurnTraceTracker? = null,
 ) {
     private val json = Json { explicitNulls = false }
-    private val states = Channel<ConversationUiState>(Channel.CONFLATED)
+    private val snapshotRequests = MutableStateFlow(0L)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val forceFullSnapshot = AtomicBoolean()
     private var deliveredState: ConversationUiState? = null
 
     init {
         scope.launch {
-            for (first in states) {
-                var latest = first
-                while (true) {
-                    latest = states.tryReceive().getOrNull() ?: break
-                }
-                val forceSnapshot = forceFullSnapshot.getAndSet(false)
-                if (!forceSnapshot && deliveredState == latest) continue
-                if (!forceSnapshot && shouldDeferResyncSnapshot(deliveredState, latest)) continue
-                val streamPatch = deliveredState
-                    ?.takeUnless { forceSnapshot }
-                    ?.let(latest::toMobileWebStreamPatch)
-                val statePatch = deliveredState
-                    ?.takeUnless { forceSnapshot || streamPatch != null }
-                    ?.let(latest::toMobileWebStatePatch)
-                val terminalTransition = deliveredState
-                    ?.takeIf { streamPatch == null }
-                    ?.let(latest::terminalTransitionFrom)
-                val payload = when {
-                    streamPatch != null -> json.encodeToString(streamPatch)
-                    statePatch != null -> json.encodeToString(statePatch)
-                    else -> {
-                        mediaRegistry.replace(latest.mediaResources())
-                        json.encodeToString(latest.toMobileWebSnapshot())
-                    }
-                }
-                withContext(Dispatchers.Main.immediate) {
-                    when {
-                        streamPatch != null -> {
-                            webView.pushStreamPatch(payload)
-                            traceStreamPatch(streamPatch)
+            var handledRequest = 0L
+            lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                // StateFlow 已保存最新投影；不再经过主线程和第二个转发队列。
+                combine(state, snapshotRequests) { latest, request -> latest to request }
+                    .collect { (latest, request) ->
+                        val forceSnapshot = request != handledRequest
+                        if (!forceSnapshot && deliveredState == latest) return@collect
+                        if (!forceSnapshot && shouldDeferResyncSnapshot(deliveredState, latest)) return@collect
+                        val streamPatch = deliveredState
+                            ?.takeUnless { forceSnapshot }
+                            ?.let(latest::toMobileWebStreamPatch)
+                        val statePatch = deliveredState
+                            ?.takeUnless { forceSnapshot || streamPatch != null }
+                            ?.let(latest::toMobileWebStatePatch)
+                        val accompanyingStatePatch = deliveredState
+                            ?.takeIf {
+                                streamPatch != null && streamPatch.state == null &&
+                                    it.copy(sessions = latest.sessions, messages = latest.messages) != latest
+                            }
+                            ?.let { latest.toMobileWebStatePatch(it.copy(messages = latest.messages)) }
+                            ?.let { json.encodeToString(it) }
+                        val terminalTransition = deliveredState
+                            ?.takeIf { streamPatch == null && statePatch == null }
+                            ?.let(latest::terminalTransitionFrom)
+                        val nextMedia = if (streamPatch == null && statePatch == null) latest.mediaResources() else null
+                        val payload = when {
+                            streamPatch != null -> json.encodeToString(streamPatch)
+                            statePatch != null -> json.encodeToString(statePatch)
+                            else -> json.encodeToString(latest.toMobileWebSnapshot())
                         }
-                        statePatch != null -> webView.pushStatePatch(payload)
-                        else -> {
-                            webView.pushSnapshot(payload)
-                            if (deliveredState == null) onFirstSnapshot()
+                        withContext(Dispatchers.Main.immediate) {
+                            nextMedia?.let(mediaRegistry::replace)
+                            when {
+                                streamPatch != null -> {
+                                    webView.pushStreamPatch(payload)
+                                    accompanyingStatePatch?.let(webView::pushStatePatch)
+                                    traceStreamPatch(streamPatch)
+                                }
+                                statePatch != null -> webView.pushStatePatch(payload)
+                                else -> {
+                                    webView.pushSnapshot(payload)
+                                    if (deliveredState == null) onFirstSnapshot()
+                                }
+                            }
+                            terminalTransition?.let(::traceTerminalTransition)
+                            // 投递与本地基线同次提交，避免 STOP 取消回程后恢复时重复 append。
+                            deliveredState = latest
+                            handledRequest = request
                         }
                     }
-                    terminalTransition?.let(::traceTerminalTransition)
-                }
-                deliveredState = latest
             }
         }
-    }
-
-    fun submit(state: ConversationUiState) {
-        states.trySend(state).getOrThrow()
     }
 
     /** 记录已跨桥投递 patch 的 stage；只描述投递，不虚报 visible/paint。 */
@@ -2351,13 +2367,11 @@ private class MobileSnapshotPump(
         )
     }
 
-    fun request(state: ConversationUiState) {
-        forceFullSnapshot.set(true)
-        submit(state)
+    fun request() {
+        snapshotRequests.update { it + 1 }
     }
 
     fun cancel() {
-        states.close()
         scope.cancel()
     }
 }

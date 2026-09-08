@@ -111,6 +111,45 @@ class MobileWebSnapshotTest {
     }
 
     @Test
+    fun streamAndDraftChangesUseBoundedCompatiblePatches() {
+        val active = MessageUi.AssistantTurn(
+            id = "assistant:turn-1",
+            sessionId = "akashic:test",
+            intro = null,
+            blocks = emptyList(),
+            answer = "正在",
+            status = AssistantTurnStatus.STREAMING,
+            durationSeconds = 1,
+            createdAtMillis = 1_000,
+        )
+        val history = List(400) { index ->
+            userMessage("history-$index").copy(text = "历史内容".repeat(150))
+        }
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "akashic:test",
+            messages = history + active,
+            isStreaming = true,
+        )
+        val after = before.copy(
+            messages = history + active.copy(answer = "正在分析"),
+            composerDraft = ComposerDraftUi("下一条消息", null, 2_000),
+            readingPosition = ReadingPositionUi("history-20", 12),
+        )
+
+        val patch = requireNotNull(after.toMobileWebStreamPatch(before))
+        val statePatch = requireNotNull(after.toMobileWebStatePatch(before.copy(messages = after.messages)))
+
+        assertEquals("分析", patch.contentAppend)
+        assertEquals(null, patch.message)
+        assertEquals(null, patch.state)
+        assertEquals("下一条消息", statePatch.composer.draft.text)
+        assertEquals("history-20", statePatch.readingPosition?.messageId)
+        val patchChars = Json.encodeToString(patch).length + Json.encodeToString(statePatch).length
+        assertTrue(patchChars * 100 < Json.encodeToString(after.toMobileWebSnapshot()).length)
+        assertEquals(null, after.copy(projectionGeneration = 1).toMobileWebStreamPatch(before))
+    }
+
+    @Test
     fun createsPatchForThinkingAndCommitsCompletedTurn() {
         val thinking = ProcessBlockUi(
             id = "thinking-1",
