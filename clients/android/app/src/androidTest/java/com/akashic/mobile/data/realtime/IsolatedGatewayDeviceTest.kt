@@ -64,6 +64,11 @@ class IsolatedGatewayDeviceTest {
         app.container.database.messages().upsert(com.akashic.mobile.data.local.MessageEntity(
             "local-rejected", null, sessionId, "user", "保留但不排队的旧失败正文", "failed", 1, 1,
         ))
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(
+                app.packageName, android.Manifest.permission.POST_NOTIFICATIONS,
+            )
+        }
         androidx.test.core.app.ActivityScenario.launch(com.akashic.mobile.MainActivity::class.java).use { activity ->
             activity.onActivity {
                 // 隔离夹具可在安全锁屏上进入前台；不改变设备锁或正式应用。
