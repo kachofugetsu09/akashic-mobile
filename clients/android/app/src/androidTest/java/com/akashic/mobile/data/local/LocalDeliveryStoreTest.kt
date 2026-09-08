@@ -2332,7 +2332,7 @@ class LocalDeliveryStoreTest {
         downloads.onConnectionReady("server")
 
         assertEquals(listOf("akashic:test"), sentSessions)
-        assertEquals("pending", database.mediaAttachments().get(unavailableId)!!.state)
+        assertEquals("failed", database.mediaAttachments().get(unavailableId)!!.state)
     }
 
     @Test
