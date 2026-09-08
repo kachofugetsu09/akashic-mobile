@@ -6,6 +6,9 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonPrimitive
 
 @Database(
     entities = [
@@ -28,7 +31,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         MobileWebUiBlobEntity::class,
         MobileWebUiRejectEntity::class,
     ],
-    version = 18,
+    version = 19,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -81,6 +84,7 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_15_16,
             MIGRATION_16_17,
             MIGRATION_17_18,
+            MIGRATION_18_19,
         ).build()
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -875,6 +879,116 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("UPDATE `messages` SET `clientMessageId` = NULL WHERE `clientMessageId` IS NOT NULL")
                 db.execSQL("DROP TABLE `message_identity_moves`")
                 db.execSQL("DROP TABLE `legacy_canonical_inputs`")
+            }
+        }
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. 本地缓存脱离首个会话；文件路径仍由 cache owner 校验，升级不搬动或删除 bytes。
+                db.execSQL("""
+                    CREATE TABLE media_attachments_v19 (
+                        attachmentId TEXT NOT NULL PRIMARY KEY, serverId TEXT NOT NULL,
+                        filename TEXT, contentType TEXT, sizeBytes INTEGER NOT NULL, sha256 TEXT NOT NULL,
+                        transferredBytes INTEGER NOT NULL, state TEXT NOT NULL, cachePath TEXT NOT NULL,
+                        lastAccessedAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, artifactId TEXT, kind TEXT NOT NULL,
+                        FOREIGN KEY(serverId) REFERENCES server_profiles(serverId) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    INSERT INTO media_attachments_v19
+                    SELECT attachmentId, serverId, filename, contentType, sizeBytes, sha256,
+                        transferredBytes, state, cachePath, lastAccessedAt, updatedAt, NULL, 'file'
+                    FROM media_attachments
+                """.trimIndent())
+                db.execSQL("CREATE TEMP TABLE attachment_links_v19 AS SELECT * FROM message_attachments")
+                // 2. 只凭已提交 Message 的精确附件引用迁移身份，不猜测 upload 与 artifact 的关系。
+                db.query("""
+                    SELECT messages.messageId, conversations.serverId, messages.attachmentsJson
+                    FROM messages JOIN conversations ON messages.sessionId = conversations.sessionId
+                    WHERE messages.serverSeq IS NOT NULL AND messages.attachmentsJson != '[]'
+                """.trimIndent()).use { messages ->
+                    while (messages.moveToNext()) {
+                        val messageId = messages.getString(0)
+                        val serverId = messages.getString(1)
+                        val descriptors = com.akashic.mobile.data.realtime.ProtocolCodec.json().decodeFromString(
+                            kotlinx.serialization.builtins.ListSerializer(com.akashic.mobile.data.realtime.TimelineAttachmentDescriptor.serializer()),
+                            messages.getString(2),
+                        )
+                        descriptors.forEachIndexed { ordinal, ref ->
+                            ref.check()
+                            val key = artifactCacheId(serverId, ref.artifactId)
+                            db.query("SELECT attachmentId FROM attachment_links_v19 WHERE messageId = ? AND ordinal = ?",
+                                arrayOf(messageId, ordinal)).use { link ->
+                                if (link.moveToFirst()) {
+                                    val priorId = link.getString(0)
+                                    check(priorId == ref.artifactId || priorId == key) { "Room 19 attachment link does not match Message" }
+                                    db.query("SELECT serverId, filename, contentType, sizeBytes, sha256 FROM media_attachments_v19 WHERE attachmentId = ?",
+                                        arrayOf(priorId)).use { cached ->
+                                        check(cached.moveToFirst()) { "Room 19 attachment cache missing" }
+                                        check(cached.getString(0) == serverId && cached.getLong(3) == ref.sizeBytes &&
+                                            cached.getString(4).equals(ref.sha256, ignoreCase = true) &&
+                                            (cached.getString(1) == ref.filename || cached.getString(1) == (ref.filename ?: ref.artifactId)) &&
+                                            (cached.getString(2) == ref.mediaType || cached.getString(2) == (ref.mediaType ?: "application/octet-stream"))) {
+                                            "Room 19 attachment metadata conflicts with Message"
+                                        }
+                                    }
+                                    db.execSQL("UPDATE media_attachments_v19 SET attachmentId = ?, artifactId = ?, kind = ?, filename = ?, contentType = ? WHERE attachmentId = ?",
+                                        arrayOf(key, ref.artifactId, ref.kind, ref.filename, ref.mediaType, priorId))
+                                    db.execSQL("UPDATE attachment_links_v19 SET attachmentId = ? WHERE attachmentId = ?", arrayOf(key, priorId))
+                                }
+                            }
+                        }
+                    }
+                }
+                db.execSQL("DROP TABLE message_attachments")
+                db.execSQL("DROP TABLE media_attachments")
+                db.execSQL("ALTER TABLE media_attachments_v19 RENAME TO media_attachments")
+                db.execSQL("CREATE INDEX index_media_attachments_serverId ON media_attachments(serverId)")
+                db.execSQL("CREATE INDEX index_media_attachments_state ON media_attachments(state)")
+                db.execSQL("CREATE UNIQUE INDEX index_media_attachments_serverId_artifactId ON media_attachments(serverId, artifactId)")
+                db.execSQL("""
+                    CREATE TABLE message_attachments (
+                        messageId TEXT NOT NULL, attachmentId TEXT NOT NULL, ordinal INTEGER NOT NULL,
+                        PRIMARY KEY(messageId, attachmentId),
+                        FOREIGN KEY(messageId) REFERENCES messages(messageId) ON UPDATE NO ACTION ON DELETE CASCADE,
+                        FOREIGN KEY(attachmentId) REFERENCES media_attachments(attachmentId) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+                db.execSQL("INSERT INTO message_attachments SELECT * FROM attachment_links_v19")
+                db.execSQL("DROP TABLE attachment_links_v19")
+                db.execSQL("CREATE INDEX index_message_attachments_attachmentId ON message_attachments(attachmentId)")
+                db.execSQL("CREATE UNIQUE INDEX index_message_attachments_messageId_ordinal ON message_attachments(messageId, ordinal)")
+                // 3. 已落地的 Input 是成功证据；其余明确失败结束待办，未知仍持有原附件。
+                db.query("""
+                    SELECT command.commandId, command.envelopeJson, command.state,
+                        message.serverSeq, message.recordedAt, message.bodyJson
+                    FROM outbox_commands AS command LEFT JOIN messages AS message ON message.messageId = command.commandId
+                """.trimIndent()).use { commands ->
+                    while (commands.moveToNext()) {
+                        val id = commands.getString(0)
+                        val state = commands.getString(2)
+                        val accepted = !commands.isNull(3) && commands.getString(4).isNotEmpty() &&
+                            commands.getString(5) != "{}"
+                        if (!accepted && state !in setOf("failed", "failed_retryable", "outcome_unknown")) continue
+                        val json = com.akashic.mobile.data.realtime.ProtocolCodec.json()
+                        val payload = json.parseToJsonElement(commands.getString(1)).jsonObject.getValue("payload").jsonObject
+                        check(payload.getValue("client_message_id").jsonPrimitive.content == id) { "Room 19 outbox identity mismatch" }
+                        if (accepted) {
+                            check(json.parseToJsonElement(commands.getString(5)).jsonObject.getValue("kind").jsonPrimitive.content == "input") {
+                                "Room 19 outbox references a non-Input Message"
+                            }
+                        }
+                        val transferState = if (accepted) "sent" else if (state == "outcome_unknown") "sending" else "ready"
+                        payload.getValue("media_refs").jsonArray.forEach { ref ->
+                            db.execSQL("UPDATE attachment_transfers SET state = ? WHERE attachmentId = ? AND state IN ('ready', 'sending')",
+                                arrayOf(transferState, ref.jsonPrimitive.content))
+                        }
+                        if (accepted || state != "outcome_unknown") {
+                            db.execSQL("UPDATE messages SET deliveryState = ? WHERE messageId = ?", arrayOf(if (accepted) "complete" else "failed", id))
+                            db.execSQL("DELETE FROM outbox_commands WHERE commandId = ?", arrayOf(id))
+                        }
+                    }
+                }
+                db.execSQL("UPDATE messages SET deliveryState = 'failed' WHERE serverSeq IS NULL AND deliveryState = 'failed_retryable'")
             }
         }
     }

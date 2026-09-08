@@ -2265,7 +2265,7 @@ private class MobileSnapshotPump(
     lifecycle: Lifecycle,
     private val onFirstSnapshot: () -> Unit,
 ) {
-    private val json = Json { explicitNulls = false }
+    private val json = mobileWebJson
     private val snapshotRequests = MutableStateFlow(0L)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var deliveredState: ConversationUiState? = null

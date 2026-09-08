@@ -45,9 +45,9 @@
 ### Room 本地工作
 
 - 增加：发送、编辑草稿、接收最终通知、请求停止和准备附件时创建记录。
-- 更新：owner 通过 Message ID 条件 UPDATE 推进 pending、in-flight、retry、failed、unknown、sent 或消费状态。明确失败重试生成新 ID，并原子移动阅读锚点、草稿引用、既有消息引用和附件链接；结果未知仍复用原 ID。
+- 更新：owner 通过 Message ID 条件 UPDATE 推进 pending、in-flight、retry、failed、unknown、sent 或消费状态。明确拒绝保留 Message 正文并结束 outbox；再次发送创建新 Message。结果未知仍复用原 ID，原附件继续处于 sending，不返回编辑器。
 - 逻辑失效：明确 ack、可证明终态、用户消费或用户放弃后才进入可清理状态。
-- 物理删除：outbox 仅在 ACK，或 Room v18 迁移看到同 ID、同 Session 的完整远端 Input 时删除；后者是一次性补结算，防止 failed/outcome-unknown outbox 成为孤儿。通知在系统发布成功或策略明确抑制后消费；stop 在确定完成后删除；草稿和待办由对应用户动作删除。
+- 物理删除：outbox 在 ACK、完整远端 Input 成功证据或明确拒绝后删除；Room v19 还结束旧 failed/failed_retryable outbox 并保留对应正文与附件；后者是一次性补结算，防止 failed/outcome-unknown outbox 成为孤儿。通知在系统发布成功或策略明确抑制后消费；stop 在确定完成后删除；草稿和待办由对应用户动作删除。
 - 恢复：应用启动重置不确定的 in-flight 状态并重放；不能从服务端重建未发送意图。
 
 ### 上传附件与系统分享
@@ -58,6 +58,8 @@
 - 恢复：以私有文件和持久记录共同存在为准；任何一侧缺失都是数据损坏，不静默跳过。
 
 ### 接收附件与插件 UI 缓存
+
+Room v19 的 `media_attachments` 以本地 cacheId（保留旧列名 attachmentId）为主键，远端键为 UNIQUE(serverId, artifactId)，上传缓存的 artifactId 为 NULL。会话 FK 从缓存移到既有 Message link 的授权关系。v18→v19 只凭完整已提交 Message 的 attachmentsJson 迁移远端键和链接；元数据冲突 fail-loud。旧 cachePath 与文件保持不变，由缓存 owner 在启动时验证根目录、普通文件、长度和摘要；新缓存路径从 server+artifact 的键派生。迁移不移动或删除附件 bytes。
 
 - 增加：按远端身份和内容身份写入 staging，校验完成后发布。
 - 更新：访问时间、下载进度和缓存状态允许原位改变。
@@ -105,4 +107,4 @@
 
 ## 备份与恢复边界
 
-仓库只保存 schema 和实现，不保存用户数据库、附件、密钥或生产配置。业务代码或迁移变更前，应在隔离 application ID/workspace 中验证；Room v18 的恢复证据是 v17 schema、迁移测试中的旧 ID→同值 ID 写集合、迁移前仍存在的 outbox/附件/下载记录和迁移后的完整性查询。正式设备数据的备份恢复策略目前不是本仓库已实现能力，且应用声明 `allowBackup=false`，不能声称 WebUI cache、Room 或 Keystore 已被 Android 自动备份。OTA cache 是可重新获取的派生数据，但这不授权删除或重建同库中的业务表；保留数据强制降级到旧 Room schema 不是支持的恢复路径。
+仓库只保存 schema 和实现，不保存用户数据库、附件、密钥或生产配置。业务代码或迁移变更前，应在隔离 application ID/workspace 中验证；Room v19 的恢复证据还包括 v18 schema、旧缓存路径/Message link、明确失败与未知 outbox 的区分、迁移后的 schema identity 和 FK 检查。Room v18 的恢复证据是 v17 schema、迁移测试中的旧 ID→同值 ID 写集合、迁移前仍存在的 outbox/附件/下载记录和迁移后的完整性查询。正式设备数据的备份恢复策略目前不是本仓库已实现能力，且应用声明 `allowBackup=false`，不能声称 WebUI cache、Room 或 Keystore 已被 Android 自动备份。OTA cache 是可重新获取的派生数据，但这不授权删除或重建同库中的业务表；保留数据强制降级到旧 Room schema 不是支持的恢复路径。

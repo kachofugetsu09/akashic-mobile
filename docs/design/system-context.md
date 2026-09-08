@@ -36,7 +36,7 @@
 |---|---|---|
 | `App.kt` / `AppContainer` | 组装数据库、文件 store、密钥和 realtime | 移动端 |
 | `RealtimeSession` | 配对、连接、同步、投递、附件、插件 UI 与 WebUI Resolve/Ensure 的 WebSocket/HTTPS 协调 | 移动端消费协议；核心拥有远端事实与 WebUI 选择 |
-| `AppDatabase` | Room v18 schema 与迁移；v17→v18 统一本地发送与 Core Input 的 Message ID，并保留 restoring 下载进度 | 移动端 |
+| `AppDatabase` | Room v19 schema 与迁移；保留 Input 同值 ID 和 restoring 进度，v18→v19 分开共享 Artifact 缓存与发送待办 | 移动端 |
 | `MobileConnectionService` | 后台连接和持久通知消费 | 移动端 |
 | `protocol/mobile-realtime-v1.json` | 客户端历史协议快照 | 核心 schema 是真源 |
 | `runtime-gate/` | 固定核心组合并验证跨仓库语义 | 移动端维护消费者契约；核心提供 provider 测试 |

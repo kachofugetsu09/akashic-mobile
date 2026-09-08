@@ -164,7 +164,9 @@ for runner_arg in "${runner_args[@]}"; do
         die "runner arg must be KEY=VALUE"
     [[ "${runner_arg%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
         die "runner arg key is invalid: ${runner_arg%%=*}"
-    [[ "${runner_arg#*=}" =~ ^[A-Za-z0-9._~:/+=@-]{1,16384}$ ]] ||
+    runner_value="${runner_arg#*=}"
+    # 长度单独检查，避免展开超大 bounded-repeat 正则耗尽内存。
+    [[ ${#runner_value} -ge 1 && ${#runner_value} -le 16384 && "$runner_value" =~ ^[A-Za-z0-9._~:/+=@-]+$ ]] ||
         die "runner arg value contains unsupported characters: ${runner_arg%%=*}"
 done
 
