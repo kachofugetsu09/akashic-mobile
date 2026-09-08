@@ -148,44 +148,19 @@ class ConnectionRecoveryPolicyTest {
     }
 
     @Test
-    fun `terminal history page completes enumeration while message row awaits download`() {
-        val referencedRow = RemoteHistoryMessage(
-            id = "message-120k",
-            sessionId = "akashic:test",
-            seq = 8,
-            messageRef = MessageContentRef(
-                version = 2,
-                encoding = "utf-8",
-                mediaType = "application/json",
-                byteLength = 120_367,
-                sha256 = "a".repeat(64),
-            ),
-        )
-
-        assertTrue(
-            historyPageEnumerationComplete(
-                HistoryPagePayload(
-                    items = listOf(referencedRow),
-                    version = 2,
-                    afterSeq = 7,
-                    nextAfterSeq = 8,
-                    throughSeq = 8,
-                    hasMore = false,
-                ),
-            ),
-        )
-        assertFalse(
-            historyPageEnumerationComplete(
-                HistoryPagePayload(
-                    items = listOf(referencedRow),
-                    version = 2,
-                    afterSeq = 7,
-                    nextAfterSeq = 8,
-                    throughSeq = 9,
-                    hasMore = false,
-                ),
-            ),
-        )
+    fun `tail page validates received manifests without requiring old history or body download`() {
+        val row = RemoteHistoryMessage(id = "last", sessionId = "akashic:test", seq = 4205,
+            messageRef = MessageContentRef(2, "utf-8", "application/json", 120367, "a".repeat(64)))
+        val page = HistoryPagePayload(items = listOf(row), version = 2, afterSeq = 4204,
+            nextAfterSeq = 4205, throughSeq = 4205, hasMore = true,
+            direction = "backward", beforeSeq = 4206, nextBeforeSeq = 4205)
+        checkHistoryPage(page)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            checkHistoryPage(page.copy(afterSeq = -1))
+        }
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            checkHistoryPage(page.copy(nextAfterSeq = 4204))
+        }
     }
 
     @Test

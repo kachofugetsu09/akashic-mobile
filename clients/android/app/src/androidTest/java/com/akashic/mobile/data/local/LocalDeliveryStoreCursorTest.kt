@@ -7,7 +7,10 @@ import com.akashic.mobile.data.realtime.WIRE_PROTOCOL_VERSION
 import com.akashic.mobile.data.realtime.WireEnvelope
 import com.akashic.mobile.data.realtime.WireKind
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.After
@@ -117,4 +120,65 @@ class LocalDeliveryStoreCursorTest {
         assertEquals(0L, database.realtimeCursors().get("device-2")?.lastAcknowledgedEventSeq)
         assertEquals("保留历史", database.messages().get("message-kept")?.text)
     }
+    @Test
+    fun tailRangesCommitWithAckAndOldWindowExcludesLiveMessages() = runBlocking {
+        val sessionId = "akashic:test"
+        database.conversations().upsert(ConversationEntity(sessionId, "server-1", "测试", 1))
+        database.messages().upsert(MessageEntity("pending", null, sessionId, "user", "待发正文", "pending", 1, 1))
+        database.outbox().enqueue(OutboxCommandEntity("pending", "server-1", "{}", "pending", 0, 1, null))
+        database.composerDrafts().upsert(ComposerDraftEntity(sessionId, "server-1", "未发草稿", null, 1))
+        val row = buildJsonObject {
+            put("id", "message-1001"); put("session_id", sessionId); put("seq", 1001)
+            put("timestamp", "2026-09-09T00:00:00Z"); put("author", "assistant"); put("source", "conversation")
+            put("body", buildJsonObject {
+                put("kind", "output"); put("finish", "complete")
+                put("parts", buildJsonArray { add(buildJsonObject { put("kind", "text"); put("value", "末页正文") }) })
+            })
+        }
+        val reference = buildJsonObject {
+            put("id", "message-1002"); put("session_id", sessionId); put("seq", 1002)
+            put("message_ref", buildJsonObject {
+                put("version", 2); put("encoding", "utf-8"); put("media_type", "application/json")
+                put("byte_length", 120367); put("sha256", "a".repeat(64)); put("display_only", true)
+            })
+        }
+        val page = buildJsonObject {
+            put("version", 2); put("direction", "backward"); put("request_id", "tail")
+            put("after_seq", 1000); put("next_after_seq", 1002); put("through_seq", 1002)
+            put("before_seq", 1003); put("next_before_seq", 1001); put("has_more", true)
+            put("items", buildJsonArray { add(row); add(reference) })
+        }
+        val frame = WireEnvelope(v = WIRE_PROTOCOL_VERSION, kind = WireKind.EVENT, type = "history.page",
+            id = "tail", connectionEpoch = 1, eventSeq = 5, sessionId = sessionId, payload = page)
+        store.applyEvent("server-1", "device-1", frame, 2)
+        assertEquals(5L, database.realtimeCursors().get("device-1")?.lastAcknowledgedEventSeq)
+        assertEquals(listOf(MessageRangeEntity(sessionId, 1000, 1002)), database.messages().receivedRanges(sessionId))
+        assertEquals(1002L, database.messageContentTransfers().get("message-1002")?.messageSeq)
+        assertEquals(null, database.messages().get("message-1002")?.serverSeq)
+        assertEquals("末页正文", database.messages().get("message-1001")?.text)
+
+        // 非法范围整笔回滚，不能 ACK 一个尚未接收的前缀。
+        val invalid = frame.copy(eventSeq = 6, payload = kotlinx.serialization.json.JsonObject(page + ("after_seq" to JsonPrimitive(-1))))
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { store.applyEvent("server-1", "device-1", invalid, 3) }
+        }
+        assertEquals(5L, database.realtimeCursors().get("device-1")?.lastAcknowledgedEventSeq)
+        val live = com.akashic.mobile.data.realtime.RemoteHistoryMessage(
+            id = "live", sessionId = sessionId, seq = 1003, timestamp = "2026-09-09T00:00:01Z",
+            author = "assistant", source = "conversation", body = row["body"] as kotlinx.serialization.json.JsonObject)
+        store.applyMessageRows("server-1", sessionId,
+            com.akashic.mobile.data.realtime.MessagesAppendedPayload("messages.appended", 2, sessionId, listOf(live), 1002, 1003, 1003, false))
+        val oldWindow = database.messages().observeMessageGraph(sessionId, 1000, 1001).first()
+        assertEquals(setOf("pending", "message-1001"), oldWindow.map { it.message.messageId }.toSet())
+        assertEquals(listOf(MessageRangeEntity(sessionId, 1000, 1003)), database.messages().receivedRanges(sessionId))
+
+        store.applyEvent("server-1", "device-1", frame.copy(type = "sync.reset_required", eventSeq = 100,
+            payload = buildJsonObject { put("reason", "inbox_retention_exceeded") }), 4)
+        assertEquals(100L, database.realtimeCursors().get("device-1")?.lastAcknowledgedEventSeq)
+        assertEquals("末页正文", database.messages().get("message-1001")?.text)
+        assertEquals("pending", database.outbox().get("pending")?.state)
+        assertEquals("未发草稿", database.composerDrafts().get("server-1", sessionId)?.text)
+        assertEquals(listOf(MessageRangeEntity(sessionId, 1000, 1003)), database.messages().receivedRanges(sessionId))
+    }
+
 }

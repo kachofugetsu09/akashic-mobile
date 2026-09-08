@@ -139,6 +139,9 @@ interface ConversationDao {
 
 @Dao
 interface ConversationReadStateDao {
+    @Query("SELECT * FROM conversation_read_states WHERE sessionId = :sessionId")
+    suspend fun get(sessionId: String): ConversationReadStateEntity?
+
     @Query(
         """
         UPDATE conversation_read_states
@@ -283,6 +286,9 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE messageId = :messageId")
     suspend fun get(messageId: String): MessageEntity?
 
+    @Query("SELECT * FROM messages WHERE messageId = :messageId")
+    fun observeMessage(messageId: String): Flow<MessageEntity?>
+
     @Query("SELECT COUNT(*) FROM messages WHERE sessionId = :sessionId")
     suspend fun countForSession(sessionId: String): Int
 
@@ -393,6 +399,11 @@ interface MessageDao {
         """
         SELECT * FROM messages AS local
         WHERE local.sessionId = :sessionId
+          AND (
+            (local.serverSeq IS NULL AND local.role != 'restoring')
+            OR (COALESCE(local.serverSeq, (SELECT messageSeq FROM message_content_transfers WHERE messageId = local.messageId)) > :afterSeq
+                AND (:throughSeq IS NULL OR COALESCE(local.serverSeq, (SELECT messageSeq FROM message_content_transfers WHERE messageId = local.messageId)) <= :throughSeq))
+          )
         ORDER BY
           CASE WHEN local.serverSeq IS NOT NULL THEN local.serverSeq ELSE COALESCE(
             (
@@ -408,7 +419,22 @@ interface MessageDao {
           local.messageId
         """,
     )
-    fun observeMessageGraph(sessionId: String): Flow<List<MessageWithAttachments>>
+    fun observeMessageGraph(sessionId: String, afterSeq: Long = -1, throughSeq: Long? = null): Flow<List<MessageWithAttachments>>
+
+    @Query("DELETE FROM message_ranges WHERE sessionId IN (SELECT sessionId FROM conversations WHERE serverId = :serverId)")
+    suspend fun deleteReceivedRanges(serverId: String)
+
+    @Query("SELECT * FROM message_ranges WHERE sessionId = :sessionId ORDER BY afterSeq")
+    suspend fun receivedRanges(sessionId: String): List<MessageRangeEntity>
+
+    @Upsert
+    suspend fun saveReceivedRange(range: MessageRangeEntity)
+
+    @Query("DELETE FROM message_ranges WHERE sessionId = :sessionId AND afterSeq >= :afterSeq AND throughSeq <= :throughSeq")
+    suspend fun deleteCoveredRanges(sessionId: String, afterSeq: Long, throughSeq: Long)
+
+    @Query("SELECT serverSeq FROM messages WHERE sessionId = :sessionId AND serverSeq IS NOT NULL AND (:beforeSeq IS NULL OR serverSeq < :beforeSeq) ORDER BY serverSeq DESC LIMIT :limit")
+    suspend fun cachedTailSeqs(sessionId: String, beforeSeq: Long? = null, limit: Int = 50): List<Long>
 
 }
 

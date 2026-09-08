@@ -11,7 +11,6 @@ import com.akashic.mobile.data.realtime.MessageSendPayload
 import com.akashic.mobile.data.realtime.ProtocolCodec
 import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.TimelineAttachmentDescriptor
-import com.akashic.mobile.data.realtime.historyStartPage
 import java.time.Instant
 import java.security.MessageDigest
 import kotlinx.coroutines.runBlocking
@@ -554,76 +553,6 @@ class LocalDeliveryStoreTest {
         assertEquals(
             "01ARZ3NDEKTSV4RRFFQ69G5FAV",
             database.messages().get("assistant:legacy-flow-turn")!!.turnClientMessageId,
-        )
-    }
-
-    /** final 丢失时 seq 行计数与远端不相等，历史请求不会跳过，heal 路径可达。 */
-    @Test
-    fun finalLostHistoryNotSkippedBecauseSeqRowsCountOnly() = runBlocking {
-        // 1. 先有 6 条 canonical 历史（seq 0..5）
-        for (seq in 0..5) {
-            database.messages().upsert(
-                MessageEntity(
-                    messageId = "canonical-$seq",
-                    clientMessageId = null,
-                    sessionId = "akashic:test",
-                    role = "assistant",
-                    text = "历史 $seq",
-                    deliveryState = "complete",
-                    createdAt = seq.toLong(),
-                    updatedAt = seq.toLong(),
-                    serverSeq = seq.toLong(),
-                ),
-            )
-        }
-        // 2. 新 turn 流式但 final 丢失：本地多了两条不带 serverSeq 的行
-        store.applyEvent(
-            "server",
-            "device",
-            event(1, "turn.started", buildJsonObject { put("client_message_id", "01ARZ3NDEKTSV4RRFFQ69G5FAV") }),
-            7,
-        )
-        store.applyEvent(
-            "server",
-            "device",
-            event(
-                2,
-                "react.thinking.delta",
-                buildJsonObject {
-                    put("block_id", "thinking:turn:0")
-                    put("ordinal", 0)
-                    put("delta", "正在分析")
-                },
-            ),
-            8,
-        )
-        // 3. 投影进度只数带 seq 的行；远端已提交 user+assistant（8 条）时计数必然不等
-        val progress = database.messages().historyProjectionProgress("akashic:test")
-        assertEquals(6, progress.messageCount)
-        assertEquals(5L, progress.maxServerSeq)
-        assertNotNull(
-            historyStartPage(
-                remoteMessageCount = 8,
-                local = progress,
-                forceReload = false,
-                pageSize = 10,
-            ),
-        )
-    }
-
-    /** 相等跳过只在服务端没有任何新提交时发生，此时不存在可丢失的 final。 */
-    @Test
-    fun equalCountHistorySkipRequiresNoServerSideCommit() = runBlocking {
-        val progress = database.messages().historyProjectionProgress("akashic:test")
-        assertEquals(0, progress.messageCount)
-        assertEquals(
-            null,
-            historyStartPage(
-                remoteMessageCount = 0,
-                local = progress,
-                forceReload = false,
-                pageSize = 10,
-            ),
         )
     }
 
@@ -1959,7 +1888,10 @@ class LocalDeliveryStoreTest {
         store.applyMessageRows(
             "server",
             "akashic:test",
-            listOf(
+            com.akashic.mobile.data.realtime.MessagesAppendedPayload(
+                type = "messages.appended", version = 2, sessionId = "akashic:test",
+                afterSeq = 3, nextAfterSeq = 4, throughSeq = 4, hasMore = false,
+                items = listOf(
                 RemoteHistoryMessage(
                     id = messageId,
                     sessionId = "akashic:test",
@@ -1988,6 +1920,7 @@ class LocalDeliveryStoreTest {
                         ),
                     ),
                 ),
+            ),
             ),
         )
         store.acknowledgeOutbox(messageId, messageId, 4)

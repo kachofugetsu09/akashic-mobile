@@ -47,6 +47,14 @@ data class MobileWebSnapshot(
     val composer: MobileWebComposer,
     val modelCatalog: MobileWebModelCatalog,
     val runtimeInspection: MobileWebRuntimeInspection,
+    val history: MobileWebHistory? = null,
+)
+
+@Serializable
+data class MobileWebHistory(
+    val hasOlder: Boolean,
+    val isLatest: Boolean,
+    val loading: Boolean,
 )
 
 @Serializable
@@ -92,6 +100,7 @@ data class MobileWebStatePatch(
     val composer: MobileWebComposer,
     val modelCatalog: MobileWebModelCatalog,
     val runtimeInspection: MobileWebRuntimeInspection,
+    val history: MobileWebHistory? = null,
 )
 
 @Serializable
@@ -318,6 +327,7 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     ),
     modelCatalog = modelCatalog.toMobileWebModelCatalog(),
     runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
+    history = MobileWebHistory(historyWindow.hasOlder, historyWindow.throughSeq == null, historyWindow.loading),
 )
 
 /** 已提交前缀复用原对象；只把新尾部和变化的回复状态送入 WebUI。 */
@@ -403,6 +413,7 @@ fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): Mo
         ),
         modelCatalog = modelCatalog.toMobileWebModelCatalog(),
         runtimeInspection = runtimeInspection.toMobileWebRuntimeInspection(),
+        history = MobileWebHistory(historyWindow.hasOlder, historyWindow.throughSeq == null, historyWindow.loading),
     )
 }
 

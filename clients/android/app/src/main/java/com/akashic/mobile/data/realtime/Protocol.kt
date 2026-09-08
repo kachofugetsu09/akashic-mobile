@@ -7,6 +7,12 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
 
 const val WIRE_PROTOCOL_VERSION = 1
@@ -572,7 +578,48 @@ data class HistoryPagePayload(
     @SerialName("next_after_seq") val nextAfterSeq: Long,
     @SerialName("through_seq") val throughSeq: Long,
     @SerialName("has_more") val hasMore: Boolean,
+    val direction: String = "forward",
+    @SerialName("before_seq") val beforeSeq: Long? = null,
+    @SerialName("next_before_seq") val nextBeforeSeq: Long? = null,
+    @SerialName("around_id") val aroundId: String? = null,
+    @SerialName("request_id") val requestId: String? = null,
 )
+
+/** 旧缓存和新网络表示共享同一个展示合同，原 part 下标保持不变。 */
+fun messageDisplayBody(body: JsonObject): JsonObject {
+    if (body.getValue("kind").jsonPrimitive.content == "control") return body
+    val parts = body.getValue("parts").jsonArray
+    val displayParts = parts.map { value ->
+        val part = value.jsonObject
+        val kind = part["kind"]?.jsonPrimitive?.contentOrNull
+        if (kind in setOf("history.provenance", "history.record", "history.turn_input")) {
+            JsonObject(mapOf("kind" to requireNotNull(part["kind"]), "display" to JsonPrimitive("unavailable")))
+        } else value
+    }
+    return JsonObject(body + ("parts" to JsonArray(displayParts)))
+}
+
+/** 分页边界校验在入库前完成，ACK 不会越过未持久接收的范围。 */
+internal fun checkHistoryPage(page: HistoryPagePayload) {
+    require(page.version == 2 && page.direction in setOf("forward", "backward")) { "History page version or direction is invalid" }
+    require(page.afterSeq >= -1 && page.nextAfterSeq in page.afterSeq..page.throughSeq) { "History page range is invalid" }
+    var previous = page.afterSeq
+    page.items.forEach { row ->
+        require(row.seq > previous && row.seq <= page.nextAfterSeq) { "History page items are not ordered within its range" }
+        previous = row.seq
+    }
+    if (page.direction == "backward") {
+        val before = requireNotNull(page.beforeSeq) { "Backward page has no before_seq" }
+        val next = requireNotNull(page.nextBeforeSeq) { "Backward page has no next_before_seq" }
+        require(before in 0..(page.throughSeq + 1) && page.nextAfterSeq == before - 1) { "Backward page upper boundary is invalid" }
+        require(next == (page.items.firstOrNull()?.seq ?: before)) { "Backward page cursor is invalid" }
+        require(page.afterSeq == if (page.hasMore) next - 1 else -1L) { "Backward page lower boundary is invalid" }
+        require(!page.hasMore || next < before) { "Backward page did not advance" }
+    } else {
+        require(!page.hasMore || page.nextAfterSeq > page.afterSeq) { "Forward page did not advance" }
+        require(page.hasMore || page.nextAfterSeq == page.throughSeq) { "Forward page did not reach its boundary" }
+    }
+}
 
 @Serializable
 data class MessagesAppendedPayload(
@@ -593,6 +640,7 @@ data class MessageContentRef(
     @SerialName("media_type") val mediaType: String,
     @SerialName("byte_length") val byteLength: Long,
     val sha256: String,
+    @SerialName("display_only") val displayOnly: Boolean = false,
 )
 
 @Serializable
@@ -641,6 +689,7 @@ data class TimelineAttachmentDescriptor(
 
 @Serializable
 data class SessionFollowPayload(
+    @SerialName("display_only") val displayOnly: Boolean = true,
     @SerialName("message_log_version") val messageLogVersion: Int = 2,
     @SerialName("after_seq") val afterSeq: Long,
 )

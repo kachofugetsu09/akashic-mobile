@@ -124,9 +124,11 @@ HTTPS 请求必须复用当前 endpoint 已建立的 LAN pin 或 tunnel system t
 
 跨仓库接口从同步改为异步、确认改为接受、返回值改为事件或终态发生变化时，必须视为语义变化，而不是普通实现细节；生产者与移动端消费者需要在同一固定组合上通过场景验收。
 
-### MOB-XREPO-003 Session seq 是主动消息的唯一历史进度
+### MOB-XREPO-003 Message seq 与已接收范围分别表达事实
 
-核心必须先把 Akashic 主动消息提交到 Message 日志，再以 canonical `message_id` 和 `head_seq` 通知移动端。移动端不接收第二份主动正文，不生成 `proactive:*` 或 `ephemeral:*` assistant identity，也不按正文与时间猜测历史对应项。Room 中已完整落地的最大 `serverSeq` 是本地历史进度；客户端分别核对 Session list 的 `message_count` 与 `head_seq`，并用已有 `history.get(after_seq, through_seq)` 只拉取缺尾。`seq` 可以有空洞，不能用 `count - 1` 代替高水位。不得新增服务端或客户端 history cursor；Realtime ACK cursor 只负责传输重放。主动通知 hint 必须与 durable event cursor 在同一事务保存，直到其精确 `message_id` 的完整 `Output(finish=complete)` 落地后才可发布通知。
+核心先把主动消息提交到 Message 日志，再以原 `message_id` 和 `head_seq` 通知移动端。移动端不接收第二份主动正文，也不按内容和时间猜测身份。默认只读取当前会话的近期窗口，旧历史在上翻或定位时按需读取；不自动补齐所有会话。Room 与消息或下载清单同事务保存已接收 seq 范围，最大 seq 不能证明前方历史完整，清单不代表正文和附件已下载。`seq` 可以有空洞，不能用 count 代替覆盖证据。
+
+画面只展示一个连续窗口。引用跳转打开目标窗口，旧窗口不拼入不连续的新消息，回最新时重新取尾页。当前尾页、订阅和回复状态已知即可发送；其他会话、通知定位与旧文件不阻塞。Realtime ACK cursor 只负责事件重放，事件保留范围失效不授权删除 Message 缓存。通知 hint 与 durable cursor 同事务保存，精确 `Output(finish=complete)` 的完整正文落地后才可发布；缓存未命中不等于服务端目标已不存在。
 
 ### MOB-XREPO-004 WebUI 发布只消费固定 Core schema
 
