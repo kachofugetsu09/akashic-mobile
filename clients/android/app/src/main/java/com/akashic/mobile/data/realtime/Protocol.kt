@@ -279,15 +279,17 @@ data class AttachmentDescriptor(
 
 @Serializable
 data class AttachmentDownloadPayload(
-    @SerialName("attachment_id") val attachmentId: String,
+    @SerialName("message_id") val messageId: String,
+    @SerialName("artifact_id") val artifactId: String,
     val offset: Long,
 )
 
 @Serializable
 data class AttachmentDownloadReplyPayload(
-    @SerialName("attachment_id") val attachmentId: String,
-    val filename: String,
-    @SerialName("content_type") val contentType: String,
+    @SerialName("artifact_id") val artifactId: String,
+    val kind: String,
+    val filename: String?,
+    @SerialName("media_type") val mediaType: String?,
     @SerialName("size_bytes") val sizeBytes: Long,
     val sha256: String,
     val offset: Long,
@@ -621,7 +623,21 @@ data class TimelineAttachmentDescriptor(
     @SerialName("media_type") val mediaType: String? = null,
     @SerialName("size_bytes") val sizeBytes: Long,
     val sha256: String,
-)
+) {
+    /** 只在远端附件进入本地缓存的边界校验 Core 合同。 */
+    fun check() {
+        require(ProtocolCodec.ARTIFACT_ID.matches(artifactId)) { "Artifact id is invalid" }
+        require(kind == "file" || kind == "image") { "Artifact kind is invalid" }
+        require(sizeBytes >= 0) { "Artifact size is invalid" }
+        require(Regex("^[0-9a-f]{64}$").matches(sha256)) { "Artifact digest is invalid" }
+        filename?.let { name ->
+            require(name.isNotBlank() && name == name.trim() && name.codePointCount(0, name.length) <= 255 &&
+                '/' !in name && '\\' !in name && name.none { it.code < 32 || it.code == 127 }) { "Artifact filename is invalid" }
+        }
+        mediaType?.let { require(it.length <= 255 && Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$").matches(it)) { "Artifact media type is invalid" } }
+    }
+}
+
 
 @Serializable
 data class SessionFollowPayload(
@@ -657,6 +673,7 @@ data class ProtocolErrorPayload(
 )
 
 object ProtocolCodec {
+    val ARTIFACT_ID = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
     @PublishedApi
     internal val json = Json {
         encodeDefaults = true

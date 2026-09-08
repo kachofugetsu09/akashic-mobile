@@ -949,7 +949,7 @@ class MainViewModel(
                 message.sessionId != sessionId ||
                 (message.serverSeq != null && message.deliveryState != "restoring") ||
                 message.role != "user" || message.deliveryState !in setOf(
-                    "pending", "sent", "failed", "failed_retryable", "outcome_unknown", "restoring",
+                    "pending", "sent", "outcome_unknown", "restoring",
                 )
             ) return@mapNotNull null
             PendingMessageUi(
@@ -1045,9 +1045,10 @@ internal fun List<MessageAttachmentWithMedia>.toMessageAttachmentUi(): List<Mess
     sortedBy { it.link.ordinal }.map { relation ->
         val attachment = relation.attachment
         MessageAttachmentUi(
-            id = attachment.attachmentId,
-            filename = attachment.filename,
-            contentType = attachment.contentType,
+            id = attachment.cacheId,
+            artifactId = attachment.artifactId,
+            filename = attachment.filename ?: "附件",
+            contentType = attachment.contentType ?: "application/octet-stream",
             sizeBytes = attachment.sizeBytes,
             transferredBytes = attachment.transferredBytes,
             state = when (attachment.state) {

@@ -187,6 +187,7 @@ data class MobileWebAttachment(
 @Serializable
 data class MobileWebDownload(
     val artifactId: String,
+    val cacheId: String,
     val state: String,
     val transferredBytes: Long,
     val contentUrl: String? = null,
@@ -279,7 +280,7 @@ data class MobileWebTransferStatus(
 
 /** 把原生持久化投影转换为版本化 WebView 快照。 */
 fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnapshot(
-    protocolVersion = 9,
+    protocolVersion = 10,
     connection = MobileWebConnection(
         label = connectionLabel,
         status = connectionStatus.toMobileWebStatus(),
@@ -294,7 +295,7 @@ fun ConversationUiState.toMobileWebSnapshot(): MobileWebSnapshot = MobileWebSnap
     messages = timelineMessages.map(TimelineMessageUi::toMobileWebTimelineMessage),
     throughSeq = timelineMessages.lastOrNull()?.seq ?: -1,
     replyStatus = replyStatus ?: JsonNull,
-    downloads = downloads.map(MessageAttachmentUi::toMobileWebDownload),
+    downloads = downloads.mapNotNull(MessageAttachmentUi::toMobileWebDownload),
     composer = MobileWebComposer(
         draft = MobileWebComposerDraft(
             text = composerDraft.text,
@@ -379,7 +380,7 @@ fun ConversationUiState.toMobileWebStatePatch(previous: ConversationUiState): Mo
         readingPosition = readingPosition?.toMobileWebReadingPosition(),
         navigationTarget = navigationTarget?.toMobileWebNavigationTarget(),
         projectionGeneration = projectionGeneration,
-        downloads = downloads.map(MessageAttachmentUi::toMobileWebDownload),
+        downloads = downloads.mapNotNull(MessageAttachmentUi::toMobileWebDownload),
         composer = MobileWebComposer(
             draft = MobileWebComposerDraft(
                 text = composerDraft.text,
@@ -562,8 +563,11 @@ private fun MessageAttachmentUi.toMobileWebAttachment() = MobileWebAttachment(
     },
 )
 
-private fun MessageAttachmentUi.toMobileWebDownload() = MobileWebDownload(
-    artifactId = id,
+private fun MessageAttachmentUi.toMobileWebDownload(): MobileWebDownload? {
+    val artifact = artifactId ?: return null
+    return MobileWebDownload(
+    artifactId = artifact,
+    cacheId = id,
     state = when (state) {
         MessageAttachmentState.REMOTE -> "remote"
         MessageAttachmentState.PENDING -> "pending"
@@ -579,6 +583,8 @@ private fun MessageAttachmentUi.toMobileWebDownload() = MobileWebDownload(
         null
     },
 )
+
+}
 
 private fun CommandUi.toMobileWebCommand() = MobileWebCommand(command, description)
 

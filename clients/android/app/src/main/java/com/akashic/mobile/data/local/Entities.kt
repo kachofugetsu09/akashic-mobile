@@ -1,5 +1,6 @@
 package com.akashic.mobile.data.local
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -319,21 +320,15 @@ data class RealtimeCursorEntity(
             childColumns = ["serverId"],
             onDelete = ForeignKey.CASCADE,
         ),
-        ForeignKey(
-            entity = ConversationEntity::class,
-            parentColumns = ["sessionId"],
-            childColumns = ["sessionId"],
-            onDelete = ForeignKey.CASCADE,
-        ),
     ],
-    indices = [Index("serverId"), Index("sessionId"), Index("state")],
+    indices = [Index("serverId"), Index("state"), Index(value = ["serverId", "artifactId"], unique = true)],
 )
 data class MediaAttachmentEntity(
-    @PrimaryKey val attachmentId: String,
+    // 本地缓存键；远端身份只由 artifactId 表达。
+    @PrimaryKey @ColumnInfo(name = "attachmentId") val cacheId: String,
     val serverId: String,
-    val sessionId: String,
-    val filename: String,
-    val contentType: String,
+    val filename: String?,
+    val contentType: String?,
     val sizeBytes: Long,
     val sha256: String,
     val transferredBytes: Long,
@@ -341,6 +336,8 @@ data class MediaAttachmentEntity(
     val cachePath: String,
     val lastAccessedAt: Long,
     val updatedAt: Long,
+    val artifactId: String? = null,
+    val kind: String = "file",
 )
 
 @Entity(
@@ -383,3 +380,15 @@ data class MessageAttachmentWithMedia(
     @Relation(parentColumn = "attachmentId", entityColumn = "attachmentId")
     val attachment: MediaAttachmentEntity,
 )
+
+/** 本地缓存身份按服务端与 artifact 分域，不作为协议 ID。 */
+fun artifactCacheId(serverId: String, artifactId: String): String {
+    val server = serverId.toByteArray(Charsets.UTF_8)
+    val artifact = artifactId.toByteArray(Charsets.UTF_8)
+    val bytes = java.nio.ByteBuffer.allocate(4 + server.size + artifact.size)
+        .putInt(server.size).put(server).put(artifact).array()
+    return "artifact-" + java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
+}
+
+data class AttachmentMessageReference(val messageId: String, val sessionId: String)

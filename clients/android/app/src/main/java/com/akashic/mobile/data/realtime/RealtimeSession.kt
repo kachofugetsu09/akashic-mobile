@@ -463,7 +463,7 @@ class RealtimeSession(
             mutableState.value = mutableState.value.copy(errorMessage = message)
         },
         onStateChanged = ::publishDownloadState,
-        canTransfer = ::canDownloadAttachment,
+        canUseSession = { serverId, sessionId -> !isRemoteMissingSession(serverId, sessionId) },
     )
     private val messageDownloads = MessageContentDownloadCoordinator(
         dao = database.messageContentTransfers(),
@@ -931,7 +931,7 @@ class RealtimeSession(
         }
     }
 
-    /** 原位恢复一条失败用户消息。 */
+    /** 通过既有 bridge 入口核对结果未知的 Input。 */
     fun retryFailedMessage(messageId: String) {
         scope.launch {
             mutex.withLock {
@@ -946,7 +946,7 @@ class RealtimeSession(
                     return@withLock
                 }
                 val now = System.currentTimeMillis()
-                deliveryStore.retryFailedMessage(messageId, Ulid.next(now), now)
+                deliveryStore.verifyMessageOutcome(messageId, now)
                 mutableState.value = mutableState.value.copy(errorMessage = null)
                 if (mutableState.value.connection.phase == ConnectionPhase.READY) flushOutbox()
             }
@@ -1668,11 +1668,11 @@ class RealtimeSession(
                 } catch (error: ArithmeticException) {
                     failCandidateProtocol(candidateId, envelope, error, "连接协议数值溢出")
                 } catch (error: SQLiteException) {
-                    failCandidateProtocol(candidateId, envelope, error, "本地数据库处理失败：${error.message}")
+                    pauseLocalProcessing(error, "本地数据库处理失败：${error.message}")
                 } catch (error: IOException) {
-                    failCandidateProtocol(candidateId, envelope, error, "本地文件处理失败：${error.message}")
+                    pauseLocalProcessing(error, "本地文件处理失败：${error.message}")
                 } catch (error: SecurityException) {
-                    failCandidateProtocol(candidateId, envelope, error, "本地缓存路径不安全：${error.message}")
+                    pauseLocalProcessing(error, "本地缓存路径不安全：${error.message}")
                 }
             }
         }
@@ -1703,7 +1703,7 @@ class RealtimeSession(
                 } catch (error: IOException) {
                     failDownloadConnection("附件缓存写入失败：${error.message}")
                 } catch (error: SQLiteException) {
-                    failDownloadConnection("附件下载数据库失败：${error.message}")
+                    pauseLocalProcessing(error, "附件下载数据库失败：${error.message}")
                 } catch (error: ArithmeticException) {
                     failDownloadConnection("附件下载长度溢出")
                 } catch (error: SecurityException) {
@@ -2011,7 +2011,7 @@ class RealtimeSession(
                     } catch (error: IOException) {
                         failDownloadConnection("附件缓存提交失败：${error.message}")
                     } catch (error: SQLiteException) {
-                        failDownloadConnection("附件下载数据库失败：${error.message}")
+                        pauseLocalProcessing(error, "附件下载数据库失败：${error.message}")
                     } catch (error: ArithmeticException) {
                         failDownloadConnection("附件下载长度溢出")
                     } catch (error: SecurityException) {
@@ -2115,11 +2115,11 @@ class RealtimeSession(
                                 remoteSessionIds = remoteIds - sessionId,
                             )
                         }
-                        deliveryStore.retainFailedOutbox(
-                            id,
-                            outcomeUnknown = code == "command_outcome_unknown",
-                            updatedAt = System.currentTimeMillis(),
-                        )
+                        if (code == "command_outcome_unknown") {
+                            deliveryStore.retainUnknownOutbox(id, updatedAt = System.currentTimeMillis())
+                        } else {
+                            deliveryStore.discardFailedOutbox(id, System.currentTimeMillis())
+                        }
                         activeOutboxCommandId = null
                         mutableState.value = mutableState.value.copy(
                             errorMessage = if (code == "command_outcome_unknown") {
@@ -2682,7 +2682,7 @@ class RealtimeSession(
                 sessionId != null &&
                 isRemoteMissingSession(currentProfile.serverId, sessionId)
             ) {
-                deliveryStore.retainUnsentOutbox(command.commandId, System.currentTimeMillis())
+                deliveryStore.discardFailedOutbox(command.commandId, System.currentTimeMillis())
                 mutableState.value = mutableState.value.copy(
                     errorMessage = "电脑端已删除一段会话，未发送内容仍保留在本机",
                 )
@@ -2882,6 +2882,7 @@ class RealtimeSession(
     }
 
     private fun scheduleReconnect(message: String) {
+        if (mutableState.value.connection.lastErrorCode == "local_persistence") return
         if (deviceRevoked) {
             mutableState.value = mutableState.value.copy(
                 connection = mutableState.value.connection.copy(phase = ConnectionPhase.FAILED),
@@ -3080,6 +3081,26 @@ class RealtimeSession(
         )
     }
 
+    /** 本地持久化失败停止消费和 ACK，恢复连接不能替代修复本地状态。 */
+    private fun pauseLocalProcessing(error: Throwable, message: String) {
+        onRuntimeError("operation=local_persistence", error)
+        reconnectJob?.cancel()
+        reconnectJob = null
+        ackJob?.cancel()
+        ackJob = null
+        pendingAckCount = 0
+        val generation = currentGeneration()
+        resetGenerationState()
+        uploads.onDisconnected()
+        downloads.onDisconnected()
+        socket.closeGeneration(generation)
+        mutableState.value = mutableState.value.copy(
+            connection = mutableState.value.connection.copy(phase = ConnectionPhase.FAILED, lastErrorCode = "local_persistence"),
+            isReloadingHistory = false,
+            errorMessage = "$message，请检查本机存储后重新连接",
+        )
+    }
+
     private fun failCandidateProtocol(
         candidateId: SocketCandidateId,
         envelope: WireEnvelope,
@@ -3169,9 +3190,6 @@ class RealtimeSession(
                     transferNetwork.value.kind != TransferNetworkKind.METERED ||
                     meteredLargeTransferApproved
                 )
-
-    private suspend fun canDownloadAttachment(transfer: MediaAttachmentEntity): Boolean =
-        !isRemoteMissingSession(transfer.serverId, transfer.sessionId)
 
     private fun control(type: String, payload: kotlinx.serialization.json.JsonObject) = WireEnvelope(
         v = WIRE_PROTOCOL_VERSION,

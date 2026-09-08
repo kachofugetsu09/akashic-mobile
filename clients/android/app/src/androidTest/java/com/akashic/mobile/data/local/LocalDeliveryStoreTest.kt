@@ -1522,7 +1522,7 @@ class LocalDeliveryStoreTest {
         assertEquals("complete", canonical.deliveryState)
         assertEquals(
             listOf(attachmentId),
-            database.mediaAttachments().forMessage("akashic:test:user:canonical").map { it.attachmentId },
+            database.mediaAttachments().forMessage("akashic:test:user:canonical").map { it.cacheId },
         )
     }
 
@@ -1821,7 +1821,7 @@ class LocalDeliveryStoreTest {
         assertEquals("重建后的实时消息", database.messages().get("akashic:test:live")!!.text)
         assertEquals(
             listOf("01ARZ3NDEKTSV4RRFFQ69G5FAW"),
-            database.mediaAttachments().forMessage("akashic:test:history").map { it.attachmentId },
+            database.mediaAttachments().forMessage("akashic:test:history").map { it.cacheId },
         )
     }
 
@@ -1906,7 +1906,7 @@ class LocalDeliveryStoreTest {
         assertEquals("sending", database.attachmentTransfers().get("attachment")!!.state)
         assertEquals(
             listOf("attachment"),
-            database.mediaAttachments().forMessage(payload.clientMessageId).map { it.attachmentId },
+            database.mediaAttachments().forMessage(payload.clientMessageId).map { it.cacheId },
         )
         assertEquals(
             listOf("attachment"),
@@ -1917,7 +1917,7 @@ class LocalDeliveryStoreTest {
         assertTrue(database.conversations().get("akashic:test")!!.remoteKnown)
         assertEquals(
             listOf("attachment"),
-            database.mediaAttachments().forMessage(payload.clientMessageId).map { it.attachmentId },
+            database.mediaAttachments().forMessage(payload.clientMessageId).map { it.cacheId },
         )
     }
 
@@ -2003,34 +2003,24 @@ class LocalDeliveryStoreTest {
         )
         assertEquals(messageId, database.composerDrafts().get("server", "akashic:test")!!.replyToMessageId)
         assertEquals(
-            listOf(attachmentId),
-            database.mediaAttachments().forMessage(messageId).map { it.attachmentId },
+            listOf(artifactCacheId("server", attachmentId)),
+            database.mediaAttachments().forMessage(messageId).map { it.cacheId },
         )
         assertEquals("sent", database.attachmentTransfers().get(attachmentId)!!.state)
         assertEquals(null, database.outbox().get(messageId))
     }
 
     @Test
-    fun retryDefiniteFailureKeepsVisualMessageAndCreatesNewIdempotencyKey() = runBlocking {
-        val oldCommandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
-        val newCommandId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
-        enqueueRetryableMessage(oldCommandId, createdAt = 2_000)
-        store.markOutboxAttempt(oldCommandId, attemptedAt = 2_100)
-        store.retainFailedOutbox(oldCommandId, outcomeUnknown = false, updatedAt = 2_200)
-
-        assertTrue(store.retryFailedMessage(oldCommandId, newCommandId, updatedAt = 2_300))
-        assertTrue(!store.retryFailedMessage(oldCommandId, newCommandId, updatedAt = 2_301))
-
-        assertEquals(null, database.messages().get(oldCommandId))
-        val message = requireNotNull(database.messages().get(newCommandId))
-        val command = requireNotNull(database.outbox().get(newCommandId))
-        val payload = ProtocolCodec.decodePayload<MessageSendPayload>(ProtocolCodec.decode(command.envelopeJson).payload)
-        assertEquals(null, message.clientMessageId)
-        assertEquals("pending", message.deliveryState)
-        assertEquals(newCommandId, payload.clientMessageId)
-        assertEquals(oldCommandId, payload.retryOfClientMessageId)
-        assertEquals(2_000, command.createdAt)
-        assertEquals(null, database.outbox().get(oldCommandId))
+    fun definiteRejectionEndsOutboxAndKeepsOriginalMessage() = runBlocking {
+        val id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        enqueueRetryableMessage(id, createdAt = 2_000)
+        store.markOutboxAttempt(id, attemptedAt = 2_100)
+        val original = database.messages().get(id)!!
+        store.discardFailedOutbox(id, updatedAt = 2_200)
+        assertEquals(null, database.outbox().get(id))
+        assertEquals(original.text, database.messages().get(id)!!.text)
+        assertEquals("failed", database.messages().get(id)!!.deliveryState)
+        assertEquals(false, store.verifyMessageOutcome(id, updatedAt = 2_300))
         assertEquals(1, database.messages().countForSession("akashic:test"))
     }
 
@@ -2089,14 +2079,14 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
-    fun unavailableSessionRetainsPendingOutboxBeforeTransportAttempt() = runBlocking {
+    fun unavailableSessionEndsUnsentOutboxAndKeepsMessage() = runBlocking {
         val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         enqueueRetryableMessage(commandId, createdAt = 2_000)
 
-        store.retainUnsentOutbox(commandId, updatedAt = 2_100)
+        store.discardFailedOutbox(commandId, updatedAt = 2_100)
 
-        assertEquals("failed_retryable", database.messages().get(commandId)!!.deliveryState)
-        assertEquals("failed_retryable", database.outbox().get(commandId)!!.state)
+        assertEquals("failed", database.messages().get(commandId)!!.deliveryState)
+        assertEquals(null, database.outbox().get(commandId))
     }
 
     @Test
@@ -2105,10 +2095,10 @@ class LocalDeliveryStoreTest {
         val unusedCommandId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
         enqueueRetryableMessage(oldCommandId, createdAt = 2_000)
         store.markOutboxAttempt(oldCommandId, attemptedAt = 2_100)
-        store.retainFailedOutbox(oldCommandId, outcomeUnknown = true, updatedAt = 2_200)
+        store.retainUnknownOutbox(oldCommandId, updatedAt = 2_200)
 
-        assertTrue(store.retryFailedMessage(oldCommandId, unusedCommandId, updatedAt = 2_300))
-        assertTrue(!store.retryFailedMessage(oldCommandId, unusedCommandId, updatedAt = 2_301))
+        assertTrue(store.verifyMessageOutcome(oldCommandId, updatedAt = 2_300))
+        assertTrue(!store.verifyMessageOutcome(oldCommandId, updatedAt = 2_301))
 
         val message = requireNotNull(database.messages().get(oldCommandId))
         val command = requireNotNull(database.outbox().get(oldCommandId))
@@ -2116,6 +2106,26 @@ class LocalDeliveryStoreTest {
         assertEquals("pending", message.deliveryState)
         assertEquals("retry", command.state)
         assertEquals(null, database.outbox().get(unusedCommandId))
+    }
+
+    @Test
+    fun unknownOutcomeKeepsAttachmentUntilDefiniteRejection() = runBlocking {
+        val id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val mediaId = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+        database.attachmentTransfers().upsert(transfer("ready", 1_048_579, mediaId))
+        enqueueRetryableMessage(id, 2_000, listOf(mediaId))
+        store.markOutboxAttempt(id, 2_100)
+        val original = database.outbox().get(id)!!.envelopeJson
+        store.retainUnknownOutbox(id, 2_200)
+        assertEquals("sending", database.attachmentTransfers().get(mediaId)!!.state)
+        assertTrue(store.verifyMessageOutcome(id, 2_300))
+        assertEquals(original, database.outbox().get(id)!!.envelopeJson)
+        assertEquals("sending", database.attachmentTransfers().get(mediaId)!!.state)
+        store.discardFailedOutbox(id, 2_400)
+        assertEquals(null, database.outbox().get(id))
+        assertEquals("ready", database.attachmentTransfers().get(mediaId)!!.state)
+        assertEquals("failed", database.messages().get(id)!!.deliveryState)
+        assertEquals(listOf(mediaId), database.mediaAttachments().forMessage(id).map { it.cacheId })
     }
 
     @Test
@@ -2150,9 +2160,9 @@ class LocalDeliveryStoreTest {
             persisted.messages().upsert(
                 MessageEntity(messageId, messageId.removePrefix("user:"), "akashic:restart", "user", "附件：image.png", "sent", 1, 1),
             )
-            persisted.mediaAttachments().upsert(attachment.copy(serverId = "restart", sessionId = "akashic:restart"))
+            persisted.mediaAttachments().upsert(attachment.copy(serverId = "restart"))
             persisted.mediaAttachments().linkAll(
-                listOf(MessageAttachmentEntity(messageId, attachment.attachmentId, 0)),
+                listOf(MessageAttachmentEntity(messageId, attachment.cacheId, 0)),
             )
             persisted.close()
 
@@ -2213,12 +2223,12 @@ class LocalDeliveryStoreTest {
         assertNotNull(attachment)
         assertEquals("pending", attachment!!.state)
         assertEquals(
-            listOf(attachment.attachmentId),
-            database.mediaAttachments().forMessage("akashic:test:assistant:attachment").map { it.attachmentId },
+            listOf(attachment.cacheId),
+            database.mediaAttachments().forMessage("akashic:test:assistant:attachment").map { it.cacheId },
         )
         assertEquals(
-            listOf(attachment.attachmentId),
-            database.mediaAttachments().forMessage("akashic:test:1").map { it.attachmentId },
+            listOf(attachment.cacheId),
+            database.mediaAttachments().forMessage("akashic:test:1").map { it.cacheId },
         )
     }
 
@@ -2249,7 +2259,7 @@ class LocalDeliveryStoreTest {
 
         assertEquals("pending", database.mediaAttachments().get(smallId)!!.state)
         assertEquals("remote", database.mediaAttachments().get(largeId)!!.state)
-        assertEquals(listOf(smallId), database.mediaAttachments().pendingDownloads("server").map { it.attachmentId })
+        assertEquals(listOf(smallId), database.mediaAttachments().pendingDownloads("server").map { it.cacheId })
 
         mediaCache.reconcile()
         assertEquals("remote", database.mediaAttachments().get(largeId)!!.state)
@@ -2270,7 +2280,7 @@ class LocalDeliveryStoreTest {
         assertEquals(listOf("attachment.download"), sentTypes)
         assertEquals(
             listOf(largeId),
-            database.mediaAttachments().pendingDownloads("server").map { it.attachmentId },
+            database.mediaAttachments().pendingDownloads("server").map { it.cacheId },
         )
     }
 
@@ -2284,7 +2294,7 @@ class LocalDeliveryStoreTest {
         database.mediaAttachments().upsertAll(
             listOf(
                 mediaAttachment(unavailableId).copy(
-                    sessionId = "akashic:stale",
+                    artifactId = unavailableId,
                     sizeBytes = 1,
                     transferredBytes = 0,
                     state = "pending",
@@ -2292,6 +2302,7 @@ class LocalDeliveryStoreTest {
                     updatedAt = 1,
                 ),
                 mediaAttachment(availableId).copy(
+                    artifactId = availableId,
                     sizeBytes = 1,
                     transferredBytes = 0,
                     state = "pending",
@@ -2300,6 +2311,14 @@ class LocalDeliveryStoreTest {
                 ),
             ),
         )
+        for ((id, sid) in listOf(unavailableId to "akashic:stale", availableId to "akashic:test")) {
+            database.messages().upsert(MessageEntity(
+                messageId = "ref-$id", clientMessageId = null, sessionId = sid, role = "assistant",
+                text = "附件", deliveryState = "sent", createdAt = 1, updatedAt = 1,
+                serverSeq = 1, bodyJson = "{\"kind\":\"output\"}",
+            ))
+            database.mediaAttachments().linkAll(listOf(MessageAttachmentEntity("ref-$id", id, 0)))
+        }
         val sentSessions = mutableListOf<String>()
         val downloads = AttachmentDownloadCoordinator(
             database.mediaAttachments(),
@@ -2307,7 +2326,7 @@ class LocalDeliveryStoreTest {
             sendCommand = { _, _, sessionId, _ -> sentSessions += sessionId; true },
             onTransportUnavailable = {},
             onDownloadFailed = {},
-            canTransfer = { it.sessionId != "akashic:stale" },
+            canUseSession = { _, sessionId -> sessionId != "akashic:stale" },
         )
 
         downloads.onConnectionReady("server")
@@ -2622,9 +2641,8 @@ class LocalDeliveryStoreTest {
     )
 
     private fun mediaAttachment(id: String) = MediaAttachmentEntity(
-        attachmentId = id,
+        cacheId = id,
         serverId = "server",
-        sessionId = "akashic:test",
         filename = "image.png",
         contentType = "image/png",
         sizeBytes = 1_048_579,
@@ -2636,12 +2654,12 @@ class LocalDeliveryStoreTest {
         updatedAt = 1,
     )
 
-    private suspend fun enqueueRetryableMessage(commandId: String, createdAt: Long) {
+    private suspend fun enqueueRetryableMessage(commandId: String, createdAt: Long, mediaRefs: List<String> = emptyList()) {
         val payload = MessageSendPayload(
             clientMessageId = commandId,
             sessionId = "akashic:test",
             text = "需要恢复的消息",
-            mediaRefs = emptyList(),
+            mediaRefs = mediaRefs,
             clientCreatedAt = "2026-07-16T08:00:00Z",
         )
         val envelope = WireEnvelope(
@@ -2657,7 +2675,7 @@ class LocalDeliveryStoreTest {
             ConversationEntity("akashic:test", "server", "test", 1),
             retryMessage(commandId, null, createdAt, null, "pending"),
             OutboxCommandEntity(commandId, "server", ProtocolCodec.encode(envelope), "pending", 0, createdAt, null),
-            emptyList(),
+            mediaRefs.map(::mediaAttachment),
         )
     }
 

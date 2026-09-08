@@ -504,18 +504,17 @@ class ProtocolCodecTest {
     }
 
     @Test
-    fun `decodes attachment descriptor download reply and binary chunk`() {
-        val frame = AttachmentChunkCodec.encode(
-            "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-            128,
-            byteArrayOf(1, 2, 3),
-        )
-
-        val decoded = AttachmentChunkCodec.decode(frame)
-
-        assertEquals("01ARZ3NDEKTSV4RRFFQ69G5FAV", decoded.attachmentId)
-        assertEquals(128L, decoded.offset)
-        assertEquals(listOf<Byte>(1, 2, 3), decoded.payload.toList())
+    fun `upload frame identity and downloaded artifact identity are independent`() {
+        val upload = AttachmentChunkCodec.encode("01ARZ3NDEKTSV4RRFFQ69G5FAV", 0, byteArrayOf(1))
+        assertThrows(IllegalArgumentException::class.java) { AttachmentChunkCodec.decode(upload) }
+        for (id in listOf("21f6c57ea37a477a98037f6ea74c5fb6", "x".repeat(256))) {
+            val header = """{"artifact_id":"$id","offset":0}""".toByteArray()
+            val raw = java.nio.ByteBuffer.allocate(4 + header.size).putInt(header.size).put(header).array()
+            val decoded = AttachmentChunkCodec.decode(okio.ByteString.of(*raw))
+            assertEquals(id, decoded.artifactId)
+            assertEquals(0L, decoded.offset)
+            assertEquals(0, decoded.payload.size)
+        }
     }
 
     @Test

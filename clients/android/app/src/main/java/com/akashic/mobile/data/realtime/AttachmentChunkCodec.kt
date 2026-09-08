@@ -13,19 +13,20 @@ import okio.ByteString.Companion.toByteString
 
 object AttachmentChunkCodec {
     data class DecodedChunk(
-        val attachmentId: String,
+        val artifactId: String,
         val offset: Long,
         val payload: ByteArray,
     )
 
     @Serializable
     private data class ChunkHeader(
-        @SerialName("attachment_id") val attachmentId: String,
+        @SerialName("artifact_id") val artifactId: String,
         val offset: Long,
     )
 
     /** 编码服务端约定的绝对 offset WebSocket 二进制分片。 */
     fun encode(attachmentId: String, offset: Long, payload: ByteArray): ByteString {
+        require(ProtocolCodec.FRAME_ID.matches(attachmentId)) { "Upload attachment id is invalid" }
         require(offset >= 0) { "附件 offset 不能为负数" }
         require(payload.isNotEmpty() && payload.size <= MAX_CHUNK_BYTES) {
             "附件分片必须在 1..$MAX_CHUNK_BYTES 字节"
@@ -55,7 +56,7 @@ object AttachmentChunkCodec {
         val buffer = ByteBuffer.wrap(raw).order(ByteOrder.BIG_ENDIAN)
         val headerSize = buffer.int
         require(headerSize in 1..MAX_HEADER_BYTES) { "附件二进制帧 header 长度无效" }
-        require(raw.size > Int.SIZE_BYTES + headerSize) { "附件二进制帧缺少分片数据" }
+        require(raw.size >= Int.SIZE_BYTES + headerSize) { "附件二进制帧缺少分片数据" }
 
         // 2. 解析 header 并限制分片大小
         val headerBytes = ByteArray(headerSize)
@@ -63,9 +64,10 @@ object AttachmentChunkCodec {
         val header = ProtocolCodec.json().decodeFromString<ChunkHeader>(headerBytes.toString(Charsets.UTF_8))
         val payload = ByteArray(buffer.remaining())
         buffer.get(payload)
+        require(ProtocolCodec.ARTIFACT_ID.matches(header.artifactId)) { "Artifact id is invalid" }
         require(header.offset >= 0) { "附件 offset 不能为负数" }
         require(payload.size <= MAX_CHUNK_BYTES) { "附件二进制分片超过 $MAX_CHUNK_BYTES 字节" }
-        return DecodedChunk(header.attachmentId, header.offset, payload)
+        return DecodedChunk(header.artifactId, header.offset, payload)
     }
 
     const val MAX_CHUNK_BYTES = 128 * 1024

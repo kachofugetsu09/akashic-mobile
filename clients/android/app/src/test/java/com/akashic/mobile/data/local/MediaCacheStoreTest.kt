@@ -25,8 +25,8 @@ class MediaCacheStoreTest {
 
         cache.reconcile()
 
-        assertEquals("cached", dao.get(transfer.attachmentId)!!.state)
-        assertEquals(content.size.toLong(), dao.get(transfer.attachmentId)!!.transferredBytes)
+        assertEquals("cached", dao.get(transfer.cacheId)!!.state)
+        assertEquals(content.size.toLong(), dao.get(transfer.cacheId)!!.transferredBytes)
     }
 
     @Test
@@ -40,7 +40,7 @@ class MediaCacheStoreTest {
 
         cache.reconcile()
 
-        assertEquals("cached", dao.get(transfer.attachmentId)!!.state)
+        assertEquals("cached", dao.get(transfer.cacheId)!!.state)
         assertTrue(File(transfer.cachePath).exists())
         assertFalse(File("${transfer.cachePath}.part").exists())
     }
@@ -56,7 +56,7 @@ class MediaCacheStoreTest {
 
         cache.reconcile()
 
-        assertEquals("evicted", dao.get(transfer.attachmentId)!!.state)
+        assertEquals("evicted", dao.get(transfer.cacheId)!!.state)
         assertFalse(stalePart.exists())
         assertFalse(orphan.exists())
     }
@@ -73,8 +73,8 @@ class MediaCacheStoreTest {
 
         cache.enforceQuota()
 
-        assertEquals("evicted", dao.get(old.attachmentId)!!.state)
-        assertEquals("cached", dao.get(recent.attachmentId)!!.state)
+        assertEquals("evicted", dao.get(old.cacheId)!!.state)
+        assertEquals("cached", dao.get(recent.cacheId)!!.state)
         assertTrue(dao.pendingDownloads("server").isEmpty())
     }
 
@@ -115,9 +115,8 @@ class MediaCacheStoreTest {
         state: String,
         accessedAt: Long = 1,
     ) = MediaAttachmentEntity(
-        attachmentId = id,
+        cacheId = id,
         serverId = "server",
-        sessionId = "akashic:test",
         filename = "file.bin",
         contentType = "application/octet-stream",
         sizeBytes = content.size.toLong(),
@@ -130,6 +129,7 @@ class MediaCacheStoreTest {
     )
 
     private class FakeMediaDao : MediaAttachmentDao {
+        override suspend fun references(cacheId: String, serverId: String) = emptyList<AttachmentMessageReference>()
         val values = mutableListOf<MediaAttachmentEntity>()
 
         override suspend fun upsert(attachment: MediaAttachmentEntity) = replace(attachment)
@@ -137,7 +137,7 @@ class MediaCacheStoreTest {
         override suspend fun linkAll(links: List<MessageAttachmentEntity>): List<Long> = links.map { 1L }
         override suspend fun deleteLinks(messageId: String): Int = 0
         override suspend fun moveLinks(sourceId: String, targetId: String): Int = 0
-        override suspend fun get(attachmentId: String) = values.firstOrNull { it.attachmentId == attachmentId }
+        override suspend fun get(attachmentId: String) = values.firstOrNull { it.cacheId == attachmentId }
         override suspend fun pendingDownloads(serverId: String) =
             values.filter { it.serverId == serverId && it.state in setOf("pending", "downloading") }
 
@@ -169,14 +169,14 @@ class MediaCacheStoreTest {
             it.copy(transferredBytes = 0, state = "evicted", updatedAt = updatedAt)
         }
 
-        override suspend fun getAll(ids: List<String>) = values.filter { it.attachmentId in ids }
+        override suspend fun getAll(ids: List<String>) = values.filter { it.cacheId in ids }
         override suspend fun all() = values.toList()
         override suspend fun unreferenced() = emptyList<MediaAttachmentEntity>()
-        override suspend fun delete(attachmentId: String): Int = if (values.removeIf { it.attachmentId == attachmentId }) 1 else 0
+        override suspend fun delete(attachmentId: String): Int = if (values.removeIf { it.cacheId == attachmentId }) 1 else 0
         override suspend fun forMessage(messageId: String) = emptyList<MediaAttachmentEntity>()
 
         private fun replace(value: MediaAttachmentEntity) {
-            values.removeIf { it.attachmentId == value.attachmentId }
+            values.removeIf { it.cacheId == value.cacheId }
             values += value
         }
 
@@ -188,7 +188,7 @@ class MediaCacheStoreTest {
             predicate: (MediaAttachmentEntity) -> Boolean,
             transform: (MediaAttachmentEntity) -> MediaAttachmentEntity,
         ): Int {
-            val index = values.indexOfFirst { it.attachmentId == id && predicate(it) }
+            val index = values.indexOfFirst { it.cacheId == id && predicate(it) }
             if (index < 0) return 0
             values[index] = transform(values[index])
             return 1

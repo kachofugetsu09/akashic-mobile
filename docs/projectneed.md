@@ -56,6 +56,8 @@ Room 中从核心重新拉取的会话、消息、turn block 和附件元数据�
 
 接收附件和插件 UI 的可重建文件可以按明确容量策略驱逐；驱逐只能改变本地可用性状态，不得伪装成远端附件、插件能力或消息事实不存在。
 
+附件缓存按 `(serverId, artifactId)` 标识；Message link 只提供显示与下载授权所在会话。协议 `artifact_id` 是 opaque ID，不沿用上传 Frame ID 校验。文件名和 MIME 原样允许 null，大小允许零；展示和系统操作边界才选择缺省文件名或 MIME。Native→Web 下载状态将 `artifactId` 与本地 `cacheId` 分开。
+
 ### MOB-DATA-004 超长历史正文必须完整且可续传恢复
 
 历史消息超过实时事件预算时，移动端仍必须恢复完整 UTF-8 正文，并保持该消息的 thinking、tool block、顺序和身份不变。正文通过当前已认证连接授权的同源 HTTPS Range 分段恢复；已确认的文件偏移跨断线和进程重启保留，只有字节长度与 SHA-256 同时匹配时才替换预览。失败必须保持可重试状态，不得把预览、部分文件或摘要不匹配的内容标记为完整正文。
@@ -136,7 +138,7 @@ Mobile 只把 `Message` 日志作为会话正文。`session.follow` 的 `reply.s
 
 ### MOB-XREPO-006 Input ACK 与显式重试保持单一 owner
 
-`message.send` 的 frame ID、`client_message_id`、本地 user `messageId` 与 Core 保存的 Input `Message.id` 必须相同。`message.send.ok` 只在 Core 已持久接受对应 Input 后返回，并带回同一 ID；客户端验证后删除 outbox。如果 Input 已先从 Message 日志落地，ACK 不得把 `complete` 降级为 `sent`。结果未知复用原 ID 核对；明确失败的显式重试生成一个新的 Message/命令 ID，并在同一 Room 事务中移动原视觉行、阅读锚点、草稿引用、消息引用和附件链接。普通再次发送始终创建新 user message，不按正文、时间、metadata 或相邻位置猜测身份。
+`message.send` 的 frame ID、`client_message_id`、本地 user `messageId` 与 Core 保存的 Input `Message.id` 必须相同。`message.send.ok` 只在 Core 已持久接受对应 Input 后返回，并带回同一 ID；客户端验证后删除 outbox。如果 Input 已先从 Message 日志落地，ACK 不得把 `complete` 降级为 `sent`。结果未知保留原命令与附件占用，并复用原 ID 核对；明确拒绝结束 outbox，保留失败正文，且不在编辑器下方显示待发送项。已落地 Input 不因迟到错误降级。普通再次发送始终创建新 user message，不按正文、时间、metadata 或相邻位置猜测身份。
 
 ## 7. 仓库与安全边界
 

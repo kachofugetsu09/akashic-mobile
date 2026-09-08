@@ -37,9 +37,8 @@ class MessageAttachmentPresentationTest {
             ordinal = ordinal,
         ),
         attachment = MediaAttachmentEntity(
-            attachmentId = id,
+            cacheId = id,
             serverId = "server",
-            sessionId = "akashic:test",
             filename = "$id.pdf",
             contentType = "application/pdf",
             sizeBytes = 100,

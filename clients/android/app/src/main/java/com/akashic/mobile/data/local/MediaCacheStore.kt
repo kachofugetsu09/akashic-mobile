@@ -37,9 +37,8 @@ class MediaCacheStore(
             "附件草稿内容与上传元数据不一致"
         }
         val cached = MediaAttachmentEntity(
-            attachmentId = transfer.attachmentId,
+            cacheId = transfer.attachmentId,
             serverId = transfer.serverId,
-            sessionId = transfer.sessionId,
             filename = transfer.filename,
             contentType = transfer.contentType,
             sizeBytes = transfer.sizeBytes,
@@ -87,7 +86,7 @@ class MediaCacheStore(
         dao.unreferenced().forEach { transfer ->
             deleteIfExists(rawFile(transfer, ".bin"))
             deleteIfExists(rawFile(transfer, ".bin.part"))
-            check(dao.delete(transfer.attachmentId) == 1) { "未引用附件记录已消失" }
+            check(dao.delete(transfer.cacheId) == 1) { "未引用附件记录已消失" }
         }
 
         // 2. 以持久文件为准修复下载状态
@@ -110,7 +109,7 @@ class MediaCacheStore(
 
     suspend fun reserve(transfer: MediaAttachmentEntity) {
         val remaining = Math.subtractExact(transfer.sizeBytes, partialFile(transfer).length())
-        trimToQuota(remaining, transfer.attachmentId)
+        trimToQuota(remaining, transfer.cacheId)
         require(root.usableSpace >= remaining) { "附件缓存磁盘空间不足" }
     }
 
@@ -134,7 +133,7 @@ class MediaCacheStore(
         if (Files.isSymbolicLink(partial.toPath())) deleteIfExists(partial)
         if (transfer.state == "remote") {
             check(transfer.transferredBytes == 0L && !final.exists() && !partial.exists()) {
-                "未请求附件不能持有本地内容: ${transfer.attachmentId}"
+                "未请求附件不能持有本地内容: ${transfer.cacheId}"
             }
             return
         }
@@ -142,7 +141,7 @@ class MediaCacheStore(
             deleteIfExists(final)
             deleteIfExists(partial)
             if (transfer.transferredBytes != 0L) {
-                check(dao.markEvicted(transfer.attachmentId, System.currentTimeMillis()) == 1)
+                check(dao.markEvicted(transfer.cacheId, System.currentTimeMillis()) == 1)
             }
             return
         }
@@ -150,7 +149,7 @@ class MediaCacheStore(
             if (isComplete(final, transfer)) {
                 deleteIfExists(partial)
                 if (transfer.state != "cached" || transfer.transferredBytes != transfer.sizeBytes) {
-                    check(dao.markCached(transfer.attachmentId, System.currentTimeMillis()) == 1)
+                    check(dao.markCached(transfer.cacheId, System.currentTimeMillis()) == 1)
                 }
                 return
             }
@@ -160,7 +159,7 @@ class MediaCacheStore(
         val actual = if (partial.exists()) partial.length() else 0L
         if (actual > transfer.sizeBytes) {
             deleteIfExists(partial)
-            check(dao.updateDownload(transfer.attachmentId, 0, "failed", System.currentTimeMillis()) == 1)
+            check(dao.updateDownload(transfer.cacheId, 0, "failed", System.currentTimeMillis()) == 1)
             return
         }
         if (actual == transfer.sizeBytes && actual > 0) {
@@ -171,16 +170,16 @@ class MediaCacheStore(
                     StandardCopyOption.ATOMIC_MOVE,
                     StandardCopyOption.REPLACE_EXISTING,
                 )
-                check(dao.markCached(transfer.attachmentId, System.currentTimeMillis()) == 1)
+                check(dao.markCached(transfer.cacheId, System.currentTimeMillis()) == 1)
             } else {
                 deleteIfExists(partial)
-                check(dao.updateDownload(transfer.attachmentId, 0, "failed", System.currentTimeMillis()) == 1)
+                check(dao.updateDownload(transfer.cacheId, 0, "failed", System.currentTimeMillis()) == 1)
             }
             return
         }
         val state = if (transfer.state == "failed") "failed" else if (actual == 0L) "pending" else "downloading"
         if (transfer.transferredBytes != actual || transfer.state != state) {
-            check(dao.updateDownload(transfer.attachmentId, actual, state, System.currentTimeMillis()) == 1)
+            check(dao.updateDownload(transfer.cacheId, actual, state, System.currentTimeMillis()) == 1)
         }
     }
 
@@ -191,8 +190,8 @@ class MediaCacheStore(
             .filter { it.isFile }
             .sumOf { it.length() }
         val candidates = records
-            .filter { it.attachmentId != activeAttachmentId && it.state in EVICTABLE_STATES }
-            .sortedWith(compareBy<MediaAttachmentEntity> { it.lastAccessedAt }.thenBy { it.attachmentId })
+            .filter { it.cacheId != activeAttachmentId && it.state in EVICTABLE_STATES }
+            .sortedWith(compareBy<MediaAttachmentEntity> { it.lastAccessedAt }.thenBy { it.cacheId })
         for (transfer in candidates) {
             if (Math.addExact(occupied, reserveBytes) <= quotaBytes) break
             val final = rawFile(transfer, ".bin")
@@ -200,7 +199,7 @@ class MediaCacheStore(
             val released = Math.addExact(final.length(), partial.length())
             deleteIfExists(final)
             deleteIfExists(partial)
-            check(dao.markEvicted(transfer.attachmentId, System.currentTimeMillis()) == 1)
+            check(dao.markEvicted(transfer.cacheId, System.currentTimeMillis()) == 1)
             occupied = Math.subtractExact(occupied, released)
         }
         require(Math.addExact(occupied, reserveBytes) <= quotaBytes) { "附件缓存配额不足" }
@@ -213,9 +212,8 @@ class MediaCacheStore(
             sha256(file) == transfer.sha256.lowercase()
 
     private fun rawFile(transfer: MediaAttachmentEntity, suffix: String): File {
-        val expected = root.resolve("${cacheKey(transfer.attachmentId)}$suffix")
         val configured = if (suffix == ".bin") File(transfer.cachePath) else File("${transfer.cachePath}.part")
-        require(configured.absoluteFile == expected.absoluteFile) { "附件缓存路径不属于 cache owner" }
+        require(File(transfer.cachePath).name.matches(Regex("[0-9a-f]{64}\\.bin"))) { "附件缓存文件名无效" }
         require(configured.parentFile?.canonicalFile == root) { "附件缓存父目录越界" }
         return configured
     }

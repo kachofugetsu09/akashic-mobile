@@ -25,6 +25,80 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class IsolatedGatewayDeviceTest {
     @Test
+    fun historicalArtifactsReachRoomCacheAndSharedWebUi() = runBlocking<Unit> {
+        val arguments = InstrumentationRegistry.getArguments()
+        val offer = String(Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT), Charsets.UTF_8)
+        val sessionId = requireNotNull(arguments.getString("historySessionId"))
+        val otherSessionId = requireNotNull(arguments.getString("otherSessionId"))
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        val ready = withTimeout(TIMEOUT_MILLIS) { session.state.first { it.hasProfile && it.connection.phase == ConnectionPhase.READY } }
+        val serverId = requireNotNull(ready.serverId)
+        session.selectSession(sessionId)
+        val rows = graph(app, sessionId) { messages -> messages.size == 5 && messages.sumOf { row -> row.attachmentLinks.count { it.attachment.state == "cached" } } == 2 }
+        assertEquals((0L..4L).toList(), rows.map { it.message.serverSeq })
+        assertTrue(rows.single { it.message.messageId == "legacy-answer" }.message.bodyJson.contains("history.transcript"))
+        assertTrue(rows.single { it.message.messageId == "legacy-record" }.message.bodyJson.contains("history.record"))
+        val media = rows.flatMap { it.attachmentLinks }.map { it.attachment }
+        for (item in media) {
+            assertEquals(com.akashic.mobile.data.local.artifactCacheId(serverId, requireNotNull(item.artifactId)), item.cacheId)
+            val file = File(item.cachePath)
+            assertTrue(file.isFile)
+            assertEquals(item.sizeBytes, file.length())
+            assertEquals(item.sha256, java.security.MessageDigest.getInstance("SHA-256").digest(file.readBytes()).joinToString("") { "%02x".format(it) })
+        }
+        val empty = media.single { it.sizeBytes == 0L }
+        assertEquals(null, empty.filename)
+        assertEquals(null, empty.contentType)
+        session.selectSession(otherSessionId)
+        val other = graph(app, otherSessionId) { it.size == 1 && it.single().attachmentLinks.singleOrNull()?.attachment?.state == "cached" }
+        assertEquals(media.single { it.sizeBytes > 0 }.cacheId, other.single().attachmentLinks.single().attachment.cacheId)
+        assertEquals(2, app.container.database.mediaAttachments().all().size)
+
+        // 2. 真实 Room -> ViewModel -> WebView：诊断行仍在同步事实中，但不进入聊天和待发送提示。
+        session.selectSession(sessionId)
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.currentSessionId == sessionId && it.connection.phase == ConnectionPhase.READY } }
+        app.container.database.messages().upsert(com.akashic.mobile.data.local.MessageEntity(
+            "local-rejected", null, sessionId, "user", "保留但不排队的旧失败正文", "failed", 1, 1,
+        ))
+        androidx.test.core.app.ActivityScenario.launch(com.akashic.mobile.MainActivity::class.java).use { activity ->
+            val text = withTimeout(TIMEOUT_MILLIS) {
+                var rendered = ""
+                while (!rendered.contains("原回答完整保留")) {
+                    val reply = kotlinx.coroutines.CompletableDeferred<String>()
+                    activity.onActivity { screen ->
+                        val web = findWebView(screen.window.decorView)
+                        if (web == null) reply.complete("") else web.evaluateJavascript("document.body.innerText") { value ->
+                            reply.complete(Json.decodeFromString<String>(value))
+                        }
+                    }
+                    rendered = reply.await()
+                    if (!rendered.contains("原回答完整保留")) kotlinx.coroutines.delay(100)
+                }
+                rendered
+            }
+            assertTrue(!text.contains("旧记录归档"))
+            assertTrue(!text.contains("legacy-attribution-unknown"))
+            assertTrue(!text.contains("消息详情"))
+            assertTrue(!text.contains("条待发送"))
+        }
+        assertEquals("failed", app.container.database.messages().get("local-rejected")?.deliveryState)
+        assertEquals(4L, app.container.database.messages().historyProjectionProgress(sessionId).maxServerSeq)
+        Log.i("AkashicDeviceGate", "artifact_history_rows=5 artifact_cache_files=2 raw_head_seq=4 shared_webui=verified")
+    }
+
+    private fun findWebView(view: android.view.View): android.webkit.WebView? {
+        if (view is android.webkit.WebView) return view
+        if (view is android.view.ViewGroup) for (index in 0 until view.childCount) {
+            findWebView(view.getChildAt(index))?.let { return it }
+        }
+        return null
+    }
+
+    @Test
     fun freshEmptyCoreBecomesReadyAndCreatesFirstSession() = runBlocking<Unit> {
         val offer = String(
             Base64.decode(

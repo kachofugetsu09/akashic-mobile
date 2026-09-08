@@ -42,6 +42,7 @@ class AppDatabaseMigrationTest {
             DATABASE_17_18_RETRIED,
             DATABASE_17_18_CANONICAL,
             DATABASE_17_18_INVALID,
+            DATABASE_18_19,
         )
             .forEach(context::deleteDatabase)
     }
@@ -1128,6 +1129,69 @@ class AppDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migrate18To19KeepsArtifactBytesAndEndsOnlyDefiniteFailures() = kotlinx.coroutines.runBlocking<Unit> {
+        val artifact = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        val failed = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
+        val unknown = "01ARZ3NDEKTSV4RRFFQ69G5FAX"
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(byteArrayOf()).joinToString("") { "%02x".format(it) }
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val cacheRoot = context.cacheDir.resolve("room19-cache").apply { mkdirs() }
+        val oldFile = cacheRoot.resolve("b".repeat(64) + ".bin").apply { writeBytes(byteArrayOf()) }
+        val oldPath = oldFile.absolutePath
+        val refs = """[{"artifact_id":"$artifact","kind":"file","filename":null,"media_type":null,"size_bytes":0,"sha256":"$digest"}]"""
+        helper.createDatabase(DATABASE_18_19, 18).apply {
+            execSQL("INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '旧会话', 2, 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:other', 'server', '另一会话', 2, 1)")
+            for ((id, sid) in listOf("old-message" to "akashic:test", "other-message" to "akashic:other")) {
+                insertV17Message(id, null, "complete", "旧正文", 0,
+                    """{"kind":"input","parts":[{"kind":"artifact_ref","value":"$artifact"}]}""", 3,
+                    recordedAt = "2026-09-08T00:00:00Z", sessionId = sid)
+                execSQL("UPDATE messages SET attachmentsJson = ? WHERE messageId = ?", arrayOf(refs, id))
+            }
+            execSQL("INSERT INTO media_attachments VALUES(?, 'server', 'akashic:test', ?, 'application/octet-stream', 0, ?, 0, 'cached', ?, 3, 3)",
+                arrayOf(artifact, artifact, digest, oldPath))
+            execSQL("INSERT INTO message_attachments VALUES('old-message', ?, 0)", arrayOf(artifact))
+            execSQL("INSERT INTO message_attachments VALUES('other-message', ?, 0)", arrayOf(artifact))
+            for ((id, state) in listOf(failed to "failed_retryable", unknown to "outcome_unknown")) {
+                insertV17Message(id, null, state, "保留失败正文", null, "{}", 4)
+                val envelope = """{"v":1,"kind":"command","type":"message.send","id":"$id","connection_epoch":1,"session_id":"akashic:test","payload":{"message_log_version":2,"client_message_id":"$id","session_id":"akashic:test","text":"保留失败正文","media_refs":[],"client_created_at":"2026-09-08T00:00:00Z"}}"""
+                execSQL("INSERT INTO outbox_commands VALUES(?, 'server', ?, ?, 1, 1, 1)", arrayOf(id, envelope, state))
+            }
+            close()
+        }
+        helper.runMigrationsAndValidate(DATABASE_18_19, 19, true, AppDatabase.MIGRATION_18_19).use { db ->
+            db.query("SELECT attachmentId, artifactId, filename, contentType, cachePath FROM media_attachments").use {
+                check(it.moveToFirst())
+                assertEquals(artifactCacheId("server", artifact), it.getString(0))
+                assertEquals(artifact, it.getString(1))
+                assertEquals(true, it.isNull(2))
+                assertEquals(true, it.isNull(3))
+                assertEquals(oldPath, it.getString(4))
+            }
+            db.query("SELECT COUNT(*) FROM messages").use { check(it.moveToFirst()); assertEquals(4, it.getInt(0)) }
+            db.query("SELECT commandId, state FROM outbox_commands").use {
+                check(it.moveToFirst()); assertEquals(unknown, it.getString(0)); assertEquals("outcome_unknown", it.getString(1)); assertEquals(false, it.moveToNext())
+            }
+            db.query("SELECT deliveryState, text FROM messages WHERE messageId = ?", arrayOf(failed)).use {
+                check(it.moveToFirst()); assertEquals("failed", it.getString(0)); assertEquals("保留失败正文", it.getString(1))
+            }
+            db.execSQL("DELETE FROM conversations WHERE sessionId = 'akashic:test'")
+            db.query("SELECT COUNT(*) FROM media_attachments").use { check(it.moveToFirst()); assertEquals(1, it.getInt(0)) }
+            db.query("PRAGMA foreign_key_check").use { assertEquals(false, it.moveToFirst()) }
+        }
+        val reopened = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_18_19).build()
+        try {
+            MediaCacheStore(cacheRoot, reopened.mediaAttachments()).reconcile()
+            assertEquals("cached", reopened.mediaAttachments().get(artifactCacheId("server", artifact))?.state)
+            assertEquals(true, oldFile.isFile)
+            assertEquals(0L, oldFile.length())
+        } finally {
+            reopened.close()
+        }
+    }
+
     private fun androidx.sqlite.db.SupportSQLiteDatabase.insertV17Message(
         messageId: String,
         clientMessageId: String?,
@@ -1195,6 +1259,7 @@ class AppDatabaseMigrationTest {
         const val DATABASE_17_18 = "migration-17-18"
         const val DATABASE_17_18_RETRIED = "migration-17-18-retried"
         const val DATABASE_17_18_CANONICAL = "migration-17-18-canonical"
+        const val DATABASE_18_19 = "migration-18-19"
         const val DATABASE_17_18_INVALID = "migration-17-18-invalid"
     }
 }

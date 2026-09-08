@@ -210,6 +210,7 @@ data class MessageAttachmentUi(
     val transferredBytes: Long,
     val state: MessageAttachmentState,
     val cachePath: String,
+    val artifactId: String? = null,
 )
 
 enum class MessageAttachmentState {

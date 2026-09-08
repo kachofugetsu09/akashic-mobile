@@ -22,7 +22,7 @@ import org.junit.Test
 
 class MobileWebSnapshotTest {
     @Test
-    fun `serializes complete message log v2 row in snapshot v9`() {
+    fun `serializes complete message log v2 row in snapshot v10`() {
         val body = buildJsonObject {
             put("kind", "output")
             put("finish", "complete")
@@ -62,6 +62,7 @@ class MobileWebSnapshotTest {
             downloads = listOf(
                 MessageAttachmentUi(
                     id = "artifact-1",
+                    artifactId = "artifact-1",
                     filename = "result.png",
                     contentType = "image/png",
                     sizeBytes = 42,
@@ -99,7 +100,7 @@ class MobileWebSnapshotTest {
         val json = Json.parseToJsonElement(encoded).jsonObject
         val message = json.getValue("messages").jsonArray.single().jsonObject
 
-        assertEquals(9, snapshot.protocolVersion)
+        assertEquals(10, snapshot.protocolVersion)
         assertEquals(9_007_199_254_740_991L, snapshot.throughSeq)
         assertEquals(replyStatus, snapshot.replyStatus)
         assertEquals("artifact-1", snapshot.downloads.single().artifactId)

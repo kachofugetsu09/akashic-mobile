@@ -4,7 +4,6 @@ import androidx.room.withTransaction
 import com.akashic.mobile.data.realtime.ProtocolCodec
 import com.akashic.mobile.data.realtime.AttachmentProgressPayload
 import com.akashic.mobile.data.realtime.AttachmentReadyPayload
-import com.akashic.mobile.data.realtime.AttachmentDescriptor
 import com.akashic.mobile.data.realtime.HistoryPagePayload
 import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
@@ -49,8 +48,6 @@ internal enum class NotificationTargetProjection {
 }
 
 private const val TOOL_BLOCK_V1_PREFIX = "tool.v1:"
-/** 限制明确失败重试后的短期旧 ID 映射，避免进程状态无界增长。 */
-private const val MAX_MOVED_MESSAGE_IDS = 256
 
 @Serializable
 internal data class StoredToolBlock(
@@ -97,7 +94,6 @@ class LocalDeliveryStore(
 ) {
     private val projectionStateMutex = Mutex()
     /** 明确失败重试换 ID 后，短暂接住 WebUI 已发出的旧 ID 操作。 */
-    private val movedMessageIds = linkedMapOf<String, String>()
 
     /** 恢复当前电脑拥有的会话选择，拒绝把另一台电脑的会话带入当前投影。 */
     suspend fun restoreSelectedSession(serverId: String, selectedSessionId: String?): String? {
@@ -222,10 +218,9 @@ class LocalDeliveryStore(
     private suspend fun resolveComposerReply(sessionId: String, replyToMessageId: String?): String? =
         replyToMessageId?.let { messageId ->
             require(messageId.length in 1..512) { "会话草稿引用 ID 无效" }
-            val resolvedMessageId = movedMessageIds[messageId] ?: messageId
-            val target = database.messages().get(resolvedMessageId) ?: return@let null
+            val target = database.messages().get(messageId) ?: return@let null
             require(target.sessionId == sessionId) { "会话草稿引用不属于当前会话" }
-            resolvedMessageId
+            messageId
         }
 
     /** 串行校验并保存 WebView 当前可见消息锚点。 */
@@ -241,12 +236,11 @@ class LocalDeliveryStore(
             "阅读位置会话不存在: $sessionId"
         }
         require(conversation.serverId == expectedServerId) { "阅读位置会话不属于当前电脑" }
-        val resolvedMessageId = movedMessageIds[messageId] ?: messageId
-        val message = database.messages().get(resolvedMessageId) ?: return@withLock false
+        val message = database.messages().get(messageId) ?: return@withLock false
         require(message.sessionId == sessionId) { "阅读锚点不属于当前会话" }
 
-        // 2. 与重试换 ID 共用写锁，避免写回已删除身份
-        database.conversationReadStates().savePosition(sessionId, resolvedMessageId, offsetPx, updatedAt)
+        // 2. 与历史落地共用写锁，锚点始终引用同一个 Message
+        database.conversationReadStates().savePosition(sessionId, messageId, offsetPx, updatedAt)
         true
     }
 
@@ -325,7 +319,7 @@ class LocalDeliveryStore(
 
             // 3. 附件状态与消息提交保持原子
             if (attachments.isNotEmpty()) {
-                val attachmentIds = attachments.map { it.attachmentId }
+                val attachmentIds = attachments.map { it.cacheId }
                 database.mediaAttachments().upsertAll(attachments)
                 database.mediaAttachments().linkAll(
                     attachmentIds.mapIndexed { ordinal, id ->
@@ -507,41 +501,34 @@ class LocalDeliveryStore(
             payload.mediaRefs
         }
 
-    /** 保留失败命令，使消息可以安全重试或用原幂等键核对结果。 */
-    suspend fun retainFailedOutbox(commandId: String, outcomeUnknown: Boolean, updatedAt: Long) {
+    /** 未知结果保留原命令，等待用户以同一 ID 核对。 */
+    suspend fun retainUnknownOutbox(commandId: String, updatedAt: Long) {
         database.withTransaction {
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
-            val state = if (outcomeUnknown) "outcome_unknown" else "failed_retryable"
-            check(database.messages().updateDelivery(payload.clientMessageId, state, updatedAt) == 1)
-            if (payload.mediaRefs.isNotEmpty()) {
-                check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
+            val message = requireNotNull(database.messages().get(payload.clientMessageId)) { "Outbox message is missing" }
+            if (message.serverSeq != null) {
+                acknowledgeOutbox(commandId, payload.clientMessageId, updatedAt)
+                return@withTransaction
             }
+            val state = "outcome_unknown"
+            check(database.messages().updateDelivery(payload.clientMessageId, state, updatedAt) == 1)
             check(database.outbox().markFailed(commandId, state) == 1)
         }
     }
 
-    /** 在写入 WebSocket 前保留已失效会话的待发命令。 */
-    suspend fun retainUnsentOutbox(commandId: String, updatedAt: Long) {
-        database.withTransaction {
-            val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
-            val envelope = ProtocolCodec.decode(command.envelopeJson)
-            val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
-            check(database.messages().updateDelivery(payload.clientMessageId, "failed_retryable", updatedAt) == 1)
-            if (payload.mediaRefs.isNotEmpty()) {
-                check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
-            }
-            check(database.outbox().markUnsentFailed(commandId) == 1)
-        }
-    }
-
-    /** 丢弃不可重试的协议坏命令，并保留原消息作为失败记录。 */
+    /** 明确拒绝结束发送待办，原正文和附件保留为失败记录。 */
     suspend fun discardFailedOutbox(commandId: String, updatedAt: Long) {
         database.withTransaction {
             val command = requireNotNull(database.outbox().get(commandId)) { "Unknown outbox command: $commandId" }
             val envelope = ProtocolCodec.decode(command.envelopeJson)
             val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+            val message = requireNotNull(database.messages().get(payload.clientMessageId)) { "Outbox message is missing" }
+            if (message.serverSeq != null) {
+                acknowledgeOutbox(commandId, payload.clientMessageId, updatedAt)
+                return@withTransaction
+            }
             check(database.messages().updateDelivery(payload.clientMessageId, "failed", updatedAt) == 1)
             if (payload.mediaRefs.isNotEmpty()) {
                 check(database.attachmentTransfers().restoreReady(payload.mediaRefs, updatedAt) == payload.mediaRefs.size)
@@ -550,78 +537,25 @@ class LocalDeliveryStore(
         }
     }
 
-    /** 重试失败消息，并按失败语义复用原 ID 或原子迁到新 ID。 */
-    suspend fun retryFailedMessage(messageId: String, newCommandId: String, updatedAt: Long): Boolean =
+    /** 只核对结果未知的发送，不移动 Message 身份或制造新命令。 */
+    suspend fun verifyMessageOutcome(messageId: String, updatedAt: Long): Boolean =
         projectionStateMutex.withLock {
-            var movedFromId: String? = null
-            val retried = database.withTransaction {
-                // 1. 恢复失败消息、命令和附件不变量
-                val resolvedMessageId = movedMessageIds[messageId] ?: messageId
-                val message = requireNotNull(database.messages().get(resolvedMessageId)) {
-                    "Unknown failed message: $messageId"
-                }
-                require(message.role == "user") { "Only user messages can be retried" }
-                if (message.deliveryState in setOf("pending", "sent", "complete")) {
-                    return@withTransaction false
-                }
-                val currentMessageId = message.messageId
-                val command = requireNotNull(database.outbox().get(currentMessageId)) {
-                    "Failed message has no outbox command"
-                }
+            database.withTransaction {
+                val message = requireNotNull(database.messages().get(messageId)) { "Unknown message: $messageId" }
+                require(message.role == "user") { "Only Input delivery can be checked" }
+                if (message.deliveryState != "outcome_unknown") return@withTransaction false
+                val command = requireNotNull(database.outbox().get(messageId)) { "Unknown outcome has no command" }
+                require(command.state == "outcome_unknown") { "Message and outbox outcome states diverged" }
                 val envelope = ProtocolCodec.decode(command.envelopeJson)
-                val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(
-                    envelope.payload,
-                )
-                require(payload.clientMessageId == currentMessageId) { "Outbox message id mismatch" }
-                require(command.state == message.deliveryState) { "Outbox and message failure states diverged" }
-
-                // 2. 未知结果复用原 ID；明确失败把视觉消息和命令一起迁到新 ID
-                if (command.state == "outcome_unknown") {
-                    check(database.outbox().recheckUnknown(command.commandId) == 1)
-                    check(database.messages().updateDelivery(currentMessageId, "pending", updatedAt) == 1)
-                } else {
-                    require(command.state == "failed_retryable") {
-                        "Message is not retryable: ${command.state}"
-                    }
-                    val retryPayload = payload.copy(
-                        clientMessageId = newCommandId,
-                        retryOfClientMessageId = payload.retryOfClientMessageId
-                            ?: payload.clientMessageId,
-                    )
-                    val retryEnvelope = envelope.copy(
-                        id = newCommandId,
-                        payload = ProtocolCodec.json().encodeToJsonElement(
-                            com.akashic.mobile.data.realtime.MessageSendPayload.serializer(),
-                            retryPayload,
-                        ).jsonObject,
-                    )
-                    moveLocalMessageIdentity(message, newCommandId, updatedAt)
-                    movedFromId = message.messageId
-                    check(database.outbox().deleteAcknowledged(command.commandId) == 1)
-                    database.outbox().enqueue(
-                        OutboxCommandEntity(
-                            commandId = newCommandId,
-                            serverId = command.serverId,
-                            envelopeJson = ProtocolCodec.encode(retryEnvelope),
-                            state = "pending",
-                            attemptCount = 0,
-                            createdAt = command.createdAt,
-                            lastAttemptAt = null,
-                        ),
-                    )
-                }
-
-                // 3. 重新占用原附件，ACK 或下一次失败负责推进最终状态
-                if (payload.mediaRefs.isNotEmpty()) {
-                    check(
-                        database.attachmentTransfers().markSending(payload.mediaRefs, updatedAt) ==
-                            payload.mediaRefs.size,
-                    )
+                val payload = ProtocolCodec.decodePayload<com.akashic.mobile.data.realtime.MessageSendPayload>(envelope.payload)
+                require(payload.clientMessageId == messageId) { "Outbox message id mismatch" }
+                check(database.outbox().recheckUnknown(messageId) == 1)
+                check(database.messages().updateDelivery(messageId, "pending", updatedAt) == 1)
+                payload.mediaRefs.forEach { id ->
+                    check(database.attachmentTransfers().get(id)?.state == "sending") { "Unknown command lost its attachment ownership" }
                 }
                 true
             }
-            movedFromId?.let { rememberMovedMessageId(it, newCommandId) }
-            retried
         }
 
     private suspend fun applyEventContent(
@@ -896,17 +830,8 @@ class LocalDeliveryStore(
         saveMessage(canonical)
         upsertMessageAttachments(
             serverId = serverId,
-            sessionId = sessionId,
             messageId = remote.id,
-            descriptors = remote.attachments.map {
-                AttachmentDescriptor(
-                    it.artifactId,
-                    it.filename ?: it.artifactId,
-                    it.mediaType ?: "application/octet-stream",
-                    it.sizeBytes,
-                    it.sha256,
-                )
-            },
+            descriptors = remote.attachments,
             updatedAt = completedAt,
         )
         database.messages().deleteBlocks(remote.id)
@@ -1090,101 +1015,38 @@ class LocalDeliveryStore(
         messages.upsert(canonical)
     }
 
-    /** 明确失败重试会生成新的 Message ID，并同步迁移全部本地引用。 */
-    private suspend fun moveLocalMessageIdentity(
-        source: MessageEntity,
-        targetId: String,
-        updatedAt: Long,
-    ) {
-        require(database.messages().get(targetId) == null) { "Retry Message ID already exists: $targetId" }
-        require(database.messageContentTransfers().get(source.messageId) == null) {
-            "Local failed Message unexpectedly owns a content download"
-        }
-        database.messages().upsert(
-            source.copy(
-                messageId = targetId,
-                clientMessageId = null,
-                deliveryState = "pending",
-                updatedAt = updatedAt,
-            ),
-        )
-        database.conversationReadStates().moveAnchor(source.sessionId, source.messageId, targetId)
-        database.composerDrafts().moveReplyTarget(source.sessionId, source.messageId, targetId)
-        database.messages().moveReplyTargets(source.messageId, targetId)
-        database.mediaAttachments().moveLinks(source.messageId, targetId)
-        check(database.messages().delete(source.messageId) == 1) { "Failed Message disappeared during retry" }
-    }
-
-    private fun rememberMovedMessageId(sourceId: String, targetId: String) {
-        movedMessageIds.entries.forEach { alias ->
-            if (alias.value == sourceId) alias.setValue(targetId)
-        }
-        movedMessageIds[sourceId] = targetId
-        if (movedMessageIds.size > MAX_MOVED_MESSAGE_IDS) {
-            movedMessageIds.remove(movedMessageIds.keys.first())
-        }
-    }
-
+    /** 同一服务端的 artifact 只保存一份缓存，消息链接提供会话授权。 */
     private suspend fun upsertMessageAttachments(
         serverId: String,
-        sessionId: String,
         messageId: String,
-        descriptors: List<AttachmentDescriptor>,
+        descriptors: List<com.akashic.mobile.data.realtime.TimelineAttachmentDescriptor>,
         updatedAt: Long,
     ) {
         val dao = database.mediaAttachments()
         dao.deleteLinks(messageId)
-        if (descriptors.isEmpty()) return
-        require(descriptors.map { it.attachmentId }.distinct().size == descriptors.size) {
-            "消息附件不能重复"
-        }
-        val entities = descriptors.map { descriptor ->
-            requireFrameId(descriptor.attachmentId)
-            require(
-                descriptor.filename.isNotBlank() && descriptor.filename == descriptor.filename.trim() &&
-                    descriptor.filename.length <= 255 &&
-                    '/' !in descriptor.filename && '\\' !in descriptor.filename &&
-                    descriptor.filename.none { it.code < 32 || it.code == 127 }
-            ) { "附件文件名无效" }
-            require(
-                descriptor.contentType.length <= 255 && MIME_TYPE.matches(descriptor.contentType)
-            ) { "附件 content_type 无效" }
-            require(descriptor.sizeBytes in 1..MAX_ATTACHMENT_BYTES) { "附件大小超出范围" }
-            require(descriptor.sha256.matches(Regex("^[0-9a-fA-F]{64}$"))) { "附件 sha256 无效" }
-            val existing = dao.get(descriptor.attachmentId)
+        require(descriptors.groupBy { it.artifactId }.values.all { it.distinct().size == 1 }) { "同一附件描述不一致" }
+        val entities = descriptors.distinctBy { it.artifactId }.map { descriptor ->
+            descriptor.check()
+            val key = artifactCacheId(serverId, descriptor.artifactId)
+            val existing = dao.get(key)
             if (existing != null) {
-                require(
-                    existing.serverId == serverId &&
-                        existing.sessionId == sessionId &&
-                        existing.filename == descriptor.filename &&
-                        existing.contentType == descriptor.contentType &&
-                        existing.sizeBytes == descriptor.sizeBytes &&
-                        existing.sha256.equals(descriptor.sha256, ignoreCase = true)
-                ) { "附件描述与已缓存元数据不一致: ${descriptor.attachmentId}" }
+                require(existing.artifactId == descriptor.artifactId && existing.serverId == serverId &&
+                    existing.filename == descriptor.filename && existing.contentType == descriptor.mediaType &&
+                    existing.kind == descriptor.kind && existing.sizeBytes == descriptor.sizeBytes &&
+                    existing.sha256 == descriptor.sha256) { "附件描述与已缓存元数据不一致" }
                 existing
             } else {
                 MediaAttachmentEntity(
-                    attachmentId = descriptor.attachmentId,
-                    serverId = serverId,
-                    sessionId = sessionId,
-                    filename = descriptor.filename,
-                    contentType = descriptor.contentType,
-                    sizeBytes = descriptor.sizeBytes,
-                    sha256 = descriptor.sha256.lowercase(),
-                    transferredBytes = 0,
+                    cacheId = key, serverId = serverId, artifactId = descriptor.artifactId,
+                    kind = descriptor.kind, filename = descriptor.filename, contentType = descriptor.mediaType,
+                    sizeBytes = descriptor.sizeBytes, sha256 = descriptor.sha256, transferredBytes = 0,
                     state = if (descriptor.sizeBytes >= AUTO_DOWNLOAD_LIMIT_BYTES) "remote" else "pending",
-                    cachePath = mediaCache.cachePath(descriptor.attachmentId),
-                    lastAccessedAt = updatedAt,
-                    updatedAt = updatedAt,
+                    cachePath = mediaCache.cachePath(key), lastAccessedAt = updatedAt, updatedAt = updatedAt,
                 )
             }
         }
         dao.upsertAll(entities)
-        dao.linkAll(
-            descriptors.mapIndexed { ordinal, descriptor ->
-                MessageAttachmentEntity(messageId, descriptor.attachmentId, ordinal)
-            },
-        )
+        dao.linkAll(entities.mapIndexed { ordinal, entity -> MessageAttachmentEntity(messageId, entity.cacheId, ordinal) })
     }
 
     private fun requireFrameId(value: String) {
@@ -1213,7 +1075,6 @@ class LocalDeliveryStore(
         .joinToString("") { "%02x".format(it) }
 
     private companion object {
-        const val MAX_ATTACHMENT_BYTES = 50L * 1024 * 1024
         const val AUTO_DOWNLOAD_LIMIT_BYTES = 10L * 1024 * 1024
         val REMOTE_SESSION_EVENTS = setOf(
             "session.created",
@@ -1222,7 +1083,6 @@ class LocalDeliveryStore(
             "turn.started",
         )
         val DELIVERED_MESSAGE_EVENTS = setOf("message.final")
-        val MIME_TYPE = Regex("^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
         val SHA256 = Regex("^[0-9a-f]{64}$")
     }
 }

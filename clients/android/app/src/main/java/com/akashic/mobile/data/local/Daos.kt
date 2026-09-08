@@ -735,6 +735,16 @@ interface RealtimeCursorDao {
 
 @Dao
 interface MediaAttachmentDao {
+    @Query("""
+        SELECT messages.messageId, messages.sessionId FROM message_attachments AS link
+        JOIN messages ON messages.messageId = link.messageId
+        JOIN conversations ON conversations.sessionId = messages.sessionId
+        WHERE link.attachmentId = :cacheId AND conversations.serverId = :serverId
+          AND messages.serverSeq IS NOT NULL AND messages.bodyJson != '{}'
+        ORDER BY messages.createdAt DESC, messages.messageId
+    """)
+    suspend fun references(cacheId: String, serverId: String): List<AttachmentMessageReference>
+
     @Upsert
     suspend fun upsert(attachment: MediaAttachmentEntity)
 
