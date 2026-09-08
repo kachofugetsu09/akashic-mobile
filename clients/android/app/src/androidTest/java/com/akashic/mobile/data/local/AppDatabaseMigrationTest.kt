@@ -43,6 +43,7 @@ class AppDatabaseMigrationTest {
             DATABASE_17_18_CANONICAL,
             DATABASE_17_18_INVALID,
             DATABASE_18_19,
+            "migration-19-20",
         )
             .forEach(context::deleteDatabase)
     }
@@ -1130,6 +1131,41 @@ class AppDatabaseMigrationTest {
     }
 
     @Test
+    fun migrate19To20KeepsPartialDownloadsAndDoesNotInventCoverage() = kotlinx.coroutines.runBlocking<Unit> {
+        val name = "migration-19-20"
+        helper.createDatabase(name, 19).apply {
+            execSQL("INSERT INTO server_profiles VALUES('server', '电脑', 'device', 'alias', 'pin', '[]', '[]', '[]', 1)")
+            execSQL("INSERT INTO conversations VALUES('akashic:test', 'server', '保留', 2, 1)")
+            insertV17Message("old", null, "complete", "旧正文", 4205,
+                """{"kind":"input","parts":[{"kind":"text","value":"旧正文"}]}""", 3,
+                recordedAt = "2026-09-09T00:00:00Z")
+            insertV17Message("download", null, "restoring", "", null, "{}", 4)
+            execSQL("INSERT INTO message_content_transfers VALUES('download', 'server', 'akashic:test', 4204, 100000, ?, 4096, 'downloading', 1, 4)", arrayOf("a".repeat(64)))
+            execSQL("INSERT INTO outbox_commands VALUES('pending', 'server', '{}', 'pending', 0, 1, NULL)")
+            execSQL("INSERT INTO composer_drafts VALUES('akashic:test', 'server', '保留草稿', NULL, 4)")
+            close()
+        }
+        helper.runMigrationsAndValidate(name, 20, true, AppDatabase.MIGRATION_19_20).use { db ->
+            db.query("SELECT transferredBytes, state, displayOnly FROM message_content_transfers").use {
+                check(it.moveToFirst()); assertEquals(4096L, it.getLong(0)); assertEquals("downloading", it.getString(1)); assertEquals(0, it.getInt(2))
+            }
+            db.query("SELECT COUNT(*) FROM message_ranges").use { check(it.moveToFirst()); assertEquals(0, it.getInt(0)) }
+            db.query("SELECT COUNT(*) FROM messages").use { check(it.moveToFirst()); assertEquals(2, it.getInt(0)) }
+            db.query("SELECT text FROM composer_drafts").use { check(it.moveToFirst()); assertEquals("保留草稿", it.getString(0)) }
+            db.query("SELECT state FROM outbox_commands").use { check(it.moveToFirst()); assertEquals("pending", it.getString(0)) }
+            db.execSQL("INSERT INTO message_ranges VALUES('akashic:test', 4200, 4205)")
+            db.query("PRAGMA foreign_key_check").use { assertEquals(false, it.moveToFirst()) }
+        }
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val reopened = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, name).build()
+        try {
+            assertEquals(listOf(MessageRangeEntity("akashic:test", 4200, 4205)), reopened.messages().receivedRanges("akashic:test"))
+            assertEquals(4096L, reopened.messageContentTransfers().get("download")?.transferredBytes)
+            assertEquals("旧正文", reopened.messages().get("old")?.text)
+        } finally { reopened.close() }
+    }
+
+    @Test
     fun migrate18To19KeepsArtifactBytesAndEndsOnlyDefiniteFailures() = kotlinx.coroutines.runBlocking<Unit> {
         val artifact = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         val failed = "01ARZ3NDEKTSV4RRFFQ69G5FAW"
@@ -1179,7 +1215,7 @@ class AppDatabaseMigrationTest {
             }
             db.query("PRAGMA foreign_key_check").use { assertEquals(false, it.moveToFirst()) }
         }
-        val reopened = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_18_19).build()
+        val reopened = androidx.room.Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_18_19).addMigrations(AppDatabase.MIGRATION_19_20).build()
         try {
             assertEquals(1, reopened.conversations().delete("server", "akashic:test"))
             assertEquals(1, reopened.mediaAttachments().all().size)

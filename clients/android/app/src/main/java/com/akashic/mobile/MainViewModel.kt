@@ -209,6 +209,8 @@ private data class ConversationData(
     val serverId: String?,
     val sessionId: String?,
     val projectionGeneration: Long,
+    val historyAfterSeq: Long,
+    val historyThroughSeq: Long?,
     val messages: ProjectedMessageState,
     val conversations: List<ConversationSummary>,
     val composer: ComposerLocalState,
@@ -288,7 +290,12 @@ class MainViewModel(
             }
         }
         viewModelScope.launch {
-            combine(pendingNotificationTarget, sessionState) { request, session -> request to session }
+            val observedTarget = pendingNotificationTarget.flatMapLatest { request ->
+                request?.messageId?.let { id ->
+                    container.database.messages().observeMessage(id).map { request }
+                } ?: flowOf(request)
+            }
+            combine(observedTarget, sessionState) { request, session -> request to session }
                 .collect { (request, session) ->
                     if (request == null || !session.initialized || !session.hasProfile) return@collect
                     if (
@@ -328,11 +335,14 @@ class MainViewModel(
     }
 
     private val conversationData = sessionState
-        .map { state -> Triple(state.serverId, state.currentSessionId, state.projectionGeneration) }
+        .map { state -> Triple(state.serverId, state.currentSessionId, state.projectionGeneration) to
+            (state.historyWindow.afterSeq to state.historyWindow.throughSeq) }
         .distinctUntilChanged()
-        .flatMapLatest { (serverId, sessionId, projectionGeneration) ->
+        .flatMapLatest { (identity, bounds) ->
+        val (serverId, sessionId, projectionGeneration) = identity
+        val (afterSeq, throughSeq) = bounds
         val messages = if (sessionId == null) flowOf(emptyList()) else {
-            container.database.messages().observeMessageGraph(sessionId).distinctUntilChanged()
+            container.database.messages().observeMessageGraph(sessionId, afterSeq, throughSeq).distinctUntilChanged()
         }.map { graph -> projectMessageState(sessionId, graph) }
         val conversations = serverId?.let {
             container.database.conversations().observeSummaries(it).distinctUntilChanged()
@@ -352,6 +362,8 @@ class MainViewModel(
                 serverId,
                 sessionId,
                 projectionGeneration,
+                afterSeq,
+                throughSeq,
                 currentMessages,
                 currentConversations,
                 currentComposer,
@@ -367,13 +379,16 @@ class MainViewModel(
                 state.serverId,
                 state.currentSessionId,
                 state.projectionGeneration,
-            )) {
+            ) && data.historyAfterSeq >= state.historyWindow.afterSeq &&
+                data.historyThroughSeq == state.historyWindow.throughSeq) {
             data
         } else {
             ConversationData(
                 serverId = state.serverId,
                 sessionId = state.currentSessionId,
                 projectionGeneration = state.projectionGeneration,
+                historyAfterSeq = state.historyWindow.afterSeq,
+                historyThroughSeq = state.historyWindow.throughSeq,
                 messages = ProjectedMessageState(emptyList(), emptyList(), emptyList()),
                 conversations = emptyList(),
                 composer = ComposerLocalState(emptyList(), null),
@@ -482,7 +497,8 @@ class MainViewModel(
             projectionGeneration = session.projectionGeneration,
             downloads = projection.downloads,
             timelineMessages = projection.timelineMessages,
-            replyStatus = session.replyStatus,
+            replyStatus = if (session.historyWindow.throughSeq == null) session.replyStatus else null,
+            historyWindow = session.historyWindow,
             composerDraft = ComposerDraftUi(
                 text = draft?.text.orEmpty(),
                 replyToMessageId = draft?.replyToMessageId,
@@ -856,6 +872,12 @@ class MainViewModel(
 
     fun createSession() = container.realtimeSession.createSession()
 
+    fun loadOlderHistory() = container.realtimeSession.loadOlderHistory()
+
+    fun loadLatestHistory() = container.realtimeSession.loadLatestHistory()
+
+    fun loadHistoryAround(messageId: String) = container.realtimeSession.loadHistoryAround(messageId)
+
     fun selectSession(sessionId: String) {
         completeNotificationTarget()
         container.realtimeSession.selectSession(sessionId)
@@ -1008,7 +1030,7 @@ class MainViewModel(
             timestamp = message.recordedAt,
             author = message.author,
             source = message.source,
-            body = Json.parseToJsonElement(message.bodyJson).jsonObject,
+            body = com.akashic.mobile.data.realtime.messageDisplayBody(Json.parseToJsonElement(message.bodyJson).jsonObject),
             metadata = Json.parseToJsonElement(message.metadataJson).jsonObject,
             attachments = attachments,
         ).also { projected ->

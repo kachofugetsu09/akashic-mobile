@@ -40,7 +40,16 @@
 - 更新：Message delivery、read position、cursor 和下载状态按各 DAO 状态机更新。新 Input 从本地建行到 Core 投影始终使用 `message.send` frame ID；运行路径不读取 metadata 或 Room `clientMessageId` 推导身份。`clientMessageId`、`turnClientMessageId`、`controlTurnId` 和旧 turn block 表仅保留旧 schema 的迁移证据，不再拥有 Message v2 运行状态。
 - 逻辑失效：附件缓存以 `evicted` 表达文件不可用；消息投递使用明确状态，不用缺行伪装终态。v10→v11 迁移只把同一会话中较旧的重复 streaming 临时消息更新为 `interrupted`，同步结束其 running blocks，并保留最新活动投影、消息正文和全部 turn blocks。
 - 物理删除：`reloadFromServer` 只允许清理可重载投影，并通过 delivery 状态保护带本地工作的消息和会话。Room v17→v18 只移动 `user:` 前缀、无服务端序号且尚无 Message v2 正文和来源的旧本地行；首次发送 ID 留在 `messageId`，明确失败重试只把 `clientMessageId` 与 outbox 更新为最新 ID。迁移把这类行与引用移到最新 ID：目标不存在时复制本地事实并移动引用；目标是 restoring 时合入本地展示状态并保留 manifest、文件和确认偏移，失败或结果未知的原 outbox 以同 ID 重新排入核对；目标是同 Session 的完整远端 Input 时保留远端正文和附件投影，并以该成功证据补结算 outbox 与 sending 附件。旧版已取得 `<sessionId>:<seq>` canonical ID 且尚无 Message v2 body 的 Input 保留原 ID，只清除废弃的 `clientMessageId`，随后由同 ID 的历史记录原位补全；该 canonical ID 也证明 Input 已被 Core 接纳，因此会把投递状态收敛为 `sent`，并补结算 ACK 前断线留下的 outbox 和待发附件。迁移不删除附件文件；无法证明的其他身份冲突会 fail-loud。
-- 恢复：从固定核心协议重新同步；正常重连可从本地连续 `serverSeq` 投影的首个不完整页续传，投影完整时不重放；投影不连续、数量异常、核心要求 reset 或用户在协议错误状态主动执行“清理缓存并同步”时从第一页重建。错误连接上的用户重建先提交可重载投影清理，再重连并从既有 durable cursor 恢复；失败必须暴露，不能用空列表冒充成功。
+- 恢复：重连只读当前会话近期窗口并从其 head 订阅，其他历史按需读取。`sync.reset_required` 只重置事件 cursor，不删除消息、范围、附件或本地工作；数量差异不触发清库。用户显式“清理缓存并同步”仍由既有删除 owner 清理可重载投影和对应范围，再读取当前尾页；错误必须暴露。
+
+### Room 已接收范围与显示窗口
+
+- 增加：Room v20 的 `message_ranges(sessionId,afterSeq,throughSeq)` 与完整记录或下载清单同事务保存 `(afterSeq,throughSeq]`，之后才推进 ACK。它不证明正文或附件已下载。
+- 更新：重叠或相接范围合并，只移除被合并范围完整包含的旧范围行；覆盖不减少。不从旧缓存最大 seq 推导完整前缀。
+- 逻辑失效：切换显示窗口只改变进程内上下界和 projection generation，不使缓存失效。旧窗口收到的新消息只进入缓存，不能跨缺口拼入画面。
+- 物理减少：只有显式重载投影或所属本地会话删除时随对应缓存减少；普通连接 reset 不减少。服务端权威 Message 不受影响。
+- 迁移与恢复：19→20 只建范围表并给下载记录新增 `displayOnly=false`，保留旧 Message、outbox、草稿、配对与附件。旧缓存没有范围证明时只展示可证明相邻的片段。范围、Message 和传输记录一起由数据库完整性、schema identity 与事务测试验证。
+- 展示兼容：新请求显式使用 `display_only`，旧缓存与新记录都把不可见 `history.provenance / history.record / history.turn_input` 映射成原位置的类型标记；可见 transcript 完整保留。重放只允许这项展示变化，其余 Message 字段逐项相等后才更新缓存；原归档仍由服务端保留。
 
 ### Room 本地工作
 
@@ -81,7 +90,7 @@ Room v19 的 `media_attachments` 以本地 cacheId（保留旧列名 attachmentI
 - 更新：每段整条 Message JSON 落盘并 `fsync` 后才推进 Room 的确认偏移；启动时截断超过确认偏移的尾部。未完成行不进入 UI 投影。
 - 逻辑失效：完整文件的字节长度、SHA-256、严格 UTF-8、Message 身份、Session 和 `seq` 全部通过后，在同一 Room 事务中提交 raw Message 并删除传输记录。
 - 物理删除：校验成功、服务端投影被明确重载、应用数据被用户清除或无对应传输记录的孤立临时文件才可删除；普通断线和进程退出不得删除已确认片段。
-- 恢复：重新连接后从 Room 确认偏移重新申请短期 ticket 并续传；摘要或响应边界不一致时保留失败状态并暴露错误，不发布部分正文。
+- 恢复：重新连接后从 Room 确认偏移重新申请短期 ticket 并续传。`displayOnly` 区分两种已知表示；同一表示的摘要不可改变，两种表示交错时继续已有下载 owner，不重置其片段。服务器按原 byte_length/SHA-256 提供对应表示；摘要或响应边界不一致时显式失败，不发布部分正文。
 
 ### 配对 profile 与设备密钥
 
@@ -107,4 +116,4 @@ Room v19 的 `media_attachments` 以本地 cacheId（保留旧列名 attachmentI
 
 ## 备份与恢复边界
 
-仓库只保存 schema 和实现，不保存用户数据库、附件、密钥或生产配置。业务代码或迁移变更前，应在隔离 application ID/workspace 中验证；Room v19 的恢复证据还包括 v18 schema、旧缓存路径/Message link、明确失败与未知 outbox 的区分、迁移后的 schema identity 和 FK 检查。Room v18 的恢复证据是 v17 schema、迁移测试中的旧 ID→同值 ID 写集合、迁移前仍存在的 outbox/附件/下载记录和迁移后的完整性查询。正式设备数据的备份恢复策略目前不是本仓库已实现能力，且应用声明 `allowBackup=false`，不能声称 WebUI cache、Room 或 Keystore 已被 Android 自动备份。OTA cache 是可重新获取的派生数据，但这不授权删除或重建同库中的业务表；保留数据强制降级到旧 Room schema 不是支持的恢复路径。
+仓库只保存 schema 和实现，不保存用户数据库、附件、密钥或生产配置。业务代码或迁移变更前，应在隔离 application ID/workspace 中验证；Room v20 的证据包括 v19 全部行与旧下载片段不变、新范围为空、显示字段标记及最终 schema/FK 检查；Room v19 的恢复证据还包括 v18 schema、旧缓存路径/Message link、明确失败与未知 outbox 的区分、迁移后的 schema identity 和 FK 检查。Room v18 的恢复证据是 v17 schema、迁移测试中的旧 ID→同值 ID 写集合、迁移前仍存在的 outbox/附件/下载记录和迁移后的完整性查询。正式设备数据的备份恢复策略目前不是本仓库已实现能力，且应用声明 `allowBackup=false`，不能声称 WebUI cache、Room 或 Keystore 已被 Android 自动备份。OTA cache 是可重新获取的派生数据，但这不授权删除或重建同库中的业务表；保留数据强制降级到旧 Room schema 不是支持的恢复路径。

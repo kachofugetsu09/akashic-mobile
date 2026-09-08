@@ -1,6 +1,7 @@
 package com.akashic.mobile.ui.conversation
 
 import kotlinx.serialization.json.JsonObject
+import com.akashic.mobile.domain.model.HistoryWindow
 
 data class ConversationUiState(
     val connectionLabel: String,
@@ -26,6 +27,7 @@ data class ConversationUiState(
     val isStopping: Boolean,
     val canStop: Boolean,
     val canSend: Boolean,
+    val historyWindow: HistoryWindow = HistoryWindow(),
     val modelCatalog: ModelCatalogUi = ModelCatalogUi(),
     val runtimeInspection: RuntimeInspectionUi = RuntimeInspectionUi(),
 )

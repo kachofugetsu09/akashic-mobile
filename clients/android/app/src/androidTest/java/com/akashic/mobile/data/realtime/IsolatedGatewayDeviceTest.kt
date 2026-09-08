@@ -25,6 +25,50 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class IsolatedGatewayDeviceTest {
     @Test
+    fun recentTailBecomesReadyAndOlderHistoryLoadsOnDemand() = runBlocking<Unit> {
+        val arguments = InstrumentationRegistry.getArguments()
+        val offer = String(Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT), Charsets.UTF_8)
+        val sessionId = requireNotNull(arguments.getString("tailSessionId"))
+        val count = requireNotNull(arguments.getString("tailCount")).toLong()
+        val app = ApplicationProvider.getApplicationContext<App>()
+        val session = app.container.realtimeSession
+        session.start()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.initialized } }
+        session.beginPairing(offer)
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { it.hasProfile && it.connection.phase == ConnectionPhase.READY } }
+        session.selectSession(sessionId)
+
+        // 1. READY 只依赖末端窗口与实时订阅；旧记录仍未进入本机。
+        val tail = withTimeout(TIMEOUT_MILLIS) { session.state.first {
+            it.currentSessionId == sessionId && !it.historyWindow.loading && it.historyWindow.afterSeq == count - 51
+        } }
+        assertEquals(ConnectionPhase.READY, tail.connection.phase)
+        val latestRows = graph(app, sessionId) { it.size == 50 }
+        assertEquals((count - 50 until count).toList(), latestRows.map { it.message.serverSeq })
+        assertTrue(latestRows.all { it.message.bodyJson.length < 1024 })
+
+        // 2. 向前一页只增加一页；引用跳转保留独立的旧窗口。
+        session.loadOlderHistory()
+        withTimeout(TIMEOUT_MILLIS) { session.state.first { !it.historyWindow.loading && it.historyWindow.afterSeq == count - 101 } }
+        graph(app, sessionId) { it.size == 100 }
+        session.loadHistoryAround("tail-10")
+        val around = withTimeout(TIMEOUT_MILLIS) { session.state.first {
+            !it.historyWindow.loading && it.historyWindow.throughSeq == 10L
+        } }
+        val oldRows = withTimeout(TIMEOUT_MILLIS) { app.container.database.messages()
+            .observeMessageGraph(sessionId, around.historyWindow.afterSeq, around.historyWindow.throughSeq)
+            .first { it.size == 11 } }
+        assertEquals((0L..10L).toList(), oldRows.map { it.message.serverSeq })
+        session.loadLatestHistory()
+        val latest = withTimeout(TIMEOUT_MILLIS) { session.state.first {
+            !it.historyWindow.loading && it.historyWindow.throughSeq == null && it.historyWindow.afterSeq == count - 51
+        } }
+        assertEquals(ConnectionPhase.READY, latest.connection.phase)
+        assertEquals(111, graph(app, sessionId) { it.size == 111 }.size)
+        Log.i("AkashicDeviceGate", "tail_total=$count ready_rows=50 older_rows=100 around_rows=11 retained_rows=111")
+    }
+
+    @Test
     fun historicalArtifactsReachRoomCacheAndSharedWebUi() = runBlocking<Unit> {
         val arguments = InstrumentationRegistry.getArguments()
         val offer = String(Base64.decode(requireNotNull(arguments.getString("pairingOfferBase64")), Base64.DEFAULT), Charsets.UTF_8)

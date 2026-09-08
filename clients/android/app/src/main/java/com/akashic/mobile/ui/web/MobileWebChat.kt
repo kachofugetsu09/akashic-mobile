@@ -352,6 +352,9 @@ internal fun MobileWebChat(
     onNativeActivityResultLaunched: () -> Unit = {},
     mobileWebUiCoordinator: MobileWebUiCoordinator? = null,
     onSelectSession: (String) -> Unit,
+    onLoadOlderHistory: () -> Unit,
+    onLoadLatestHistory: () -> Unit,
+    onLoadHistoryAround: (String) -> Unit,
     onRemoveUnavailableSession: (String) -> Unit,
     onNewSession: () -> Unit,
     onRestartPairing: () -> Unit,
@@ -504,6 +507,9 @@ internal fun MobileWebChat(
             onCommitSharedText = onCommitSharedText,
             onSharedTextRejected = onSharedTextRejected,
             onSelectSession = onSelectSession,
+            onLoadOlderHistory = onLoadOlderHistory,
+            onLoadLatestHistory = onLoadLatestHistory,
+            onLoadHistoryAround = onLoadHistoryAround,
             onRemoveUnavailableSession = onRemoveUnavailableSession,
             onNewSession = onNewSession,
             onRestartPairing = onRestartPairing,
@@ -1374,6 +1380,9 @@ private data class MobileWebCallbacks(
     val onCommitSharedText: (String, String, String, String?) -> Unit,
     val onSharedTextRejected: (String, String) -> Unit,
     val onSelectSession: (String) -> Unit,
+    val onLoadOlderHistory: () -> Unit,
+    val onLoadLatestHistory: () -> Unit,
+    val onLoadHistoryAround: (String) -> Unit,
     val onRemoveUnavailableSession: (String) -> Unit,
     val onNewSession: () -> Unit,
     val onRestartPairing: () -> Unit,
@@ -1466,6 +1475,12 @@ private class MobileWebBridge(
     }
 
     fun selectSession(sessionId: String) = dispatch { it.onSelectSession(sessionId) }
+
+    fun loadOlderHistory() = dispatch { it.onLoadOlderHistory() }
+
+    fun loadLatestHistory() = dispatch { it.onLoadLatestHistory() }
+
+    fun loadHistoryAround(messageId: String) = dispatch { it.onLoadHistoryAround(messageId) }
 
     fun removeUnavailableSession(sessionId: String) = dispatch {
         it.onRemoveUnavailableSession(sessionId)
@@ -1700,6 +1715,9 @@ private val MOBILE_WEB_TRANSPORT_METHODS = mapOf(
     "commitSharedText" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
     "rejectSharedText" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
     "selectSession" to listOf(MobileWebTransportArgType.STRING),
+    "loadOlderHistory" to emptyList(),
+    "loadLatestHistory" to emptyList(),
+    "loadHistoryAround" to listOf(MobileWebTransportArgType.STRING),
     "removeUnavailableSession" to listOf(MobileWebTransportArgType.STRING),
     "createSession" to emptyList(),
     "restartPairing" to emptyList(),
@@ -1858,6 +1876,9 @@ private fun dispatchMobileWebTransport(
         "commitSharedText" -> bridge.commitSharedText(string(0), string(1), string(2), string(3))
         "rejectSharedText" -> bridge.rejectSharedText(string(0), string(1))
         "selectSession" -> bridge.selectSession(string(0))
+        "loadOlderHistory" -> bridge.loadOlderHistory()
+        "loadLatestHistory" -> bridge.loadLatestHistory()
+        "loadHistoryAround" -> bridge.loadHistoryAround(string(0))
         "removeUnavailableSession" -> bridge.removeUnavailableSession(string(0))
         "createSession" -> bridge.createSession()
         "restartPairing" -> bridge.restartPairing()

@@ -131,3 +131,18 @@ Room v17→v18 把旧版保留的 `user:<首次 clientMessageId>` 视觉身份�
 
 - 产品尚未接受“忘记此服务器的本地资料”功能及其影响清单。
 - 这个缺口不能被实现者自动补成物理删除或静默清理；设备撤销只终止当前授权与远端 UI presentation，不等同于忘记本地资料。
+
+
+## 当前会话与按需历史
+
+Native 的 `RealtimeSession` 在目录确认后请求当前会话尾页，Room 先保存记录/清单和接收范围，再 ACK。当前订阅和回复状态就绪后恢复 outbox；不等待全会话历史或旧文件。WebUI 通过 `loadOlderHistory / loadHistoryAround / loadLatestHistory` 请求变更一个连续显示窗口，不获得数据库写权限或自有历史 cursor。协议字段由固定 Core schema 的 `messageLog` 部分拥有，持久化规则见 [状态地图](persistence-state-map.md)。
+
+```text
+┌──────────────┐    ┌────────────────────┐
+│ Core read_tail│───▶│ Room 记录/清单+范围 │──▶ ACK
+└──────────────┘    └─────────┬──────────┘
+                             ▼
+                   ┌────────────────────┐
+                   │ 单个连续显示窗口    │
+                   └────────────────────┘
+```

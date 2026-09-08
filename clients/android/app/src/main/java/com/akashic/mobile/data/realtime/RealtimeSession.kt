@@ -9,7 +9,6 @@ import com.akashic.mobile.data.local.AttachmentTransferEntity
 import com.akashic.mobile.data.local.AppDatabase
 import com.akashic.mobile.data.local.AppPreferences
 import com.akashic.mobile.data.local.ConversationEntity
-import com.akashic.mobile.data.local.HistoryProjectionProgress
 import com.akashic.mobile.data.local.LocalDeliveryStore
 import com.akashic.mobile.data.local.MessageEntity
 import com.akashic.mobile.data.local.MediaAttachmentEntity
@@ -21,6 +20,7 @@ import com.akashic.mobile.data.local.RealtimeCursorEntity
 import com.akashic.mobile.data.local.RemoveUnavailableConversationResult
 import com.akashic.mobile.data.local.ServerProfileEntity
 import com.akashic.mobile.data.local.isRemoteMissingIn
+import com.akashic.mobile.domain.model.HistoryWindow
 import com.akashic.mobile.domain.model.ConnectionPhase
 import com.akashic.mobile.domain.model.ConnectionState
 import com.akashic.mobile.domain.model.EndpointRoute
@@ -64,7 +64,7 @@ import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 
-internal const val HISTORY_PAGE_SIZE = 100
+internal const val HISTORY_PAGE_SIZE = 50
 
 data class MobileSessionState(
     val initialized: Boolean = false,
@@ -81,6 +81,7 @@ data class MobileSessionState(
     val meteredLargeTransferApproved: Boolean = false,
     val isReloadingHistory: Boolean = false,
     val replyStatus: JsonObject? = null,
+    val historyWindow: HistoryWindow = HistoryWindow(),
     val commands: List<RemoteCommandItem> = emptyList(),
     val errorMessage: String? = null,
 )
@@ -192,34 +193,6 @@ internal fun shouldApplyQueuedDeviceRevocation(
 ): Boolean = currentEpoch == queuedEpoch &&
     (ownerGenerationCurrent || currentGeneration == queuedGeneration)
 
-internal fun historyStartPage(
-    remoteMessageCount: Int,
-    local: HistoryProjectionProgress,
-    forceReload: Boolean,
-    pageSize: Int,
-): Int? {
-    if (remoteMessageCount <= 0) return null
-    if (forceReload) return 1
-    val contiguous = if (local.messageCount == 0) {
-        local.maxServerSeq == null
-    } else {
-        local.maxServerSeq == local.messageCount.toLong() - 1
-    }
-    if (!contiguous || local.messageCount > remoteMessageCount) return 1
-    if (local.messageCount == remoteMessageCount) return null
-    return local.messageCount / pageSize + 1
-}
-
-internal enum class HistorySyncAction { COMPLETE, RESUME, RESET }
-
-internal fun historyRequestSnapshotMaxSeq(
-    action: HistorySyncAction,
-    snapshotMaxSeq: Long?,
-): Long? = if (action == HistorySyncAction.RESET) null else snapshotMaxSeq
-
-internal fun historyPageEnumerationComplete(payload: HistoryPagePayload): Boolean =
-    !payload.hasMore && payload.nextAfterSeq == payload.throughSeq
-
 internal sealed interface SessionMessageContent {
     val sessionId: String
 
@@ -296,49 +269,6 @@ internal fun followReplyAction(
     return FollowReplyAction.ACCEPT
 }
 
-/** 用权威消息数与 seq 高水位选择历史恢复动作。 */
-internal fun historySyncAction(
-    remoteMessageCount: Int,
-    snapshotMaxSeq: Long?,
-    local: HistoryProjectionProgress,
-    forceReload: Boolean,
-): HistorySyncAction {
-    if (forceReload) return HistorySyncAction.RESET
-    if (snapshotMaxSeq == null) {
-        return when (historyStartPage(remoteMessageCount, local, false, HISTORY_PAGE_SIZE)) {
-            null -> HistorySyncAction.COMPLETE
-            1 -> HistorySyncAction.RESET
-            else -> HistorySyncAction.RESUME
-        }
-    }
-    require(remoteMessageCount >= 0 && snapshotMaxSeq >= -1)
-    require((remoteMessageCount == 0) == (snapshotMaxSeq == -1L))
-    if (local.messageCount > remoteMessageCount) return HistorySyncAction.RESET
-    if (local.messageCount == remoteMessageCount) {
-        val expectedLocalMaxSeq = snapshotMaxSeq.takeUnless { it == -1L }
-        return if (local.maxServerSeq == expectedLocalMaxSeq) {
-            HistorySyncAction.COMPLETE
-        } else {
-            HistorySyncAction.RESET
-        }
-    }
-    val localMaxSeq = local.maxServerSeq ?: return HistorySyncAction.RESUME
-    return if (localMaxSeq < snapshotMaxSeq) HistorySyncAction.RESUME else HistorySyncAction.RESET
-}
-
-/** 从本地连续进度继续历史请求，并在传输失效后停止当前批次。 */
-internal suspend fun requestHistoryBatch(
-    sessions: List<RemoteSessionSummary>,
-    startPage: suspend (RemoteSessionSummary) -> Int?,
-    requestPage: (String, Int) -> Boolean,
-) {
-    for (session in sessions) {
-        if (session.messageCount <= 0) continue
-        val page = startPage(session) ?: continue
-        if (!requestPage(session.sessionId, page)) return
-    }
-}
-
 internal class NetworkRecoveryLatch {
     private var unavailableGeneration: Long? = null
     private var recoveredGeneration: Long? = null
@@ -407,11 +337,16 @@ class RealtimeSession(
     allowInsecureTransport: Boolean,
     private val onRuntimeError: (String, Throwable) -> Unit,
 ) : RealtimeSocketListener {
+    private enum class HistoryPageUse { LATEST, OLDER, AROUND, NOTIFICATION }
+
     private data class PendingSyncCommand(
         val generation: Long,
         val type: String,
         val sessionId: String?,
         val afterSeq: Long?,
+        val historyUse: HistoryPageUse? = null,
+        val beforeSeq: Long? = null,
+        val aroundId: String? = null,
     )
 
     private data class PendingPairing(
@@ -519,9 +454,10 @@ class RealtimeSession(
     private var activeOutboxCommandId: String? = null
     private var syncGeneration = 0L
     private var completedSyncGeneration = 0L
-    private var resetRebuildGeneration: Long? = null
     private val pendingSyncCommands = mutableMapOf<String, PendingSyncCommand>()
-    private val requestedHistoryCursors = mutableSetOf<Triple<Long, String, Long>>()
+    private val followingAfterSeq = mutableMapOf<String, Long>()
+    private var followedSessionId: String? = null
+    private val missingHistoryMessages = mutableSetOf<Pair<String, String>>()
     private var pendingCommandListId: String? = null
     private var pendingSessionCreateId: String? = null
     private var pendingFollow: PendingFollowOwner? = null
@@ -578,6 +514,7 @@ class RealtimeSession(
                     hasProfile = profile != null,
                     serverId = profile?.serverId,
                     currentSessionId = selected,
+                    historyWindow = selected?.let { cachedHistoryWindow(it) } ?: HistoryWindow(),
                     projectionGeneration = if (mutableState.value.currentSessionId == selected) {
                         mutableState.value.projectionGeneration
                     } else {
@@ -776,7 +713,7 @@ class RealtimeSession(
 
                 // 3. 健康连接直接重建；错误连接清掉毒投影后从同一 durable cursor 重连重放
                 if (reloadOnCurrentConnection) {
-                    beginResetRebuild()
+                    beginEventResync()
                 } else {
                     socket.close(reason = "本地消息缓存已清理，重新连接并同步")
                     scheduleReconnect("本地消息缓存已清理，正在重新连接并同步")
@@ -1562,18 +1499,31 @@ class RealtimeSession(
         }
         val currentProfile = profile ?: return@withLock NotificationTargetOpenResult.WAITING_FOR_SYNC
 
-        // 2. 本地命中无需等待网络；缺失投影只有在完整同步后才能判定过期
-        val projection = deliveryStore.notificationTargetProjection(
-            currentProfile.serverId,
-            sessionId,
-            messageId,
-        )
+        // 2. 缓存未命中只能发起定位；服务端明确不存在后才判为过期。
+        val projection = deliveryStore.notificationTargetProjection(currentProfile.serverId, sessionId, messageId)
+        if (projection == NotificationTargetProjection.MISSING && messageId != null &&
+            (sessionId to messageId) !in missingHistoryMessages &&
+            (mutableState.value.remoteSessionIds == null || sessionId in requireNotNull(mutableState.value.remoteSessionIds))) {
+            if (mutableState.value.connection.phase == ConnectionPhase.READY) {
+                requestHistoryWindow(sessionId, HistoryPageUse.NOTIFICATION, aroundId = messageId)
+            }
+            return@withLock NotificationTargetOpenResult.WAITING_FOR_SYNC
+        }
         val result = notificationTargetOpenResult(projection, mutableState.value.connection.phase)
         when (result) {
-            NotificationTargetOpenResult.OPENED -> selectKnownSession(currentProfile, sessionId)
-            NotificationTargetOpenResult.STALE -> {
-                mutableState.value = mutableState.value.copy(errorMessage = STALE_NOTIFICATION_MESSAGE)
+            NotificationTargetOpenResult.OPENED -> {
+                selectKnownSession(currentProfile, sessionId)
+                val seq = messageId?.let { database.messages().get(it)?.serverSeq }
+                if (seq != null && (seq <= mutableState.value.historyWindow.afterSeq ||
+                    mutableState.value.historyWindow.throughSeq?.let { seq > it } == true)) {
+                    publishHistoryWindow(cachedHistoryWindow(sessionId, seq + 1))
+                }
+                // 通知定位排在选会话的尾页之后，避免尾页覆盖目标窗口。
+                if (seq != null && mutableState.value.connection.phase == ConnectionPhase.READY) {
+                    requestHistoryWindow(sessionId, HistoryPageUse.AROUND, aroundId = messageId)
+                }
             }
+            NotificationTargetOpenResult.STALE -> mutableState.value = mutableState.value.copy(errorMessage = STALE_NOTIFICATION_MESSAGE)
             NotificationTargetOpenResult.WAITING_FOR_SYNC -> Unit
         }
         result
@@ -1598,7 +1548,10 @@ class RealtimeSession(
     /** 持久化已验证会话的选择，并维持进入会话时的阅读恢复语义。 */
     private suspend fun selectKnownSession(currentProfile: ServerProfileEntity, sessionId: String) {
         // 1. 主动进入另一会话时从最新消息开始
-        if (mutableState.value.currentSessionId != sessionId) {
+        val changed = mutableState.value.currentSessionId != sessionId
+        if (changed) {
+            pendingFollow = null
+            followedSessionId = null
             deliveryStore.clearReadingPosition(
                 sessionId = sessionId,
                 expectedServerId = currentProfile.serverId,
@@ -1609,9 +1562,10 @@ class RealtimeSession(
         // 2. 同步持久选择与进程内投影
         preferences.selectSession(sessionId)
         publishSelectedSession(sessionId)
-        if (mutableState.value.connection.phase == ConnectionPhase.READY) {
-            modelCatalog.onSessionSelected(sessionId)
-            requestMessageFollow(sessionId)
+        val phase = mutableState.value.connection.phase
+        if (changed && phase in setOf(ConnectionPhase.SYNCING, ConnectionPhase.READY)) {
+            if (phase == ConnectionPhase.READY) modelCatalog.onSessionSelected(sessionId)
+            requestHistoryWindow(sessionId, HistoryPageUse.LATEST)
         }
     }
 
@@ -1893,9 +1847,10 @@ class RealtimeSession(
         activeEpoch = accepted.connectionEpoch
         syncGeneration += 1
         completedSyncGeneration = 0
-        resetRebuildGeneration = null
         pendingSyncCommands.clear()
-        requestedHistoryCursors.clear()
+        followingAfterSeq.clear()
+        followedSessionId = null
+        missingHistoryMessages.clear()
         retryCount = 0
         val cursor = requireNotNull(database.realtimeCursors().get(currentProfile.deviceId))
         check(
@@ -1973,14 +1928,14 @@ class RealtimeSession(
                     "sync.reset_required" -> {
                         messageDownloads.onDisconnected()
                         messageContentStore.reconcile()
-                        beginResetRebuild()
+                        beginEventResync()
                     }
                     "session.list" -> {
                         if (hasPendingSyncCommand("session.list")) applyRemoteSessionList(envelope)
                     }
                     "history.page" -> {
                         rememberRemoteSession(requireNotNull(envelope.sessionId))
-                        requestNextHistoryPage(envelope)
+                        acceptHistoryPage(envelope)
                         downloads.resumeIfIdle(currentProfile.serverId)
                         messageDownloads.resumeIfIdle(currentProfile.serverId)
                     }
@@ -2040,13 +1995,25 @@ class RealtimeSession(
                 }
                 if (id in pendingSyncCommands && envelope.type.endsWith(".error")) {
                     val pending = requireNotNull(pendingSyncCommands.remove(id))
-                    require(pending.generation == syncGeneration) { "收到旧 generation 的历史同步错误" }
-                    require(envelope.type == "${pending.type}.error") { "历史同步错误类型不匹配" }
+                    require(pending.generation == syncGeneration && envelope.type == "${pending.type}.error") { "History error owner does not match" }
+                    val code = envelope.payload["code"]?.jsonPrimitive?.content
+                    if (pending.aroundId != null && code == "message_not_found") {
+                        missingHistoryMessages.add(requireNotNull(pending.sessionId) to pending.aroundId)
+                        mutableState.value = mutableState.value.copy(
+                            historyWindow = mutableState.value.historyWindow.copy(loading = false),
+                            errorMessage = "目标消息在服务端已不存在",
+                        )
+                        finishSessionSyncIfComplete()
+                        return
+                    }
                     mutableState.value = mutableState.value.copy(
-                        errorMessage = envelope.payload["message"]?.toString()?.trim('"') ?: "历史同步失败",
+                        historyWindow = mutableState.value.historyWindow.copy(loading = false),
+                        errorMessage = envelope.payload["message"]?.jsonPrimitive?.content ?: "历史加载失败",
                     )
-                    socket.close(reason = "history sync rejected")
-                    scheduleReconnect("历史同步失败，正在重新连接")
+                    if (mutableState.value.connection.phase != ConnectionPhase.READY) {
+                        socket.close(reason = "history sync rejected")
+                        scheduleReconnect("历史加载失败，正在重新连接")
+                    }
                     return
                 }
                 when (envelope.type) {
@@ -2108,11 +2075,9 @@ class RealtimeSession(
                             check(database.conversations().markRemoteKnown(sessionId) == 1) {
                                 "session_not_found 对应的会话投影不存在: $sessionId"
                             }
-                            val remoteIds = requireNotNull(mutableState.value.remoteSessionIds) {
-                                "session_not_found 发生在会话目录同步完成前"
-                            }
+                            val remoteIds = mutableState.value.remoteSessionIds
                             mutableState.value = mutableState.value.copy(
-                                remoteSessionIds = remoteIds - sessionId,
+                                remoteSessionIds = remoteIds?.minus(sessionId),
                             )
                         }
                         if (code == "command_outcome_unknown") {
@@ -2140,8 +2105,12 @@ class RealtimeSession(
                         )) {
                             FollowReplyAction.IGNORE -> return
                             FollowReplyAction.INVALID -> error("session.follow reply 会话不匹配")
-                            FollowReplyAction.ACCEPT -> pendingFollow = null
+                            FollowReplyAction.ACCEPT -> {
+                                followedSessionId = envelope.sessionId
+                                pendingFollow = null
+                            }
                         }
+                        finishSessionSyncIfComplete()
                     }
                     "session.follow.error" -> {
                         when (followReplyAction(
@@ -2341,51 +2310,11 @@ class RealtimeSession(
     private fun hasPendingSyncCommand(type: String): Boolean =
         pendingSyncCommands.values.any { it.generation == syncGeneration && it.type == type }
 
-    private suspend fun requestAllHistory(sessions: List<RemoteSessionSummary>) {
-        val forceReload = resetRebuildGeneration == syncGeneration
-        var localProgress = sessions.associateWith {
-            database.messages().historyProjectionProgress(it.sessionId)
-        }
-        val projectionMismatch = !forceReload && sessions.any { session ->
-            historySyncAction(
-                session.messageCount,
-                session.snapshotMaxSeq,
-                requireNotNull(localProgress[session]),
-                forceReload = false,
-            ) == HistorySyncAction.RESET
-        }
-        if (forceReload || projectionMismatch) {
-            val currentProfile = requireNotNull(profile)
-            deliveryStore.clearReloadableCache(
-                currentProfile.serverId,
-                mutableState.value.currentSessionId,
-            )
-            messageContentStore.reconcile()
-            mutableState.value = mutableState.value.copy(
-                projectionGeneration = mutableState.value.projectionGeneration + 1,
-            )
-            localProgress = sessions.associateWith {
-                database.messages().historyProjectionProgress(it.sessionId)
-            }
-        }
-        for (session in sessions) {
-            val local = requireNotNull(localProgress[session])
-            val action = historySyncAction(
-                session.messageCount,
-                session.snapshotMaxSeq,
-                local,
-                forceReload || projectionMismatch,
-            )
-            if (action == HistorySyncAction.COMPLETE) continue
-            if (session.messageCount == 0) continue
-            val afterSeq = if (action == HistorySyncAction.RESET) -1L else local.maxServerSeq ?: -1L
-            if (!requestHistoryCursor(
-                    session.sessionId,
-                    afterSeq,
-                    snapshotMaxSeq = historyRequestSnapshotMaxSeq(action, session.snapshotMaxSeq),
-                )
-            ) return
-        }
+    /** 首次就绪只等待当前会话的尾页，其他会话在打开时读取。 */
+    private suspend fun requestSelectedHistory() {
+        val sessionId = restoreCurrentSession(requireNotNull(profile)) ?: return
+        if (sessionId !in requireNotNull(mutableState.value.remoteSessionIds)) return
+        if (sessionId !in followingAfterSeq) requestHistoryWindow(sessionId, HistoryPageUse.LATEST)
     }
 
     private fun applyRemoteSessionList(envelope: WireEnvelope) {
@@ -2411,48 +2340,154 @@ class RealtimeSession(
         mutableState.value = mutableState.value.copy(remoteSessionIds = remoteSessionIds + sessionId)
     }
 
-    private suspend fun requestNextHistoryPage(envelope: WireEnvelope) {
-        val sessionId = requireNotNull(envelope.sessionId) { "History page has no session_id" }
-        val payload = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-        require(payload.version == 2) { "History page message version mismatch" }
-        if (Triple(syncGeneration, sessionId, payload.afterSeq) !in requestedHistoryCursors) return
-        require(payload.nextAfterSeq in payload.afterSeq..payload.throughSeq) { "History page next cursor is invalid" }
-        if (payload.hasMore) {
-            require(payload.nextAfterSeq > payload.afterSeq) { "History page cursor did not advance" }
-            requestHistoryCursor(sessionId, payload.nextAfterSeq, payload.throughSeq)
-        } else {
-            require(historyPageEnumerationComplete(payload)) {
-                "History terminal page did not reach through_seq"
+    /** 应用本次请求的窗口边界，不自动枚举 has_more。 */
+    private suspend fun acceptHistoryPage(envelope: WireEnvelope) {
+        val sessionId = requireNotNull(envelope.sessionId)
+        val page = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
+        // durable 重放仍会入库，但旧连接的请求不能改写当前阅读窗口。
+        val pending = page.requestId?.let(pendingSyncCommands::get) ?: return
+        require(pending.sessionId == sessionId && pending.generation == syncGeneration) { "History page request owner is invalid" }
+        val use = requireNotNull(pending.historyUse)
+        require(page.direction == "backward" && page.aroundId == pending.aroundId) { "History page request does not match" }
+        if (pending.beforeSeq != null) require(page.beforeSeq == pending.beforeSeq) { "History page before_seq does not match" }
+        if (use == HistoryPageUse.LATEST) followingAfterSeq[sessionId] = page.throughSeq
+        if (sessionId != mutableState.value.currentSessionId || use == HistoryPageUse.NOTIFICATION) return
+        val current = mutableState.value.historyWindow
+        val next = when (use) {
+            HistoryPageUse.LATEST -> HistoryWindow(page.afterSeq, null, page.hasMore)
+            HistoryPageUse.AROUND -> HistoryWindow(page.afterSeq, page.nextAfterSeq, page.hasMore)
+            HistoryPageUse.OLDER -> current.copy(afterSeq = page.afterSeq, hasOlder = page.hasMore, loading = false)
+            HistoryPageUse.NOTIFICATION -> error("Notification page cannot own the reading window")
+        }
+        mutableState.value = mutableState.value.copy(historyWindow = next,
+            projectionGeneration = mutableState.value.projectionGeneration + if (use == HistoryPageUse.OLDER) 0 else 1)
+        if (use == HistoryPageUse.LATEST) {
+            val anchor = database.conversationReadStates().get(sessionId)?.anchorMessageId
+            val anchorSeq = anchor?.let { database.messages().get(it)?.serverSeq }
+            if (anchor != null && (anchorSeq == null || anchorSeq <= page.afterSeq)) {
+                requestHistoryWindow(sessionId, HistoryPageUse.AROUND, aroundId = anchor)
             }
-            requestPendingNotificationTail(sessionId)
+            if (mutableState.value.connection.phase == ConnectionPhase.READY) requestMessageFollow(sessionId)
         }
     }
 
-    /** 从本地高水位拉取尚未完成的持久通知 hint。 */
+    /** 通知只读取其目标附近；缺少本地消息不能直接判为过期。 */
     private suspend fun requestPendingNotificationTail(sessionId: String) {
-        val hints = database.pendingMessageNotifications().pendingHintsForSession(sessionId)
-        val throughSeq = hints.mapNotNull { it.headSeq }.maxOrNull() ?: return
-        val afterSeq = database.messages().historyProjectionProgress(sessionId).maxServerSeq ?: -1L
-        if (afterSeq < throughSeq) requestHistoryCursor(sessionId, afterSeq, throughSeq)
+        database.pendingMessageNotifications().pendingHintsForSession(sessionId).forEach { hint ->
+            if (database.messages().get(hint.messageId)?.serverSeq == null) {
+                requestHistoryWindow(sessionId, HistoryPageUse.NOTIFICATION, aroundId = hint.messageId)
+            }
+        }
     }
 
-    private fun requestHistoryCursor(
+    private fun requestHistoryWindow(
         sessionId: String,
-        afterSeq: Long,
-        snapshotMaxSeq: Long?,
+        use: HistoryPageUse,
+        beforeSeq: Long? = null,
+        aroundId: String? = null,
     ): Boolean {
-        if (!requestedHistoryCursors.add(Triple(syncGeneration, sessionId, afterSeq))) return true
-        return sendSyncCommand(
-            type = "history.get",
-            sessionId = sessionId,
-            payload = historyCursorPayload(afterSeq, snapshotMaxSeq),
-        )
+        if (pendingSyncCommands.values.any {
+            it.generation == syncGeneration && it.sessionId == sessionId &&
+                it.historyUse == use && it.beforeSeq == beforeSeq && it.aroundId == aroundId
+        }) return true
+        if (use != HistoryPageUse.NOTIFICATION && sessionId == mutableState.value.currentSessionId) {
+            mutableState.value = mutableState.value.copy(historyWindow = mutableState.value.historyWindow.copy(loading = true))
+        }
+        return sendSyncCommand("history.get", sessionId, buildJsonObject {
+            put("message_log_version", 2)
+            put("direction", "backward")
+            put("display_only", true)
+            put("page_size", HISTORY_PAGE_SIZE)
+            beforeSeq?.let { put("before_seq", it) }
+            aroundId?.let { put("around_id", it) }
+        }, use, beforeSeq, aroundId)
+    }
+
+    /** 向上扩展当前窗口；离线只展示已经缓存的较早消息。 */
+    fun loadOlderHistory() {
+        scope.launch { mutex.withLock {
+            val state = mutableState.value
+            val sessionId = state.currentSessionId ?: return@withLock
+            val window = state.historyWindow
+            if (window.loading || !window.hasOlder || window.afterSeq < 0) return@withLock
+            if (window.afterSeq == Long.MAX_VALUE) {
+                mutableState.value = state.copy(errorMessage = "这段历史尚未缓存，连接后可继续加载")
+                return@withLock
+            }
+            if (state.connection.phase == ConnectionPhase.READY) {
+                requestHistoryWindow(sessionId, HistoryPageUse.OLDER, beforeSeq = window.afterSeq + 1)
+            } else {
+                val seqs = database.messages().cachedTailSeqs(sessionId, window.afterSeq + 1)
+                if (seqs.isEmpty()) {
+                    mutableState.value = state.copy(errorMessage = "这段历史尚未缓存，连接后可继续加载")
+                } else {
+                    val older = cachedHistoryWindow(sessionId, window.afterSeq + 1)
+                    val connected = database.messages().receivedRanges(sessionId).any {
+                        it.afterSeq <= older.afterSeq && it.throughSeq >= window.afterSeq + 1
+                    } || seqs.first() == window.afterSeq
+                    if (connected) publishHistoryWindow(window.copy(afterSeq = older.afterSeq, hasOlder = older.hasOlder))
+                    else mutableState.value = state.copy(errorMessage = "中间这段历史尚未缓存，连接后可继续加载")
+                }
+            }
+        } }
+    }
+
+    /** 引用目标由服务端定位，单独打开连续窗口。 */
+    fun loadHistoryAround(messageId: String) {
+        scope.launch { mutex.withLock {
+            val state = mutableState.value
+            val sessionId = state.currentSessionId ?: return@withLock
+            if (state.connection.phase == ConnectionPhase.READY) {
+                requestHistoryWindow(sessionId, HistoryPageUse.AROUND, aroundId = messageId)
+            } else {
+                val seq = database.messages().get(messageId)?.serverSeq
+                if (seq == null) mutableState.value = state.copy(errorMessage = "这条消息尚未缓存，连接后可打开")
+                else publishHistoryWindow(cachedHistoryWindow(sessionId, seq + 1))
+            }
+        } }
+    }
+
+    fun loadLatestHistory() {
+        scope.launch { mutex.withLock {
+            val state = mutableState.value
+            val sessionId = state.currentSessionId ?: return@withLock
+            deliveryStore.clearReadingPosition(sessionId, requireNotNull(profile).serverId, System.currentTimeMillis())
+            if (state.connection.phase == ConnectionPhase.READY) requestHistoryWindow(sessionId, HistoryPageUse.LATEST)
+            else publishHistoryWindow(cachedHistoryWindow(sessionId))
+        } }
+    }
+
+    private suspend fun cachedHistoryWindow(sessionId: String, beforeSeq: Long? = null): HistoryWindow {
+        val seqs = database.messages().cachedTailSeqs(sessionId, beforeSeq)
+        val newest = seqs.firstOrNull() ?: return HistoryWindow(throughSeq = beforeSeq?.minus(1))
+        val range = database.messages().receivedRanges(sessionId).firstOrNull { newest > it.afterSeq && newest <= it.throughSeq }
+        val start = if (range != null) maxOf(seqs.last() - 1, range.afterSeq) else {
+            // 旧版缓存没有范围证据，只使用能直接证明的相邻 seq 段。
+            var oldest = newest
+            for (seq in seqs.drop(1)) {
+                if (seq != oldest - 1) break
+                oldest = seq
+            }
+            oldest - 1
+        }
+        return HistoryWindow(start, beforeSeq?.minus(1), start >= 0)
+    }
+
+    /** 替换窗口推进投影代际；向上扩页保留已挂载锚点。 */
+    private fun publishHistoryWindow(window: HistoryWindow) {
+        val state = mutableState.value
+        val extends = window.afterSeq <= state.historyWindow.afterSeq && window.throughSeq == state.historyWindow.throughSeq
+        mutableState.value = state.copy(historyWindow = window,
+            projectionGeneration = state.projectionGeneration + if (extends) 0 else 1)
     }
 
     private fun sendSyncCommand(
         type: String,
         sessionId: String?,
         payload: kotlinx.serialization.json.JsonObject,
+        historyUse: HistoryPageUse? = null,
+        beforeSeq: Long? = null,
+        aroundId: String? = null,
     ): Boolean {
         val epoch = requireNotNull(activeEpoch) { "History sync requires an authenticated connection" }
         val candidate = requireNotNull(activeCandidate) { "History sync requires an active endpoint" }
@@ -2460,6 +2495,9 @@ class RealtimeSession(
         pendingSyncCommands[commandId] = PendingSyncCommand(
             generation = syncGeneration,
             type = type,
+            historyUse = historyUse,
+            beforeSeq = beforeSeq,
+            aroundId = aroundId,
             sessionId = sessionId,
             afterSeq = payload["after_seq"]?.jsonPrimitive?.longOrNull?.also {
                 require(it >= -1) { "历史同步 after_seq 超出范围" }
@@ -2494,7 +2532,7 @@ class RealtimeSession(
         require(pending.generation == syncGeneration) { "收到旧 generation 的历史同步 reply" }
         require(envelope.type == "${pending.type}.ok") { "历史同步 reply 类型不匹配" }
         require(envelope.sessionId == pending.sessionId) { "历史同步 reply session 不匹配" }
-        if (envelope.payload["after_seq"] != null) {
+        if (pending.historyUse == null && envelope.payload["after_seq"] != null) {
             require(envelope.payload["after_seq"]?.jsonPrimitive?.longOrNull == pending.afterSeq) {
                 "历史同步 reply after_seq 不匹配"
             }
@@ -2511,23 +2549,24 @@ class RealtimeSession(
             mutableState.value = mutableState.value.copy(
                 remoteSessionIds = sessions.mapTo(linkedSetOf()) { it.sessionId },
             )
-            requestAllHistory(sessions)
+            if (mutableState.value.connection.phase != ConnectionPhase.READY) requestSelectedHistory()
         }
         finishSessionSyncIfComplete()
     }
 
-    /** 从 reset event 的新 cursor 开始重建当前服务端投影视图。 */
-    private fun beginResetRebuild() {
+    /** 从 reset event 续读目录和当前尾页，不删除已有 Message 缓存。 */
+    private fun beginEventResync() {
         syncGeneration += 1
         completedSyncGeneration = syncGeneration
-        resetRebuildGeneration = syncGeneration
         pendingSyncCommands.clear()
         pendingCommandListId = null
         pendingSessionCreateId = null
         pluginUi.onDisconnected("服务端要求重新同步")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
-        requestedHistoryCursors.clear()
+        followingAfterSeq.clear()
+        followedSessionId = null
+        missingHistoryMessages.clear()
         mutableState.value = mutableState.value.copy(
             projectionGeneration = mutableState.value.projectionGeneration + 1,
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.SYNCING),
@@ -2538,14 +2577,19 @@ class RealtimeSession(
         requestSessionList()
     }
 
-    /** 最新代际目录和历史完整落地后，才恢复上传、停止命令与 outbox。 */
+    /** 当前尾页清单、订阅和回复状态已知后恢复发送；旧历史与文件不阻塞。 */
     private suspend fun finishSessionSyncIfComplete() {
         if (completedSyncGeneration != syncGeneration) return
-        if (mutableState.value.remoteSessionIds == null || pendingSyncCommands.isNotEmpty()) return
+        if (mutableState.value.remoteSessionIds == null || pendingSyncCommands.values.any { it.historyUse != HistoryPageUse.NOTIFICATION }) return
         if (mutableState.value.connection.phase == ConnectionPhase.READY) return
-        if (resetRebuildGeneration == syncGeneration) resetRebuildGeneration = null
         val currentProfile = requireNotNull(profile)
         val currentSessionId = restoreCurrentSession(currentProfile)
+        if (currentSessionId != null && currentSessionId in requireNotNull(mutableState.value.remoteSessionIds)) {
+            if (followedSessionId != currentSessionId || mutableState.value.replyStatus == null) {
+                if (pendingFollow == null && followedSessionId != currentSessionId) requestMessageFollow(currentSessionId)
+                return
+            }
+        }
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(phase = ConnectionPhase.READY),
             isReloadingHistory = false,
@@ -2563,7 +2607,6 @@ class RealtimeSession(
         messageDownloads.onConnectionReady(currentProfile.serverId)
         database.pendingMessageNotifications().pendingHints(currentProfile.serverId)
             .map { it.sessionId }.distinct().forEach { requestPendingNotificationTail(it) }
-        currentSessionId?.let(::requestMessageFollow)
         flushOutbox()
         sendDeviceUpdateCommand()
     }
@@ -2599,48 +2642,37 @@ class RealtimeSession(
                 deliveryStore.applyMessageRows(
                     currentProfile.serverId,
                     message.sessionId,
-                    message.payload.items,
+                    message.payload,
                 )
                 downloads.resumeIfIdle(currentProfile.serverId)
                 messageDownloads.resumeIfIdle(currentProfile.serverId)
             }
             is SessionMessageContent.ReplyStatus -> {
                 mutableState.value = mutableState.value.copy(replyStatus = message.payload)
+                finishSessionSyncIfComplete()
             }
         }
     }
 
     private fun requestMessageFollow(sessionId: String) {
-        scope.launch {
-            val afterSeq = database.messages().historyProjectionProgress(sessionId).maxServerSeq ?: -1L
-            mutex.withLock {
-                val state = mutableState.value
-                val epoch = activeEpoch ?: return@withLock
-                val candidate = activeCandidate ?: return@withLock
-                if (
-                    state.connection.phase != ConnectionPhase.READY ||
-                    state.currentSessionId != sessionId
-                ) return@withLock
-                val commandId = Ulid.next()
-                pendingFollow = PendingFollowOwner(commandId, sessionId, epoch)
-                mutableState.value = mutableState.value.copy(replyStatus = null)
-                val payload = ProtocolCodec.json().encodeToJsonElement(
-                    SessionFollowPayload.serializer(),
-                    SessionFollowPayload(afterSeq = afterSeq),
-                ).jsonObject
-                if (!socket.send(candidate, WireEnvelope(
-                        v = WIRE_PROTOCOL_VERSION,
-                        kind = WireKind.COMMAND,
-                        type = "session.follow",
-                        id = commandId,
-                        connectionEpoch = epoch,
-                        sessionId = sessionId,
-                        payload = payload,
-                    ))) {
-                    if (pendingFollow?.id == commandId) pendingFollow = null
-                    scheduleReconnect("消息订阅未进入 WebSocket 队列")
-                }
-            }
+        val state = mutableState.value
+        val epoch = activeEpoch ?: return
+        val candidate = activeCandidate ?: return
+        if (state.connection.phase !in setOf(ConnectionPhase.READY, ConnectionPhase.SYNCING) || state.currentSessionId != sessionId) return
+        val afterSeq = requireNotNull(followingAfterSeq[sessionId]) { "Message follow requires a persisted recent page" }
+        val commandId = Ulid.next()
+        pendingFollow = PendingFollowOwner(commandId, sessionId, epoch)
+        followedSessionId = null
+        mutableState.value = state.copy(replyStatus = null)
+        val payload = ProtocolCodec.json().encodeToJsonElement(
+            SessionFollowPayload.serializer(), SessionFollowPayload(afterSeq = afterSeq),
+        ).jsonObject
+        if (!socket.send(candidate, WireEnvelope(
+                v = WIRE_PROTOCOL_VERSION, kind = WireKind.COMMAND, type = "session.follow",
+                id = commandId, connectionEpoch = epoch, sessionId = sessionId, payload = payload,
+            ))) {
+            pendingFollow = null
+            scheduleReconnect("消息订阅未进入 WebSocket 队列")
         }
     }
 
@@ -2669,6 +2701,7 @@ class RealtimeSession(
     }
 
     private suspend fun flushOutbox() {
+        if (mutableState.value.connection.phase != ConnectionPhase.READY) return
         if (activeOutboxCommandId != null) return
         val currentProfile = requireNotNull(profile)
         val epoch = activeEpoch ?: return
@@ -2825,11 +2858,12 @@ class RealtimeSession(
     }
 
     /** 会话身份改变时同步推进 WebUI 投影 generation。 */
-    private fun publishSelectedSession(sessionId: String?) {
+    private suspend fun publishSelectedSession(sessionId: String?) {
         val state = mutableState.value
         if (state.currentSessionId == sessionId) return
         mutableState.value = state.copy(
             currentSessionId = sessionId,
+            historyWindow = sessionId?.let { cachedHistoryWindow(it) } ?: HistoryWindow(),
             projectionGeneration = state.projectionGeneration + 1,
             replyStatus = null,
         )
@@ -2910,8 +2944,9 @@ class RealtimeSession(
         pluginUi.onDisconnected("连接已中断")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
-        requestedHistoryCursors.clear()
-        resetRebuildGeneration = null
+        followingAfterSeq.clear()
+        followedSessionId = null
+        missingHistoryMessages.clear()
         retryCount += 1
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(
@@ -3036,8 +3071,9 @@ class RealtimeSession(
         pluginUi.onDisconnected("协议不兼容")
         runtimeInspection.onDisconnected()
         modelCatalog.onDisconnected()
-        requestedHistoryCursors.clear()
-        resetRebuildGeneration = null
+        followingAfterSeq.clear()
+        followedSessionId = null
+        missingHistoryMessages.clear()
 
         // 2. 隔离坏命令；只有版本不兼容时才保留等待升级
         val currentProfile = requireNotNull(profile)
@@ -3249,13 +3285,6 @@ class RealtimeSession(
     }
 }
 
-internal fun historyCursorPayload(afterSeq: Long, snapshotMaxSeq: Long?): JsonObject =
-    buildJsonObject {
-        put("message_log_version", 2)
-        put("page_size", HISTORY_PAGE_SIZE)
-        put("after_seq", afterSeq)
-        snapshotMaxSeq?.let { put("through_seq", it) }
-    }
 
 internal fun endHistoryReload(state: MobileSessionState, errorMessage: String): MobileSessionState =
     state.copy(isReloadingHistory = false, errorMessage = errorMessage)

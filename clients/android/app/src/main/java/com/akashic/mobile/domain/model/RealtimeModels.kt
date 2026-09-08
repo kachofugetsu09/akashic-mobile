@@ -31,3 +31,11 @@ data class ConnectionState(
     val retryCount: Int = 0,
     val lastErrorCode: String? = null,
 )
+
+/** 当前画面只展示一个连续窗口；null 上界表示跟随最新消息。 */
+data class HistoryWindow(
+    val afterSeq: Long = Long.MAX_VALUE,
+    val throughSeq: Long? = null,
+    val hasOlder: Boolean = true,
+    val loading: Boolean = false,
+)

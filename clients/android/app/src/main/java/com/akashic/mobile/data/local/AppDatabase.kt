@@ -15,6 +15,7 @@ import kotlinx.serialization.json.jsonPrimitive
         ServerProfileEntity::class,
         ConversationEntity::class,
         MessageEntity::class,
+        MessageRangeEntity::class,
         TurnBlockEntity::class,
         OutboxCommandEntity::class,
         AttachmentTransferEntity::class,
@@ -31,7 +32,7 @@ import kotlinx.serialization.json.jsonPrimitive
         MobileWebUiBlobEntity::class,
         MobileWebUiRejectEntity::class,
     ],
-    version = 19,
+    version = 20,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -85,7 +86,24 @@ abstract class AppDatabase : RoomDatabase() {
             MIGRATION_16_17,
             MIGRATION_17_18,
             MIGRATION_18_19,
+            MIGRATION_19_20,
         ).build()
+
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE message_content_transfers ADD COLUMN displayOnly INTEGER NOT NULL DEFAULT 0")
+                // 旧缓存保留，但不从已有最大 seq 猜测中间历史已完整接收。
+                db.execSQL("""
+                    CREATE TABLE `message_ranges` (
+                        `sessionId` TEXT NOT NULL,
+                        `afterSeq` INTEGER NOT NULL,
+                        `throughSeq` INTEGER NOT NULL,
+                        PRIMARY KEY(`sessionId`, `afterSeq`),
+                        FOREIGN KEY(`sessionId`) REFERENCES `conversations`(`sessionId`) ON UPDATE NO ACTION ON DELETE CASCADE
+                    )
+                """.trimIndent())
+            }
+        }
 
         val MIGRATION_1_2 = object : Migration(1, 2) {
             override fun migrate(db: SupportSQLiteDatabase) {

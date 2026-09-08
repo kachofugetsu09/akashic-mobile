@@ -170,11 +170,29 @@ data class MessageContentTransferEntity(
     val state: String,
     val notifyWhenReady: Boolean,
     val updatedAt: Long,
+    @ColumnInfo(defaultValue = "0") val displayOnly: Boolean = false,
 )
 
 data class HistoryProjectionProgress(
     val messageCount: Int,
     val maxServerSeq: Long?,
+)
+
+/** 已持久接收的消息或下载清单范围，不表示正文和附件已下载。 */
+@Entity(
+    tableName = "message_ranges",
+    primaryKeys = ["sessionId", "afterSeq"],
+    foreignKeys = [ForeignKey(
+        entity = ConversationEntity::class,
+        parentColumns = ["sessionId"],
+        childColumns = ["sessionId"],
+        onDelete = ForeignKey.CASCADE,
+    )],
+)
+data class MessageRangeEntity(
+    val sessionId: String,
+    val afterSeq: Long,
+    val throughSeq: Long,
 )
 
 @Entity(

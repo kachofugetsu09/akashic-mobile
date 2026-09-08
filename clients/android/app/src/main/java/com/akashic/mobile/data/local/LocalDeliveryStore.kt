@@ -4,7 +4,10 @@ import androidx.room.withTransaction
 import com.akashic.mobile.data.realtime.ProtocolCodec
 import com.akashic.mobile.data.realtime.AttachmentProgressPayload
 import com.akashic.mobile.data.realtime.AttachmentReadyPayload
+import com.akashic.mobile.data.realtime.messageDisplayBody
+import com.akashic.mobile.data.realtime.checkHistoryPage
 import com.akashic.mobile.data.realtime.HistoryPagePayload
+import com.akashic.mobile.data.realtime.MessagesAppendedPayload
 import com.akashic.mobile.data.realtime.RemoteHistoryMessage
 import com.akashic.mobile.data.realtime.SessionListPayload
 import com.akashic.mobile.data.realtime.WireEnvelope
@@ -337,6 +340,7 @@ class LocalDeliveryStore(
         //    与 sync.reset_required 共用同一白名单：sent（已 ACK、正文尚未投影）也保留
         projectionStateMutex.withLock {
             database.withTransaction {
+                database.messages().deleteReceivedRanges(serverId)
                 database.messages().deleteServerProjection(serverId)
                 database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
             }
@@ -398,8 +402,7 @@ class LocalDeliveryStore(
             require(connectionEpoch >= cursor.connectionEpoch) { "Stale event connection epoch" }
             if (envelope.type == "sync.reset_required") {
                 require(eventSeq >= cursor.lastAcknowledgedEventSeq) { "Stale reset event sequence" }
-                database.messages().deleteServerProjection(serverId)
-                database.conversations().deleteEmptyProjection(serverId, preservedSessionId)
+                // 事件保留窗口失效不等于 Message 失效；只重置事件续读点。
                 check(
                     database.realtimeCursors().reset(deviceId, eventSeq, connectionEpoch, updatedAt) == 1,
                 ) { "Reset cursor rollback or stale connection epoch for device $deviceId" }
@@ -431,16 +434,17 @@ class LocalDeliveryStore(
     suspend fun applyMessageRows(
         serverId: String,
         sessionId: String,
-        items: List<RemoteHistoryMessage>,
+        page: MessagesAppendedPayload,
     ) =
         projectionStateMutex.withLock {
             database.withTransaction {
                 applyMessageRowsInTransaction(
                     serverId,
                     sessionId,
-                    items,
-                    notificationMessageIds = items.mapTo(linkedSetOf()) { it.id },
+                    page.items,
+                    notificationMessageIds = page.items.mapTo(linkedSetOf()) { it.id },
                 )
+                saveReceivedRange(sessionId, page.afterSeq, page.nextAfterSeq)
             }
         }
 
@@ -572,13 +576,14 @@ class LocalDeliveryStore(
                 val notificationIds = database.pendingMessageNotifications()
                     .pendingHintsForSession(sessionId).mapTo(linkedSetOf()) { it.messageId }
                 val page = ProtocolCodec.decodePayload<HistoryPagePayload>(envelope.payload)
-                require(page.version == 2) { "History page message version mismatch" }
+                checkHistoryPage(page)
                 applyMessageRowsInTransaction(
                     serverId,
                     sessionId,
                     page.items,
                     notificationIds,
                 )
+                saveReceivedRange(sessionId, page.afterSeq, page.nextAfterSeq)
             }
             "turn.started", "react.thinking.delta", "react.tool.started",
             "react.tool.completed", "answer.delta", "message.final",
@@ -737,6 +742,22 @@ class LocalDeliveryStore(
         }
     }
 
+    /** 与消息或下载清单同事务扩展接收范围，重叠范围合为一段。 */
+    private suspend fun saveReceivedRange(sessionId: String, afterSeq: Long, throughSeq: Long) {
+        require(afterSeq >= -1 && throughSeq >= afterSeq) { "Received message range is invalid" }
+        val ranges = database.messages().receivedRanges(sessionId)
+        var start = afterSeq
+        var end = throughSeq
+        for (range in ranges) {
+            if (range.afterSeq <= end && range.throughSeq >= start) {
+                start = minOf(start, range.afterSeq)
+                end = maxOf(end, range.throughSeq)
+            }
+        }
+        database.messages().deleteCoveredRanges(sessionId, start, end)
+        database.messages().saveReceivedRange(MessageRangeEntity(sessionId, start, end))
+    }
+
     /** 保存整条 Message 下载任务；不完整行不进入任何 UI 投影。 */
     private suspend fun stageMessageReference(
         serverId: String,
@@ -793,7 +814,7 @@ class LocalDeliveryStore(
         remote: RemoteHistoryMessage,
         notifyNewOutput: Boolean,
     ) {
-        val body = requireNotNull(remote.body) { "History Message has no body" }
+        val body = messageDisplayBody(requireNotNull(remote.body) { "History Message has no body" })
         val timestamp = requireNotNull(remote.timestamp) { "History Message has no timestamp" }
         val author = requireNotNull(remote.author) { "History Message has no author" }
         val source = requireNotNull(remote.source) { "History Message has no source" }
@@ -918,10 +939,7 @@ class LocalDeliveryStore(
         val dao = database.messageContentTransfers()
         val existing = dao.get(messageId)
         if (reference == null || alreadyRestored) {
-            if (existing != null) {
-                messageContentStore.delete(existing)
-                check(dao.delete(messageId) == 1) { "消息正文恢复记录已消失: $messageId" }
-            }
+            // 下载 owner 可能仍在提交旧清单；已完成正文不再创建新任务。
             return
         }
         val sha256 = reference.sha256.lowercase()
@@ -930,8 +948,8 @@ class LocalDeliveryStore(
                 existing.serverId == serverId &&
                     existing.sessionId == sessionId &&
                     existing.messageSeq == messageSeq &&
-                    existing.byteLength == reference.byteLength &&
-                    existing.sha256 == sha256
+                    (existing.displayOnly != reference.displayOnly ||
+                        (existing.byteLength == reference.byteLength && existing.sha256 == sha256))
             ) { "History content reference changed for an existing message" }
             if (existing.state == "failed") {
                 check(
@@ -956,6 +974,7 @@ class LocalDeliveryStore(
                 serverId = serverId,
                 sessionId = sessionId,
                 messageSeq = messageSeq,
+                displayOnly = reference.displayOnly,
                 byteLength = reference.byteLength,
                 sha256 = sha256,
                 transferredBytes = 0,
@@ -1005,7 +1024,13 @@ class LocalDeliveryStore(
                 "Message identity belongs to another session"
             }
             if (existing.serverSeq != null) {
-                require(existing == canonical) { "Saved Message facts changed during replay" }
+                val oldBody = messageDisplayBody(ProtocolCodec.json().parseToJsonElement(existing.bodyJson).jsonObject)
+                require(oldBody == ProtocolCodec.json().parseToJsonElement(canonical.bodyJson) &&
+                    ProtocolCodec.json().parseToJsonElement(existing.metadataJson) == ProtocolCodec.json().parseToJsonElement(canonical.metadataJson) &&
+                    ProtocolCodec.json().parseToJsonElement(existing.attachmentsJson) == ProtocolCodec.json().parseToJsonElement(canonical.attachmentsJson) &&
+                    existing.copy(bodyJson = canonical.bodyJson, metadataJson = canonical.metadataJson,
+                        attachmentsJson = canonical.attachmentsJson) == canonical) { "Saved Message facts changed during replay" }
+                if (existing != canonical) messages.upsert(canonical)
                 return
             }
         }
