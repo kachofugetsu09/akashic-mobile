@@ -64,14 +64,13 @@ class IsolatedGatewayDeviceTest {
         app.container.database.messages().upsert(com.akashic.mobile.data.local.MessageEntity(
             "local-rejected", null, sessionId, "user", "保留但不排队的旧失败正文", "failed", 1, 1,
         ))
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        for (command in listOf("input keyevent KEYCODE_WAKEUP", "wm dismiss-keyguard")) {
-            android.os.ParcelFileDescriptor.AutoCloseInputStream(
-                instrumentation.uiAutomation.executeShellCommand(command),
-            ).use { it.readBytes() }
-        }
         androidx.test.core.app.ActivityScenario.launch(com.akashic.mobile.MainActivity::class.java).use { activity ->
-            activity.onActivity { it.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
+            activity.onActivity {
+                // 隔离夹具可在安全锁屏上进入前台；不改变设备锁或正式应用。
+                it.setShowWhenLocked(true)
+                it.setTurnScreenOn(true)
+                it.window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
             var rendered = ""
             val text = kotlinx.coroutines.withTimeoutOrNull(TIMEOUT_MILLIS) {
                 while (!rendered.contains("原回答完整保留")) {
