@@ -309,10 +309,10 @@ class MobileWebUiProtocolTest {
     fun `native compatibility rejects a verified manifest from the previous protocol generation`() {
         val current = validManifest()
         val previous = current.copy(
-            bridgeProtocolMin = 1,
-            bridgeProtocolMax = 1,
-            snapshotProtocolMin = 7,
-            snapshotProtocolMax = 7,
+            bridgeProtocolMin = 2,
+            bridgeProtocolMax = 2,
+            snapshotProtocolMin = 10,
+            snapshotProtocolMax = 10,
             minimumNativeBuild = MOBILE_WEB_UI_NATIVE_BUILD - 1,
         )
 
