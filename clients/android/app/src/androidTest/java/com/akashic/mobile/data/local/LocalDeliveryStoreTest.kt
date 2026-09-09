@@ -1980,6 +1980,57 @@ class LocalDeliveryStoreTest {
     }
 
     @Test
+    fun ackAfterPauseCommitKeepsControlAndDeletesOutbox() = runBlocking {
+        val id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        enqueueRetryableMessage(id, createdAt = 2_000, text = "/stop")
+        store.markOutboxAttempt(id, attemptedAt = 2_050)
+        store.applyMessageRows(
+            "server", "akashic:test",
+            com.akashic.mobile.data.realtime.MessagesAppendedPayload(
+                type = "messages.appended", version = 2, sessionId = "akashic:test",
+                afterSeq = 3, nextAfterSeq = 4, throughSeq = 4, hasMore = false,
+                items = listOf(RemoteHistoryMessage(
+                    id = id, sessionId = "akashic:test", seq = 4,
+                    timestamp = "2026-09-09T04:00:00Z", author = "user", source = "conversation",
+                    body = buildJsonObject {
+                        put("kind", "control")
+                        put("action", "pause")
+                        put("through_seq", 3)
+                        put("reason", kotlinx.serialization.json.JsonNull)
+                    },
+                    metadata = buildJsonObject {}, attachments = emptyList(),
+                )),
+            ),
+        )
+        val committed = requireNotNull(database.messages().get(id))
+        assertEquals("assistant", committed.role)
+        assertEquals("complete", committed.deliveryState)
+
+        store.acknowledgeOutbox(id, id, updatedAt = 2_100)
+
+        assertEquals(committed, database.messages().get(id))
+        assertEquals(null, database.outbox().get(id))
+    }
+
+    @Test
+    fun ackDoesNotAcceptOutputAsSentMessage() = runBlocking {
+        val id = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+        enqueueRetryableMessage(id, createdAt = 2_000)
+        val output = requireNotNull(database.messages().get(id)).copy(
+            role = "assistant", deliveryState = "complete", serverSeq = 4,
+            bodyJson = """{"kind":"output","parts":[],"finish":"complete"}""",
+        )
+        database.messages().upsert(output)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { store.acknowledgeOutbox(id, id, updatedAt = 2_100) }
+        }
+
+        assertEquals(output, database.messages().get(id))
+        assertNotNull(database.outbox().get(id))
+    }
+
+    @Test
     fun ackWhileInputBodyIsRestoringSettlesOutboxAndKeepsDownload() = runBlocking {
         val commandId = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
         enqueueRetryableMessage(commandId, createdAt = 2_000)
@@ -2587,11 +2638,11 @@ class LocalDeliveryStoreTest {
         updatedAt = 1,
     )
 
-    private suspend fun enqueueRetryableMessage(commandId: String, createdAt: Long, mediaRefs: List<String> = emptyList()) {
+    private suspend fun enqueueRetryableMessage(commandId: String, createdAt: Long, mediaRefs: List<String> = emptyList(), text: String = "需要恢复的消息") {
         val payload = MessageSendPayload(
             clientMessageId = commandId,
             sessionId = "akashic:test",
-            text = "需要恢复的消息",
+            text = text,
             mediaRefs = mediaRefs,
             clientCreatedAt = "2026-07-16T08:00:00Z",
         )
