@@ -346,6 +346,7 @@ class MainActivity : ComponentActivity() {
                             onOpenRuntimeJob = viewModel::openRuntimeJob,
                             onClearRuntimeInspectionDetail =
                                 viewModel::clearRuntimeInspectionDetail,
+                            onReadModelCallStats = viewModel::readModelCallStats,
                             onPluginUiQuery = viewModel::queryPluginUi,
                             onPluginUiOwnerCancelled = viewModel::cancelPluginUiOwner,
                             onPluginUiWebViewDisposed = viewModel::disposePluginUiWebView,

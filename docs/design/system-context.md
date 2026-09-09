@@ -146,3 +146,7 @@ Native 的 `RealtimeSession` 在目录确认后请求当前会话尾页，Room �
                    │ 单个连续显示窗口    │
                    └────────────────────┘
 ```
+
+## 模型调用统计
+
+共享 WebUI 以 `call_record_id` 查询已认证连接的 `model.call.get`。Android 原生桥只转发只读结果，用请求 ID 关联回执，并在断线或超时后结束请求；统计数值与显示由 Core 和共享 WebUI 拥有。结果只返回发起的 WebView，不写入 Room。原生 build 79 起提供 `readModelCallStats`。
