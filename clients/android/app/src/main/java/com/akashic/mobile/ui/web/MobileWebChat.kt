@@ -922,6 +922,7 @@ internal fun MobileWebChat(
                     }
                     val bridge = MobileWebBridge(
                         callbackView = newWebView,
+                        isViewCurrent = { webViewOwners.currentView() === currentWebView },
                         isLeaseCurrent = { leaseStillCurrent() },
                         dispatchInternal = { work ->
                             if (leaseStillCurrent() &&
@@ -1433,6 +1434,7 @@ private data class MobileWebCallbacks(
 @Keep
 private class MobileWebBridge(
     private val callbackView: WebView,
+    private val isViewCurrent: () -> Boolean,
     private val isLeaseCurrent: () -> Boolean,
     private val dispatchInternal: ((MobileWebCallbacks) -> Unit) -> Unit,
     private val dispatchSend: (((MobileWebCallbacks) -> Unit), () -> Unit) -> Unit,
@@ -1639,12 +1641,15 @@ private class MobileWebBridge(
 
     private fun reportModelCallStats(requestId: String, result: String) {
         val deliver = Runnable {
+            if (!isViewCurrent()) return@Runnable
             val payload = if (isLeaseCurrent()) result else "{\"error\":\"统计界面已切换\"}"
             callbackView.evaluateJavascript(
                 "window.AkashicMobile?.receiveModelCallStats(${JSONObject.quote(requestId)},$payload)", null,
             )
         }
-        if (!callbackView.post(deliver)) android.os.Handler(android.os.Looper.getMainLooper()).post(deliver)
+        if (!callbackView.post(deliver) && isViewCurrent()) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post(deliver)
+        }
     }
 
     fun readModelCallStats(requestId: String, callId: String) {
