@@ -22,7 +22,7 @@ import org.junit.Test
 
 class MobileWebSnapshotTest {
     @Test
-    fun `serializes complete message log v2 row in snapshot v10`() {
+    fun `serializes complete message log v2 row in snapshot v11`() {
         val body = buildJsonObject {
             put("kind", "output")
             put("finish", "complete")
@@ -100,7 +100,7 @@ class MobileWebSnapshotTest {
         val json = Json.parseToJsonElement(encoded).jsonObject
         val message = json.getValue("messages").jsonArray.single().jsonObject
 
-        assertEquals(10, snapshot.protocolVersion)
+        assertEquals(11, snapshot.protocolVersion)
         assertEquals(9_007_199_254_740_991L, snapshot.throughSeq)
         assertEquals(replyStatus, snapshot.replyStatus)
         assertEquals("artifact-1", snapshot.downloads.single().artifactId)
@@ -231,7 +231,7 @@ class MobileWebSnapshotTest {
     }
 
     @Test
-    fun `empty reply status remains an explicit protocol value`() {
+    fun `missing reply observation clears the preview without declaring the plugin unavailable`() {
         val state = EmptyConversationState.copy(selectedSessionId = "akashic:test")
         val event = requireNotNull(state.toMobileWebReplyEvent())
         val snapshotJson = Json { explicitNulls = false }.encodeToJsonElement(
@@ -239,10 +239,34 @@ class MobileWebSnapshotTest {
             state.toMobileWebSnapshot(),
         ).jsonObject
 
-        assertEquals("false", event.event.getValue("available").jsonPrimitive.content)
-        assertTrue(event.event.getValue("snapshot_id").toString() == "null")
+        assertEquals("reply.clear", event.event.getValue("type").jsonPrimitive.content)
+        assertEquals("akashic:test", event.event.getValue("session_id").jsonPrimitive.content)
+        assertTrue(!event.event.containsKey("available"))
         assertTrue(snapshotJson.containsKey("replyStatus"))
         assertTrue(snapshotJson.getValue("replyStatus").toString() == "null")
+    }
+
+    @Test
+    fun `losing reply observation stays incremental even with long history`() {
+        val status = buildJsonObject {
+            put("type", "reply.status")
+            put("version", 2)
+            put("session_id", "akashic:test")
+            put("snapshot_id", "reply-1")
+            put("available", false)
+            put("items", buildJsonArray {})
+        }
+        val before = EmptyConversationState.copy(
+            selectedSessionId = "akashic:test",
+            projectionGeneration = 9,
+            timelineMessages = listOf(timelineMessage("long-history", 1, "x".repeat(120_367))),
+            replyStatus = status,
+        )
+        assertEquals(status, requireNotNull(before.toMobileWebReplyEvent()).event)
+        val event = requireNotNull(before.copy(replyStatus = null).toMobileWebMessageEvents(before)).single()
+        assertEquals("reply.clear", event.event.getValue("type").jsonPrimitive.content)
+        assertEquals(9L, event.projectionGeneration)
+        assertTrue(Json.encodeToString(event).length < 1_000)
     }
 }
 
