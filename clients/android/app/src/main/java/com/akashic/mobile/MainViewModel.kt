@@ -573,6 +573,9 @@ class MainViewModel(
     fun selectModel(runtimeId: String, reasoningEffort: String) =
         container.realtimeSession.selectModel(runtimeId, reasoningEffort)
 
+    fun readModelCallStats(callId: String, receive: (String) -> Unit) =
+        container.realtimeSession.readModelCallStats(callId, receive)
+
     fun refreshRuntimeInspection() = container.realtimeSession.refreshRuntimeInspection()
 
     fun openRuntimeDocument(documentId: String) =

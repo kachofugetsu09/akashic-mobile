@@ -383,6 +383,7 @@ internal fun MobileWebChat(
     onOpenRuntimeMcp: (String, String) -> Unit,
     onOpenRuntimeJob: (String) -> Unit,
     onClearRuntimeInspectionDetail: () -> Unit,
+    onReadModelCallStats: (String, (String) -> Unit) -> Unit,
     onPluginUiQuery: (
         String,
         String,
@@ -538,6 +539,7 @@ internal fun MobileWebChat(
             onOpenRuntimeMcp = onOpenRuntimeMcp,
             onOpenRuntimeJob = onOpenRuntimeJob,
             onClearRuntimeInspectionDetail = onClearRuntimeInspectionDetail,
+            onReadModelCallStats = onReadModelCallStats,
             onPluginUiQuery = onPluginUiQuery,
             onPluginUiOwnerCancelled = onPluginUiOwnerCancelled,
             onStop = onStop,
@@ -1411,6 +1413,7 @@ private data class MobileWebCallbacks(
     val onOpenRuntimeMcp: (String, String) -> Unit,
     val onOpenRuntimeJob: (String) -> Unit,
     val onClearRuntimeInspectionDetail: () -> Unit,
+    val onReadModelCallStats: (String, (String) -> Unit) -> Unit,
     val onPluginUiQuery: (
         String,
         String,
@@ -1632,6 +1635,26 @@ private class MobileWebBridge(
         it.onClearRuntimeInspectionDetail()
     }
 
+    fun rejectModelCallStats(requestId: String) = reportModelCallStats(requestId, "{\"error\":\"统计界面当前不可用\"}")
+
+    private fun reportModelCallStats(requestId: String, result: String) {
+        val deliver = Runnable {
+            val payload = if (isLeaseCurrent()) result else "{\"error\":\"统计界面已切换\"}"
+            callbackView.evaluateJavascript(
+                "window.AkashicMobile?.receiveModelCallStats(${JSONObject.quote(requestId)},$payload)", null,
+            )
+        }
+        if (!callbackView.post(deliver)) android.os.Handler(android.os.Looper.getMainLooper()).post(deliver)
+    }
+
+    fun readModelCallStats(requestId: String, callId: String) {
+        if (!isLeaseCurrent()) { rejectModelCallStats(requestId); return }
+        dispatchSend(
+            { it.onReadModelCallStats(callId) { result -> reportModelCallStats(requestId, result) } },
+            { rejectModelCallStats(requestId) },
+        )
+    }
+
     fun rejectPluginUiQuery(requestId: String) {
         reportPluginUiError(requestId, "插件界面当前不可用")
     }
@@ -1757,6 +1780,7 @@ private val MOBILE_WEB_TRANSPORT_METHODS = mapOf(
     "openRuntimeMcp" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
     "openRuntimeJob" to listOf(MobileWebTransportArgType.STRING),
     "clearRuntimeInspectionDetail" to emptyList(),
+    "readModelCallStats" to listOf(MobileWebTransportArgType.STRING, MobileWebTransportArgType.STRING),
     "queryPluginUi" to listOf(
         MobileWebTransportArgType.STRING,
         MobileWebTransportArgType.STRING,
@@ -1809,21 +1833,22 @@ private class MobileWebTransportListener(
             return
         }
         if (!mobileWebUiTransportMethodAllowed(envelope.method, candidate) &&
-            envelope.method !in setOf("sendMessage", "queryPluginUi")
+            envelope.method !in setOf("sendMessage", "queryPluginUi", "readModelCallStats")
         ) {
             return
         }
         if (!validateMobileWebTransportArgs(envelope.method, envelope.args)) {
-            if (envelope.method == "sendMessage" || envelope.method == "queryPluginUi") {
+            if (envelope.method in setOf("sendMessage", "queryPluginUi", "readModelCallStats")) {
                 val requestId = (envelope.args.firstOrNull() as? JsonPrimitive)?.contentOrNull
                 if (requestId != null) {
                     if (envelope.method == "sendMessage") bridge.rejectSendMessage(requestId)
+                    else if (envelope.method == "readModelCallStats") bridge.rejectModelCallStats(requestId)
                     else bridge.rejectPluginUiQuery(requestId)
                 }
             }
             return
         }
-        if (!isLeaseCurrent(view) && envelope.method !in setOf("sendMessage", "queryPluginUi")) return
+        if (!isLeaseCurrent(view) && envelope.method !in setOf("sendMessage", "queryPluginUi", "readModelCallStats")) return
         try {
             dispatchMobileWebTransport(view, bridge, envelope)
         } catch (_: IllegalArgumentException) {
@@ -1911,6 +1936,7 @@ private fun dispatchMobileWebTransport(
         "openRuntimeMcp" -> bridge.openRuntimeMcp(string(0), string(1))
         "openRuntimeJob" -> bridge.openRuntimeJob(string(0))
         "clearRuntimeInspectionDetail" -> bridge.clearRuntimeInspectionDetail()
+        "readModelCallStats" -> bridge.readModelCallStats(string(0), string(1))
         "queryPluginUi" -> bridge.queryPluginUi(
             string(0), string(1), string(2), nullableString(3), nullableString(4),
             string(5), string(6), string(7), string(8), string(9),

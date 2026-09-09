@@ -42,6 +42,8 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -421,8 +423,10 @@ class RealtimeSession(
         startHttpQuery = ::startPluginUiHttpQuery,
         send = ::sendPluginUiCommand,
     )
+    private val modelCallStats = ModelCallStatsReader(::sendReadCommand)
+
     val runtimeInspection = RuntimeInspectionCoordinator(
-        ::sendRuntimeInspectionCommand,
+        ::sendReadCommand,
     )
     val modelCatalog = ModelCatalogCoordinator(::sendModelCatalogCommand)
     private val started = AtomicBoolean(false)
@@ -953,6 +957,23 @@ class RealtimeSession(
             replyToMessageId = null,
             targetSessionId = null,
         )
+    }
+
+    /** 通过当前认证连接读取一次统计；断线和超时都结束该请求。 */
+    fun readModelCallStats(callId: String, receive: (String) -> Unit) {
+        scope.launch {
+            var requestId: String? = null
+            val result = try {
+                withTimeoutOrNull(10_000) {
+                    val response = CompletableDeferred<kotlinx.serialization.json.JsonObject>()
+                    mutex.withLock { requestId = modelCallStats.read(callId) { response.complete(it) } }
+                    response.await()
+                } ?: ModelCallStatsReader.error("统计查询超时")
+            } finally {
+                mutex.withLock { modelCallStats.forget(requestId) }
+            }
+            receive(result.toString())
+        }
     }
 
     fun refreshRuntimeInspection() {
@@ -1978,6 +1999,7 @@ class RealtimeSession(
                 if (messageDownloads.onReply(envelope)) return
                 if (pluginUi.onReply(envelope)) return
                 if (mobileWebUi.onReply(envelope)) return
+                if (modelCallStats.onReply(envelope)) return
                 if (modelCatalog.onReply(envelope)) return
                 if (runtimeInspection.onReply(envelope)) return
                 val id = requireNotNull(envelope.id)
@@ -2259,7 +2281,7 @@ class RealtimeSession(
         return commandId
     }
 
-    private fun sendRuntimeInspectionCommand(
+    private fun sendReadCommand(
         type: String,
         payload: kotlinx.serialization.json.JsonObject,
     ): String? {
@@ -2278,7 +2300,7 @@ class RealtimeSession(
             ),
         )
         if (!sent) {
-            scheduleReconnect("运行时检查命令未进入 WebSocket 队列: $type")
+            scheduleReconnect("只读命令未进入 WebSocket 队列: $type")
             return null
         }
         return commandId
@@ -2563,6 +2585,7 @@ class RealtimeSession(
         pendingSessionCreateId = null
         pluginUi.onDisconnected("服务端要求重新同步")
         runtimeInspection.onDisconnected()
+        modelCallStats.onDisconnected()
         modelCatalog.onDisconnected()
         followingAfterSeq.clear()
         followedSessionId = null
@@ -2943,6 +2966,7 @@ class RealtimeSession(
         pendingFollow = null
         pluginUi.onDisconnected("连接已中断")
         runtimeInspection.onDisconnected()
+        modelCallStats.onDisconnected()
         modelCatalog.onDisconnected()
         followingAfterSeq.clear()
         followedSessionId = null
@@ -3007,6 +3031,7 @@ class RealtimeSession(
         pendingSessionCreateId = null
         pluginUi.onDisconnected("设备配对已撤销")
         runtimeInspection.onDisconnected()
+        modelCallStats.onDisconnected()
         modelCatalog.onDisconnected()
         mutableState.value = mutableState.value.copy(
             connection = mutableState.value.connection.copy(
@@ -3070,6 +3095,7 @@ class RealtimeSession(
         pendingSessionCreateId = null
         pluginUi.onDisconnected("协议不兼容")
         runtimeInspection.onDisconnected()
+        modelCallStats.onDisconnected()
         modelCatalog.onDisconnected()
         followingAfterSeq.clear()
         followedSessionId = null
@@ -3171,6 +3197,7 @@ class RealtimeSession(
         messageDownloads.onDisconnected()
         pluginUi.onDisconnected("连接已重置")
         runtimeInspection.onDisconnected()
+        modelCallStats.onDisconnected()
         modelCatalog.onDisconnected()
         mobileWebUi.onDisconnected()
     }
