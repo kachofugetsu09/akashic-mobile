@@ -102,6 +102,8 @@ embedded baseline 没有远端 generation，`generationRef=null` 本身就是它
 
 旧 durable Turn 事件只推进事件 ACK，不再生成正文或可见流式投影。此前按 delta 次数和 `assistant:<turn_id>` DOM 节点测量渲染频率的设备性能用例已删除；当前设备 Gate 只验收 `reply.status` 的生成状态与 `messages.appended` 提交的完整 Message。
 
+Native→WebUI 在断线、等待订阅或查看历史时发送 `reply.clear`，绑定当前 session 和 projection generation，只清除临时观察。服务端明确发送的 `reply.status.available=false` 原样保留，不能由原生的空观察合成。这个清除事件属于本地桥，不进入服务端 Message 协议；build 80 的 embedded WebUI 与该合同一起发布。
+
 单条 Message JSON 超过 WebSocket 事件预算时，历史页只携带 `message_ref` 的版本、长度和摘要。客户端先保存不进入 UI 的 restoring 行和持久传输 owner，通过 WebSocket 申请与当前设备、连接和 Message 绑定的短期 ticket，再从同源 HTTPS Range route 分段写入私有文件。每段先落盘后推进 Room 偏移；只有完整长度、SHA-256、UTF-8、Message 身份、Session 和 `seq` 全部匹配，才原子提交整条 Message 并删除传输 owner。部分正文、预览或并行 block 不构成第二份消息事实。
 
 ```text

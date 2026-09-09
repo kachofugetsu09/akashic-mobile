@@ -362,16 +362,12 @@ fun ConversationUiState.toMobileWebMessageEvents(previous: ConversationUiState):
     }
 }
 
-/** 断线或等待订阅时显式清除临时草稿，不伪造已提交 Message。 */
+/** 断线或等待订阅时清除观察，不把未知状态报告成服务端插件缺失。 */
 fun ConversationUiState.toMobileWebReplyEvent(): MobileWebMessageEvent? {
     val sessionId = selectedSessionId ?: return null
     return MobileWebMessageEvent(1, projectionGeneration, replyStatus ?: buildJsonObject {
-        put("type", "reply.status")
-        put("version", 2)
+        put("type", "reply.clear")
         put("session_id", sessionId)
-        put("snapshot_id", JsonNull)
-        put("available", false)
-        put("items", JsonArray(emptyList()))
     })
 }
 
