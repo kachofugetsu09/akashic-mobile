@@ -486,8 +486,11 @@ class LocalDeliveryStore(
                         database.messageContentTransfers().get(message.messageId) != null
                 ) { "Saved Input has invalid restoring state" }
             } else {
-                require(message.role == "user") {
-                    "Canonical Input has invalid delivery state"
+                // /stop 等发送可提交为 Control；ACK 仍结算同一个 Message ID。
+                val kind = ProtocolCodec.json().parseToJsonElement(message.bodyJson)
+                    .jsonObject["kind"]?.jsonPrimitive?.contentOrNull
+                require(kind == "input" || kind == "control") {
+                    "Acknowledged Message must be Input or Control"
                 }
             }
             if (payload.mediaRefs.isNotEmpty()) {

@@ -56,7 +56,7 @@
 - 增加：发送、编辑草稿、接收最终通知、请求停止和准备附件时创建记录。
 - 更新：owner 通过 Message ID 条件 UPDATE 推进 pending、in-flight、retry、failed、unknown、sent 或消费状态。明确拒绝保留 Message 正文并结束 outbox；再次发送创建新 Message。结果未知仍复用原 ID，原附件继续处于 sending，不返回编辑器。
 - 逻辑失效：明确 ack、可证明终态、用户消费或用户放弃后才进入可清理状态。
-- 物理删除：outbox 在 ACK、完整远端 Input 成功证据或明确拒绝后删除；Room v19 还结束旧 failed/failed_retryable outbox 并保留对应正文与附件；后者是一次性补结算，防止 failed/outcome-unknown outbox 成为孤儿。通知在系统发布成功或策略明确抑制后消费；stop 在确定完成后删除；草稿和待办由对应用户动作删除。
+- 物理删除：outbox 在 ACK、完整远端 Input 成功证据或明确拒绝后删除；同 ID 的发送也可能提交为 Control（如 `/stop` 的 pause），ACK 接受已完整提交的 Input 或 Control，并保留其原消息事实；Room v19 还结束旧 failed/failed_retryable outbox 并保留对应正文与附件；后者是一次性补结算，防止 failed/outcome-unknown outbox 成为孤儿。通知在系统发布成功或策略明确抑制后消费；stop 在确定完成后删除；草稿和待办由对应用户动作删除。
 - 恢复：应用启动重置不确定的 in-flight 状态并重放；不能从服务端重建未发送意图。
 
 ### 上传附件与系统分享
